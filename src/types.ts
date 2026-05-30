@@ -62,6 +62,14 @@ export interface ToolAction {
   approval_level?: string;
 }
 
+export interface SearchStatus {
+  type: "searching" | "results" | "error";
+  query: string;
+  results?: string;
+  message?: string;
+  duration?: number;
+}
+
 export interface Message {
   role: "user" | "assistant" | "system" | "context_divider";
   content: string;
@@ -70,6 +78,7 @@ export interface Message {
   variants?: string[];
   currentVariantIndex?: number;
   timestamp?: number;
+  searchStatus?: SearchStatus[];
 }
 
 export interface ChatSession {

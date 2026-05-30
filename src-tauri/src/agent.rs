@@ -130,7 +130,11 @@ pub async fn start_agent_loop(
     session_messages: Vec<Value>,
     session_mode: String,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
 
     if session_mode == "chat" {
         return run_chat_mode(window, client, user_prompt, config, session_messages).await;
@@ -171,9 +175,15 @@ async fn run_chat_mode(
     config: AppConfig,
     session_messages: Vec<Value>,
 ) -> Result<(), String> {
+    let chat_system_prompt = if config.system_prompt.contains("PowerShell") || config.system_prompt.contains("Windows PowerShell") {
+        "You are a helpful AI assistant. You can search the web when needed to provide up-to-date information. Be concise, friendly, and helpful. Respond in the same language the user uses.".to_string()
+    } else {
+        config.system_prompt.clone()
+    };
+
     let mut messages: Vec<Value> = vec![json!({
         "role": "system",
-        "content": config.system_prompt
+        "content": chat_system_prompt
     })];
 
     let limit = config.context_limit as usize;
@@ -294,7 +304,16 @@ async fn run_chat_mode(
                     let tool_name = tool_call["function"]["name"].as_str().unwrap_or("").to_string();
                     let tool_args = tool_call["function"]["arguments"].as_str().unwrap_or("{}").to_string();
 
-                    let _ = window.emit("agent-stream-chunk", &format!("🔍 {}...\n", tool_name));
+                    let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tool_args) {
+                        args["query"].as_str().unwrap_or(&tool_name).to_string()
+                    } else {
+                        tool_name.clone()
+                    };
+                    let _ = window.emit("agent-search-status", json!({
+                        "type": "searching",
+                        "query": query_display,
+                    }));
+                    let search_start = std::time::Instant::now();
 
                     let tool_output = execute_tool_with_timeout(
                         &tool_name,
@@ -305,7 +324,23 @@ async fn run_chat_mode(
                         config.command_timeout,
                     ).await;
 
-                    let _ = window.emit("agent-stream-chunk", &format!("📋 {}\n\n", &tool_output[..tool_output.len().min(500)]));
+                    let search_elapsed = search_start.elapsed().as_secs_f64();
+                    if tool_output.starts_with("Error:") {
+                        let _ = window.emit("agent-search-status", json!({
+                            "type": "error",
+                            "query": query_display,
+                            "message": tool_output,
+                            "duration": search_elapsed,
+                        }));
+                    } else {
+                        let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                        let _ = window.emit("agent-search-status", json!({
+                            "type": "results",
+                            "query": query_display,
+                            "results": preview,
+                            "duration": search_elapsed,
+                        }));
+                    }
 
                     messages.push(json!({
                         "role": "assistant",
@@ -343,14 +378,115 @@ async fn run_chat_mode(
                         let final_content = followup_body["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
                         let _ = window.emit("agent-stream-chunk", &final_content);
                         let _ = window.emit("agent-stream-done", json!({
-                            "content": format!("🔍 {}...\n📋 {}\n\n{}", tool_name, &tool_output[..tool_output.len().min(200)], final_content),
+                            "content": final_content,
                             "loopCount": 2,
                             "ttftMs": request_start.elapsed().as_millis() as u64,
                             "responseTimeMs": request_start.elapsed().as_millis() as u64,
                         }));
                     } else {
                         let _ = window.emit("agent-stream-done", json!({
-                            "content": format!("🔍 {}...\n📋 {}", tool_name, &tool_output[..tool_output.len().min(500)]),
+                            "content": content,
+                            "loopCount": 1,
+                            "ttftMs": request_start.elapsed().as_millis() as u64,
+                            "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                        }));
+                    }
+                    let _ = window.emit("agent-complete", "success");
+                    return Ok(());
+                }
+            }
+
+            // DSML-format tool calls (DeepSeek models)
+            if content.contains("DSML") {
+                let dsml_calls = parse_dsml_tool_calls(&content);
+                if !dsml_calls.is_empty() {
+                    eprintln!("[agent] Non-streaming: detected {} DSML tool call(s)", dsml_calls.len());
+                    let clean_content = strip_dsml_tags(&content);
+
+                    for tc in &dsml_calls {
+                        let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
+                            args["query"].as_str().unwrap_or(&tc.name).to_string()
+                        } else {
+                            tc.name.clone()
+                        };
+                        let _ = window.emit("agent-search-status", json!({
+                            "type": "searching",
+                            "query": query_display,
+                        }));
+                        let search_start = std::time::Instant::now();
+
+                        let tool_output = execute_tool_with_timeout(
+                            &tc.name,
+                            &tc.arguments,
+                            &config.default_work_dir,
+                            &config.search_provider,
+                            &config.search_api_key,
+                            config.command_timeout,
+                        ).await;
+
+                        let search_elapsed = search_start.elapsed().as_secs_f64();
+                        if tool_output.starts_with("Error:") {
+                            let _ = window.emit("agent-search-status", json!({
+                                "type": "error",
+                                "query": query_display,
+                                "message": tool_output.clone(),
+                                "duration": search_elapsed,
+                            }));
+                        } else {
+                            let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                            let _ = window.emit("agent-search-status", json!({
+                                "type": "results",
+                                "query": query_display,
+                                "results": preview,
+                                "duration": search_elapsed,
+                            }));
+                        }
+
+                        messages.push(json!({
+                            "role": "assistant",
+                            "content": if clean_content.is_empty() { Value::Null } else { json!(clean_content) },
+                            "tool_calls": [{ "id": tc.id, "type": "function", "function": { "name": tc.name, "arguments": tc.arguments } }]
+                        }));
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": tool_output
+                        }));
+                    }
+
+                    let mut followup_body = json!({
+                        "model": config.model,
+                        "messages": messages,
+                        "stream": false,
+                    });
+                    if let Some(max_tokens) = config.max_tokens {
+                        followup_body["max_tokens"] = json!(max_tokens);
+                    }
+                    followup_body["temperature"] = json!(config.temperature);
+                    followup_body["top_p"] = json!(config.top_p);
+
+                    let followup_response = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .header("Authorization", format!("Bearer {}", config.api_key))
+                        .json(&followup_body)
+                        .send()
+                        .await
+                        .map_err(|e| format!("Follow-up request failed: {}", e))?;
+
+                    if followup_response.status().is_success() {
+                        let fb: Value = followup_response.json().await.map_err(|e| format!("Parse error: {}", e))?;
+                        let final_content = fb["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+                        let _ = window.emit("agent-stream-chunk", &final_content);
+                        let _ = window.emit("agent-stream-done", json!({
+                            "content": final_content,
+                            "loopCount": 2,
+                            "ttftMs": request_start.elapsed().as_millis() as u64,
+                            "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                        }));
+                    } else {
+                        let _ = window.emit("agent-stream-done", json!({
+                            "content": clean_content,
                             "loopCount": 1,
                             "ttftMs": request_start.elapsed().as_millis() as u64,
                             "responseTimeMs": request_start.elapsed().as_millis() as u64,
@@ -376,6 +512,9 @@ async fn run_chat_mode(
     let mut assistant_content = String::new();
     let mut first_content_received = false;
     let mut ttft_ms: Option<u64> = None;
+    let mut accumulated_tool_calls: Vec<AccumulatedToolCall> = Vec::new();
+    let mut dsml_buffering = false;
+    let mut dsml_buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
@@ -396,18 +535,33 @@ async fn run_chat_mode(
                             ttft_ms = Some(request_start.elapsed().as_millis() as u64);
                         }
                         assistant_content.push_str(content);
-                        let _ = window.emit("agent-stream-chunk", content);
+                        if content.contains("DSML") || dsml_buffering {
+                            eprintln!("[agent] DSML buffering: chunk contains DSML={}", content.contains("DSML"));
+                            dsml_buffering = true;
+                            dsml_buffer.push_str(content);
+                        } else {
+                            let _ = window.emit("agent-stream-chunk", content);
+                        }
                     }
                 }
                 if json_val["done"].as_bool() == Some(true) {
-                    let _ = window.emit("agent-stream-done", json!({
-                        "content": assistant_content,
-                        "loopCount": 1,
-                        "ttftMs": ttft_ms.unwrap_or(0),
-                        "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                    }));
-                    let _ = window.emit("agent-complete", "success");
-                    return Ok(());
+                    if has_web_search && !is_ollama {
+                        if let Some(tool_calls) = json_val["message"]["tool_calls"].as_array() {
+                            if !tool_calls.is_empty() {
+                                for tc in tool_calls {
+                                    let tc_id = tc["id"].as_str().unwrap_or("").to_string();
+                                    let tc_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                                    let tc_args = tc["function"]["arguments"].as_str().unwrap_or("{}").to_string();
+                                    accumulated_tool_calls.push(AccumulatedToolCall {
+                                        id: tc_id,
+                                        name: tc_name,
+                                        arguments: tc_args,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    break;
                 }
             }
         } else {
@@ -416,14 +570,7 @@ async fn run_chat_mode(
                 if !line.starts_with("data: ") { continue; }
                 let data = &line[6..];
                 if data == "[DONE]" {
-                    let _ = window.emit("agent-stream-done", json!({
-                        "content": assistant_content,
-                        "loopCount": 1,
-                        "ttftMs": ttft_ms.unwrap_or(0),
-                        "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                    }));
-                    let _ = window.emit("agent-complete", "success");
-                    return Ok(());
+                    break;
                 }
                 let json_val: Value = match serde_json::from_str(data) {
                     Ok(v) => v,
@@ -436,11 +583,383 @@ async fn run_chat_mode(
                             ttft_ms = Some(request_start.elapsed().as_millis() as u64);
                         }
                         assistant_content.push_str(content);
-                        let _ = window.emit("agent-stream-chunk", content);
+                        if content.contains("DSML") || dsml_buffering {
+                            dsml_buffering = true;
+                            dsml_buffer.push_str(content);
+                        } else {
+                            let _ = window.emit("agent-stream-chunk", content);
+                        }
+                    }
+                }
+                if has_web_search {
+                    if let Some(delta_tool_calls) = json_val["choices"][0]["delta"]["tool_calls"].as_array() {
+                        for dtc in delta_tool_calls {
+                            let idx = dtc["index"].as_u64().unwrap_or(0) as usize;
+                            while accumulated_tool_calls.len() <= idx {
+                                accumulated_tool_calls.push(AccumulatedToolCall {
+                                    id: String::new(),
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                });
+                            }
+                            if let Some(id) = dtc["id"].as_str() {
+                                accumulated_tool_calls[idx].id = id.to_string();
+                            }
+                            if let Some(name) = dtc["function"]["name"].as_str() {
+                                accumulated_tool_calls[idx].name = name.to_string();
+                            }
+                            if let Some(args) = dtc["function"]["arguments"].as_str() {
+                                accumulated_tool_calls[idx].arguments.push_str(args);
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Detect DSML-format tool calls (DeepSeek models)
+    if accumulated_tool_calls.is_empty() && dsml_buffering {
+        eprintln!("[agent] DSML buffering ended, parsing tool calls from {} bytes", assistant_content.len());
+        let dsml_calls = parse_dsml_tool_calls(&assistant_content);
+        if !dsml_calls.is_empty() {
+            eprintln!("[agent] Detected {} DSML tool call(s)", dsml_calls.len());
+            let clean_content = strip_dsml_tags(&assistant_content);
+            let buffer_clean = strip_dsml_tags(&dsml_buffer);
+            if !buffer_clean.trim().is_empty() {
+                let _ = window.emit("agent-stream-chunk", &buffer_clean);
+            }
+            if has_web_search {
+                accumulated_tool_calls = dsml_calls;
+            }
+            assistant_content = clean_content;
+        } else {
+            eprintln!("[agent] DSML detected but no tool calls parsed, sending cleaned content");
+            let clean_content = strip_dsml_tags(&assistant_content);
+            if !clean_content.trim().is_empty() {
+                let _ = window.emit("agent-stream-chunk", &clean_content);
+            }
+            assistant_content = clean_content;
+        }
+    }
+
+    if has_web_search && !accumulated_tool_calls.is_empty() {
+        let mut tool_results: Vec<Value> = Vec::new();
+        for tc in &accumulated_tool_calls {
+            if tc.name != "web_search" {
+                eprintln!("[agent] Skipping unsupported DSML tool: {}", tc.name);
+                tool_results.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": format!("Error: Tool '{}' is not available. Only web_search is supported. Please answer based on the information you already have.", tc.name)
+                }));
+                continue;
+            }
+            let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
+                args["query"].as_str().unwrap_or("").to_string()
+            } else {
+                tc.name.clone()
+            };
+            let _ = window.emit("agent-search-status", json!({
+                "type": "searching",
+                "query": query_display,
+            }));
+            let search_start = std::time::Instant::now();
+            let tool_output = execute_tool_with_timeout(
+                &tc.name,
+                &tc.arguments,
+                &config.default_work_dir,
+                &config.search_provider,
+                &config.search_api_key,
+                config.command_timeout,
+            ).await;
+            let search_elapsed = search_start.elapsed();
+            eprintln!("[agent] Search '{}' completed in {:.1}s, result length: {}", query_display, search_elapsed.as_secs_f64(), tool_output.len());
+            if tool_output.starts_with("Error:") {
+                let _ = window.emit("agent-search-status", json!({
+                    "type": "error",
+                    "query": query_display,
+                    "message": tool_output,
+                    "duration": search_elapsed.as_secs_f64(),
+                }));
+            } else {
+                let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                let _ = window.emit("agent-search-status", json!({
+                    "type": "results",
+                    "query": query_display,
+                    "results": preview,
+                    "duration": search_elapsed.as_secs_f64(),
+                }));
+            }
+            tool_results.push(json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": tool_output
+            }));
+        }
+
+        messages.push(json!({
+            "role": "assistant",
+            "content": if assistant_content.is_empty() { Value::Null } else { json!(assistant_content) },
+            "tool_calls": accumulated_tool_calls.iter().map(|tc| {
+                json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments
+                    }
+                })
+            }).collect::<Vec<_>>()
+        }));
+        for tr in &tool_results {
+            messages.push(tr.clone());
+        }
+
+        let mut followup_body = json!({
+            "model": config.model,
+            "messages": messages,
+            "stream": true,
+            "stream_options": {
+                "include_usage": true
+            }
+        });
+        if let Some(max_tokens) = config.max_tokens {
+            followup_body["max_tokens"] = json!(max_tokens);
+        }
+        followup_body["temperature"] = json!(config.temperature);
+        followup_body["top_p"] = json!(config.top_p);
+
+        let followup_response = match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", config.api_key))
+            .json(&followup_body)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                let _ = window.emit("agent-stream-chunk", &format!("\n❌ Follow-up request failed: {}\n", e));
+                let _ = window.emit("agent-stream-done", json!({
+                    "content": format!("🔍 Search completed but follow-up failed: {}", e),
+                    "loopCount": 1,
+                    "ttftMs": ttft_ms.unwrap_or(0),
+                    "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                }));
+                let _ = window.emit("agent-complete", "success");
+                return Ok(());
+            }
+        };
+
+        if !followup_response.status().is_success() {
+            let status = followup_response.status();
+            let error_text = followup_response.text().await.unwrap_or_default();
+            let _ = window.emit("agent-stream-chunk", &format!("\n❌ Follow-up API error ({}): {}\n", status, &error_text[..error_text.len().min(300)]));
+            let _ = window.emit("agent-stream-done", json!({
+                "content": format!("🔍 Search completed but follow-up failed ({}): {}", status, error_text),
+                "loopCount": 1,
+                "ttftMs": ttft_ms.unwrap_or(0),
+                "responseTimeMs": request_start.elapsed().as_millis() as u64,
+            }));
+            let _ = window.emit("agent-complete", "success");
+            return Ok(());
+        }
+
+        let mut followup_stream = followup_response.bytes_stream();
+        let mut followup_content = String::new();
+        let mut followup_dsml_buffering = false;
+        let mut followup_dsml_buffer = String::new();
+
+        while let Some(chunk) = followup_stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = window.emit("agent-stream-chunk", &format!("\n❌ Stream error: {}\n", e));
+                    break;
+                }
+            };
+            let text = String::from_utf8_lossy(&chunk);
+            for line in text.lines() {
+                let line = line.trim();
+                if !line.starts_with("data: ") { continue; }
+                let data = &line[6..];
+                if data == "[DONE]" { break; }
+                let json_val: Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let Some(content) = json_val["choices"][0]["delta"]["content"].as_str() {
+                    if !content.is_empty() {
+                        followup_content.push_str(content);
+                        if content.contains("DSML") || followup_dsml_buffering {
+                            followup_dsml_buffering = true;
+                            followup_dsml_buffer.push_str(content);
+                        } else {
+                            let _ = window.emit("agent-stream-chunk", content);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle DSML in follow-up response
+        if followup_dsml_buffering {
+            let dsml_calls = parse_dsml_tool_calls(&followup_content);
+            let clean_content = strip_dsml_tags(&followup_content);
+            let buffer_clean = strip_dsml_tags(&followup_dsml_buffer);
+            if !buffer_clean.trim().is_empty() {
+                let _ = window.emit("agent-stream-chunk", &buffer_clean);
+            }
+            followup_content = clean_content;
+
+            if !dsml_calls.is_empty() && has_web_search {
+                eprintln!("[agent] Follow-up: detected {} DSML tool call(s)", dsml_calls.len());
+                let mut tool_results: Vec<Value> = Vec::new();
+                for tc in &dsml_calls {
+                    if tc.name != "web_search" {
+                        eprintln!("[agent] Skipping unsupported DSML tool: {}", tc.name);
+                        tool_results.push(json!({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": format!("Error: Tool '{}' is not available. Only web_search is supported.", tc.name)
+                        }));
+                        continue;
+                    }
+                    let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
+                        args["query"].as_str().unwrap_or(&tc.name).to_string()
+                    } else {
+                        tc.name.clone()
+                    };
+                    let _ = window.emit("agent-search-status", json!({
+                        "type": "searching",
+                        "query": query_display,
+                    }));
+                    let search_start = std::time::Instant::now();
+                    let tool_output = execute_tool_with_timeout(
+                        &tc.name,
+                        &tc.arguments,
+                        &config.default_work_dir,
+                        &config.search_provider,
+                        &config.search_api_key,
+                        config.command_timeout,
+                    ).await;
+                    let search_elapsed = search_start.elapsed().as_secs_f64();
+                    if tool_output.starts_with("Error:") {
+                        let _ = window.emit("agent-search-status", json!({
+                            "type": "error",
+                            "query": query_display,
+                            "message": tool_output.clone(),
+                            "duration": search_elapsed,
+                        }));
+                    } else {
+                        let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                        let _ = window.emit("agent-search-status", json!({
+                            "type": "results",
+                            "query": query_display,
+                            "results": preview,
+                            "duration": search_elapsed,
+                        }));
+                    }
+                    tool_results.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tool_output
+                    }));
+                }
+
+                if !tool_results.is_empty() {
+                    messages.push(json!({
+                        "role": "assistant",
+                        "content": if followup_content.is_empty() { Value::Null } else { json!(followup_content) },
+                    }));
+                    for tr in &tool_results {
+                        messages.push(tr.clone());
+                    }
+
+                    let mut second_followup_body = json!({
+                        "model": config.model,
+                        "messages": messages,
+                        "stream": true,
+                    });
+                    if let Some(max_tokens) = config.max_tokens {
+                        second_followup_body["max_tokens"] = json!(max_tokens);
+                    }
+                    second_followup_body["temperature"] = json!(config.temperature);
+                    second_followup_body["top_p"] = json!(config.top_p);
+
+                    let second_followup_response = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .header("Authorization", format!("Bearer {}", config.api_key))
+                        .json(&second_followup_body)
+                        .send()
+                        .await
+                        .map_err(|e| format!("Second follow-up request failed: {}", e))?;
+
+                    if second_followup_response.status().is_success() {
+                        let mut second_stream = second_followup_response.bytes_stream();
+                        let mut second_content = String::new();
+                        let mut second_dsml_buffering = false;
+                        let mut second_dsml_buffer = String::new();
+
+                        while let Some(chunk) = second_stream.next().await {
+                            let chunk = match chunk {
+                                Ok(c) => c,
+                                Err(_) => break,
+                            };
+                            let text = String::from_utf8_lossy(&chunk);
+                            for line in text.lines() {
+                                let line = line.trim();
+                                if !line.starts_with("data: ") { continue; }
+                                let data = &line[6..];
+                                if data == "[DONE]" { break; }
+                                let json_val: Value = match serde_json::from_str(data) {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
+                                };
+                                if let Some(content) = json_val["choices"][0]["delta"]["content"].as_str() {
+                                    if !content.is_empty() {
+                                        second_content.push_str(content);
+                                        if content.contains("DSML") || second_dsml_buffering {
+                                            second_dsml_buffering = true;
+                                            second_dsml_buffer.push_str(content);
+                                        } else {
+                                            let _ = window.emit("agent-stream-chunk", content);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if second_dsml_buffering {
+                            let clean = strip_dsml_tags(&second_dsml_buffer);
+                            if !clean.trim().is_empty() {
+                                let _ = window.emit("agent-stream-chunk", &clean);
+                            }
+                        }
+
+                        let _ = window.emit("agent-stream-done", json!({
+                            "content": second_content,
+                            "loopCount": 3,
+                            "ttftMs": ttft_ms.unwrap_or(0),
+                            "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                        }));
+                        let _ = window.emit("agent-complete", "success");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        let _ = window.emit("agent-stream-done", json!({
+            "content": followup_content,
+            "loopCount": 2,
+            "ttftMs": ttft_ms.unwrap_or(0),
+            "responseTimeMs": request_start.elapsed().as_millis() as u64,
+        }));
+        let _ = window.emit("agent-complete", "success");
+        return Ok(());
     }
 
     let _ = window.emit("agent-stream-done", json!({
@@ -1167,7 +1686,11 @@ pub async fn resolve_approval(
 
 /// Fetch available models from an OpenAI-compatible API
 pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
 
     let mut request = client
@@ -1203,4 +1726,107 @@ pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, S
         .collect();
 
     Ok(models)
+}
+
+fn parse_dsml_tool_calls(content: &str) -> Vec<AccumulatedToolCall> {
+    let mut calls = Vec::new();
+    let dsml_close = "\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}";
+    let invoke_open = format!("<{}invoke name=\"", dsml_close);
+    let invoke_close = format!("</{}invoke>", dsml_close);
+    let param_open = format!("<{}parameter name=\"", dsml_close);
+    let param_close = format!("</{}parameter>", dsml_close);
+
+    let mut pos = 0;
+    while let Some(start) = content[pos..].find(&invoke_open) {
+        let abs_start = pos + start;
+        let name_start = abs_start + invoke_open.len();
+        if let Some(name_end) = content[name_start..].find('"') {
+            let name = content[name_start..name_start + name_end].to_string();
+            let mut args = serde_json::Map::new();
+
+            let invoke_body_start = name_start + name_end + 1;
+            if let Some(invoke_end_offset) = content[invoke_body_start..].find(&invoke_close) {
+                let body = &content[invoke_body_start..invoke_body_start + invoke_end_offset];
+
+                let mut param_pos = 0;
+                while let Some(p_start) = body[param_pos..].find(&param_open) {
+                    let abs_p = param_pos + p_start;
+                    let pname_start = abs_p + param_open.len();
+                    if let Some(pname_end) = body[pname_start..].find('"') {
+                        let pname = body[pname_start..pname_start + pname_end].to_string();
+                        let after_name = pname_start + pname_end;
+                        if let Some(gt_pos) = body[after_name..].find('>') {
+                            let val_start = after_name + gt_pos + 1;
+                            if let Some(pc_offset) = body[val_start..].find(&param_close) {
+                                let val_end = val_start + pc_offset;
+                                if val_end > val_start {
+                                    let pval = body[val_start..val_end].to_string();
+                                    args.insert(pname, json!(pval));
+                                }
+                            }
+                        }
+                        param_pos = pname_start + pname_end + 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            calls.push(AccumulatedToolCall {
+                id: format!("dsml_{}", calls.len()),
+                name,
+                arguments: serde_json::Value::Object(args).to_string(),
+            });
+
+            pos = name_start + name_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    calls
+}
+
+fn strip_dsml_tags(content: &str) -> String {
+    let dsml_close = "\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}";
+    let mut result = content.to_string();
+
+    // Remove complete DSML tag blocks: <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls>
+    let tc_open = format!("<{}tool_calls>", dsml_close);
+    let tc_close = format!("</{}tool_calls>", dsml_close);
+    loop {
+        if let Some(start) = result.find(&tc_open) {
+            if let Some(end) = result[start..].find(&tc_close) {
+                result.replace_range(start..start + end + tc_close.len(), "");
+            } else {
+                result.replace_range(start.., "");
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Remove any remaining DSML fragments
+    let fragments = [
+        format!("<{}tool_calls>", dsml_close),
+        format!("</{}tool_calls>", dsml_close),
+        format!("<{}invoke", dsml_close),
+        format!("</{}invoke>", dsml_close),
+        format!("<{}parameter", dsml_close),
+        format!("</{}parameter>", dsml_close),
+    ];
+    for frag in &fragments {
+        result = result.replace(frag, "");
+    }
+
+    // Remove lines that are only DSML residue (contain DSML markers but no useful content)
+    let cleaned: Vec<&str> = result
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.contains("DSML")
+        })
+        .collect();
+    cleaned.join("\n").trim().to_string()
 }

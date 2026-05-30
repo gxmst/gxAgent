@@ -27,7 +27,18 @@ async fn start_agent_session(
     session_mode: Option<String>,
 ) -> Result<(), String> {
     let mode = session_mode.unwrap_or_else(|| "chat".to_string());
-    agent::start_agent_loop(window, prompt, config, session_messages, mode).await
+    let result = agent::start_agent_loop(window.clone(), prompt, config, session_messages, mode).await;
+    if let Err(ref e) = result {
+        let _ = window.emit("agent-stream-chunk", format!("\n❌ Error: {}\n", e));
+        let _ = window.emit("agent-stream-done", json!({
+            "content": format!("Error: {}", e),
+            "loopCount": 0,
+            "ttftMs": 0,
+            "responseTimeMs": 0,
+        }));
+        let _ = window.emit("agent-complete", "error");
+    }
+    result
 }
 
 /// Resolve a pending tool approval request from the frontend

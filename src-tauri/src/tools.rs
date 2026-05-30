@@ -164,9 +164,11 @@ pub async fn execute_tool_with_timeout(name: &str, args_str: &str, work_dir: &st
         }
         "web_search" => {
             let query = args["query"].as_str().unwrap_or("");
-            match run_web_search(query, search_provider, search_api_key).await {
-                Ok(out) => out,
-                Err(e) => format!("Error: {}", e),
+            let search_timeout = std::time::Duration::from_secs(timeout_secs.min(20));
+            match tokio::time::timeout(search_timeout, run_web_search(query, search_provider, search_api_key)).await {
+                Ok(Ok(out)) => out,
+                Ok(Err(e)) => format!("Error: {}", e),
+                Err(_) => format!("Error: Search timed out after {}s. DuckDuckGo may be blocked in your network — consider using Tavily API instead.", search_timeout.as_secs()),
             }
         }
         _ => format!("Unknown tool: {}", name),
@@ -360,12 +362,30 @@ async fn run_web_search(query: &str, provider: &str, api_key: &str) -> Result<St
             }
             run_tavily_search(query, api_key).await
         }
-        _ => run_duckduckgo_search(query).await,
+        "searxng" => run_searxng_search(query).await,
+        _ => {
+            let ddg_timeout = std::time::Duration::from_secs(8);
+            match tokio::time::timeout(ddg_timeout, run_duckduckgo_search(query)).await {
+                Ok(Ok(results)) => Ok(results),
+                Ok(Err(e)) => {
+                    eprintln!("[search] DuckDuckGo failed: {}, falling back to SearXNG", e);
+                    run_searxng_search(query).await
+                }
+                Err(_) => {
+                    eprintln!("[search] DuckDuckGo timed out after 8s, falling back to SearXNG");
+                    run_searxng_search(query).await
+                }
+            }
+        }
     }
 }
 
 async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
     let response = client
         .post("https://api.tavily.com/search")
         .json(&json!({
@@ -411,6 +431,61 @@ async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String>
     Ok("No results found.".to_string())
 }
 
+async fn run_searxng_search(query: &str) -> Result<String, String> {
+    let instances = [
+        "https://searx.be",
+        "https://search.sapti.me",
+        "https://searxng.ch",
+    ];
+
+    let client = reqwest::Client::builder()
+        .user_agent(GXAGENT_UA)
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let encoded = urlencoding::encode(query);
+
+    for instance in &instances {
+        let url = format!("{}/search?q={}&format=json&categories=general", instance, encoded);
+        match client.get(&url).send().await {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    continue;
+                }
+                match response.json::<Value>().await {
+                    Ok(val) => {
+                        if let Some(results) = val["results"].as_array() {
+                            let items: Vec<String> = results
+                                .iter()
+                                .take(5)
+                                .filter_map(|r| {
+                                    let title = r["title"].as_str().unwrap_or("");
+                                    let url = r["url"].as_str().unwrap_or("");
+                                    let snippet = r["content"].as_str().unwrap_or("");
+                                    if title.is_empty() && snippet.is_empty() {
+                                        None
+                                    } else {
+                                        Some(format!("Title: {}\nLink: {}\nSnippet: {}", title, url, snippet))
+                                    }
+                                })
+                                .collect();
+                            if !items.is_empty() {
+                                return Ok(items.join("\n---\n"));
+                            }
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    Err("All search services unavailable. Please try Tavily API or check your network.".to_string())
+}
+
 static LAST_SEARCH_TIME: AtomicU64 = AtomicU64::new(0);
 static CONSECUTIVE_FAILURES: AtomicU64 = AtomicU64::new(0);
 const MIN_SEARCH_INTERVAL_SECS: u64 = 2;
@@ -442,6 +517,8 @@ async fn run_duckduckgo_search(query: &str) -> Result<String, String> {
 
     let client = reqwest::Client::builder()
         .user_agent(GXAGENT_UA)
+        .timeout(std::time::Duration::from_secs(7))
+        .connect_timeout(std::time::Duration::from_secs(4))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -507,12 +584,28 @@ fn parse_duckduckgo_results(html: &str) -> Result<String, String> {
             .trim()
             .to_string();
 
-        let link = result_el
+        let raw_link = result_el
             .select(&title_selector)
             .next()
             .and_then(|el| el.value().attr("href"))
             .unwrap_or("")
             .to_string();
+
+        let link = if raw_link.contains("uddg=") {
+            raw_link
+                .split("uddg=")
+                .nth(1)
+                .and_then(|s| s.split('&').next())
+                .and_then(|s| urlencoding::decode(s).ok())
+                .map(|s| s.to_string())
+                .unwrap_or(raw_link.clone())
+        } else if raw_link.contains("duckduckgo.com/y.js") || raw_link.contains("duckduckgo.com/d.js") || raw_link.contains("duckduckgo.com/l/") {
+            String::new()
+        } else if raw_link.starts_with("/") || (raw_link.contains("duckduckgo.com") && !raw_link.starts_with("http")) {
+            String::new()
+        } else {
+            raw_link.clone()
+        };
 
         let snippet = result_el
             .select(&snippet_selector)
@@ -522,8 +615,10 @@ fn parse_duckduckgo_results(html: &str) -> Result<String, String> {
             .trim()
             .to_string();
 
-        if !title.is_empty() || !snippet.is_empty() {
+        if !title.is_empty() && !link.is_empty() {
             results.push(format!("Title: {}\nLink: {}\nSnippet: {}", title, link, snippet));
+        } else if !title.is_empty() || !snippet.is_empty() {
+            results.push(format!("Title: {}\nSnippet: {}", title, snippet));
         }
     }
 

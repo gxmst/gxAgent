@@ -111,6 +111,7 @@ const i18n: Record<string, Record<string, string>> = {
     "search.provider": "搜索引擎",
     "search.provider.ddg": "DuckDuckGo (免费免Key)",
     "search.provider.tavily": "Tavily (专业搜索)",
+    "search.provider.searxng": "SearXNG (免费免Key)",
     "search.apiKey": "API Key",
     "search.apiKeyPlaceholder": "输入 Tavily API Key",
     "code.copy": "复制代码",
@@ -285,6 +286,7 @@ const i18n: Record<string, Record<string, string>> = {
     "search.provider": "Search Engine",
     "search.provider.ddg": "DuckDuckGo (Free, No Key)",
     "search.provider.tavily": "Tavily (Professional)",
+    "search.provider.searxng": "SearXNG (Free, No Key)",
     "search.apiKey": "API Key",
     "search.apiKeyPlaceholder": "Enter Tavily API Key",
     "code.copy": "Copy Code",
@@ -437,7 +439,8 @@ import {
   ChatSession,
   SessionConfig,
   UsageStats,
-  PendingApproval
+  PendingApproval,
+  SearchStatus
 } from "./types";
 
 const DEFAULT_SESSION_CONFIG: SessionConfig = {
@@ -782,6 +785,7 @@ function App() {
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
   const isAtBottomRef = useRef(true);
   const currentSessionIdRef = useRef(currentSessionId);
 
@@ -843,7 +847,10 @@ function App() {
     const handleIframeMessage = (event: MessageEvent) => {
       if (event.data && event.data.type === "iframe-console-log") {
         const { logType, text } = event.data;
-        setPreviewConsoleLogs(prev => [...prev, { text, type: logType }]);
+        setPreviewConsoleLogs(prev => {
+          const next = [...prev, { text, type: logType }];
+          return next.length > 200 ? next.slice(next.length - 200) : next;
+        });
       }
     };
     window.addEventListener("message", handleIframeMessage);
@@ -988,8 +995,9 @@ function App() {
   const ALL_PRESETS = [...ROLE_PRESETS, ...customPresets];
 
   useEffect(() => {
-    if (isAtBottomRef.current) {
-      chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (isAtBottomRef.current && chatContainerRef.current) {
+      const el = chatContainerRef.current;
+      el.scrollTop = el.scrollHeight;
     }
   }, [currentSession.messages, isStreaming]);
 
@@ -1001,8 +1009,12 @@ function App() {
   // Helpers
   // ==========================================
 
+  const MAX_LOG_LINES = 500;
   const addLog = (text: string, type: "info" | "success" | "error" | "cmd" = "info") => {
-    setTerminalLogs((prev) => [...prev, { text, type }]);
+    setTerminalLogs((prev) => {
+      const next = [...prev, { text, type }];
+      return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
+    });
   };
 
   const refreshFileList = async () => {
@@ -1182,6 +1194,13 @@ function App() {
     async function setup() {
       unlisteners.push(
         await listen<string>("agent-stream-chunk", (event) => {
+          let payload = event.payload;
+          if (payload.includes("DSML")) {
+            payload = payload.replace(/<[｜|][｜|][^>]*>/g, "");
+            payload = payload.replace(/<\/[｜|][｜|][^>]*>/g, "");
+            if (!payload.trim()) return;
+          }
+          const filteredPayload = payload;
           setSessions((prev) =>
             prev.map((s) => {
               if (s.id !== currentSessionIdRef.current) return s;
@@ -1192,15 +1211,15 @@ function App() {
               ) {
                 messages.push({
                   role: "assistant",
-                  content: event.payload,
+                  content: filteredPayload,
                   actions: [],
-                  variants: [event.payload],
+                  variants: [filteredPayload],
                   currentVariantIndex: 0,
                   timestamp: Date.now(),
                 });
               } else {
                 const last = { ...messages[messages.length - 1] };
-                last.content += event.payload;
+                last.content += filteredPayload;
                 if (last.variants) {
                   last.variants[last.currentVariantIndex || 0] = last.content;
                 } else {
@@ -1209,6 +1228,37 @@ function App() {
                 }
                 messages[messages.length - 1] = last;
               }
+              return { ...s, messages };
+            })
+          );
+        })
+      );
+
+      unlisteners.push(
+        await listen<SearchStatus>("agent-search-status", (event) => {
+          const status = event.payload;
+          setSessions((prev) =>
+            prev.map((s) => {
+              if (s.id !== currentSessionIdRef.current) return s;
+              const messages = [...s.messages];
+              if (messages.length === 0) return s;
+              const last = { ...messages[messages.length - 1] };
+              if (last.role !== "assistant") return s;
+              const existing = last.searchStatus || [];
+              if (status.type === "searching") {
+                last.searchStatus = [...existing, status];
+              } else if (status.type === "results" || status.type === "error") {
+                const lastSearchIdx = [...existing].reverse().findIndex((s) => s.type === "searching" && s.query === status.query);
+                if (lastSearchIdx !== -1) {
+                  const realIdx = existing.length - 1 - lastSearchIdx;
+                  const updated = [...existing];
+                  updated[realIdx] = { ...updated[realIdx], ...status };
+                  last.searchStatus = updated;
+                } else {
+                  last.searchStatus = [...existing, status];
+                }
+              }
+              messages[messages.length - 1] = last;
               return { ...s, messages };
             })
           );
@@ -1424,6 +1474,7 @@ function App() {
         await listen<string>("agent-complete", () => {
           setIsStreaming(false);
           addLog(t("log.complete", lang), "info");
+          setTimeout(() => chatTextareaRef.current?.focus(), 100);
         })
       );
 
@@ -2504,6 +2555,37 @@ function App() {
                               </div>
                             ))}
 
+                            {/* Search status indicators */}
+                            {msg.searchStatus && msg.searchStatus.length > 0 && (
+                              <div className="search-status-list">
+                                {msg.searchStatus.map((ss, ssIdx) => {
+                                  if (ss.type === "searching") {
+                                    return (
+                                      <div key={ssIdx} className="search-status searching">
+                                        🔍 Searching: {ss.query}...
+                                      </div>
+                                    );
+                                  }
+                                  if (ss.type === "error") {
+                                    return (
+                                      <div key={ssIdx} className="search-status search-error">
+                                        ⚠️ {ss.message} (took {ss.duration?.toFixed(1)}s)
+                                      </div>
+                                    );
+                                  }
+                                  if (ss.type === "results") {
+                                    return (
+                                      <details key={ssIdx} className="search-results">
+                                        <summary>📋 Search results (took {ss.duration?.toFixed(1)}s)</summary>
+                                        <div className="search-results-content">{ss.results}</div>
+                                      </details>
+                                    );
+                                  }
+                                  return null;
+                                })}
+                              </div>
+                            )}
+
                             {/* Reasoning chain (DeepSeek-R1, etc.) */}
                             {msg.reasoningContent && (
                               <details className="reasoning-chain" open={!msg.content}>
@@ -2780,6 +2862,7 @@ function App() {
             )}
             <div className={`chat-input-container${isStreaming && currentMode === "code" ? " steering-active" : ""}`}>
               <textarea
+                ref={chatTextareaRef}
                 className="chat-textarea"
                 value={prompt}
                 onChange={(e) => {
@@ -3597,6 +3680,7 @@ function App() {
                 >
                   <option value="duckduckgo">{t("search.provider.ddg", lang)}</option>
                   <option value="tavily">{t("search.provider.tavily", lang)}</option>
+                  <option value="searxng">{t("search.provider.searxng", lang)}</option>
                 </select>
                 {config.search_provider === "tavily" && (
                   <span className="settings-recommend-tag">{lang === "zh" ? "推荐 · 官方合规路径" : "Recommended · Official API"}</span>
