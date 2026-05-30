@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 80" width="100%" height="100%">
+  <!-- Back Legs -->
+  <rect x="42" y="52" width="12" height="18" rx="6" fill="#a8d35f" />
+  <rect x="68" y="52" width="12" height="18" rx="6" fill="#a8d35f" />
+
+  <!-- Tail -->
+  <path d="M 80,45 L 96,35 L 85,55 Z" fill="#a8d35f" />
+
+  <!-- Shell -->
+  <path d="M 30,55 C 30,10 88,10 88,55 Z" fill="#5c8a47" stroke="#3a5f2b" stroke-width="2" />
+  
+  <!-- Shell Scutes (Pattern Lines) -->
+  <path d="M 45,25 L 73,25 M 59,25 L 59,55 M 39,40 L 59,40 M 79,40 L 59,40" stroke="#3a5f2b" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+  <!-- Front Legs -->
+  <rect x="36" y="54" width="12" height="18" rx="6" fill="#a8d35f" />
+  <rect x="62" y="54" width="12" height="18" rx="6" fill="#a8d35f" />
+
+  <!-- Cat Head -->
+  <!-- Left Ear -->
+  <path d="M 12,20 L 22,10 L 28,25 Z" fill="#a8d35f" />
+  <path d="M 13,20 L 18,14 L 23,22 Z" fill="#ffcdd2" /> 
+  <!-- Right Ear -->
+  <path d="M 40,20 L 30,10 L 24,25 Z" fill="#a8d35f" />
+  <path d="M 39,20 L 34,14 L 29,22 Z" fill="#ffcdd2" />
+  
+  <!-- Face Circle -->
+  <circle cx="26" cy="35" r="17" fill="#a8d35f" />
+  
+  <!-- Forehead Stripes -->
+  <path d="M 21,20 L 21,25 M 26,19 L 26,25 M 31,20 L 31,25" stroke="#7eb533" stroke-width="2" stroke-linecap="round"/>
+  
+  <!-- Eyes -->
+  <circle cx="19" cy="33" r="2.5" fill="#111" />
+  <circle cx="33" cy="33" r="2.5" fill="#111" />
+  
+  <!-- Mouth (Cute W shape) -->
+  <path d="M 21,39 Q 23.5,43 26,39 Q 28.5,43 31,39" fill="none" stroke="#111" stroke-width="2" stroke-linecap="round"/>
+  
+  <!-- Whiskers Left -->
+  <path d="M 6,31 L 12,32 M 5,36 L 12,36 M 6,41 L 12,40" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- Whiskers Right -->
+  <path d="M 46,31 L 40,32 M 47,36 L 40,36 M 46,41 L 40,40" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
