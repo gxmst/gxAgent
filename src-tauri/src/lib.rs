@@ -108,13 +108,15 @@ fn load_config() -> Result<AppConfig, String> {
 /// List directory contents (for workspace file browser)
 #[tauri::command]
 async fn list_directory(path: String) -> Result<String, String> {
-    Ok(tools::execute_tool("list_dir", &serde_json::json!({"path": path}).to_string(), ".", "duckduckgo", "").await)
+    let work_dir = load_config().map(|c| c.default_work_dir).unwrap_or_else(|_| ".".to_string());
+    Ok(tools::execute_tool("list_dir", &serde_json::json!({"path": path}).to_string(), &work_dir, "duckduckgo", "").await)
 }
 
 /// Read a file (for workspace file viewer)
 #[tauri::command]
 async fn read_file_content(path: String) -> Result<String, String> {
-    Ok(tools::execute_tool("read_file", &serde_json::json!({"path": path}).to_string(), ".", "duckduckgo", "").await)
+    let work_dir = load_config().map(|c| c.default_work_dir).unwrap_or_else(|_| ".".to_string());
+    Ok(tools::execute_tool("read_file", &serde_json::json!({"path": path}).to_string(), &work_dir, "duckduckgo", "").await)
 }
 
 /// Save code block content to a local file (with native save dialog)
@@ -406,19 +408,35 @@ async fn compact_history(
     Ok(summary)
 }
 
-/// Export configuration to a JSON string
+/// Export configuration to a JSON string (re-encrypts API keys for safe export)
 #[tauri::command]
 fn export_config(config: AppConfig) -> Result<String, String> {
-    serde_json::to_string_pretty(&config).map_err(|e| e.to_string())
+    let mut export = config;
+    // Re-encrypt API keys so they aren't exported as plaintext
+    if !export.api_key.is_empty() && !export.api_key.starts_with("enc:") {
+        export.api_key = crypto::encrypt(&export.api_key);
+    }
+    if !export.search_api_key.is_empty() && !export.search_api_key.starts_with("enc:") {
+        export.search_api_key = crypto::encrypt(&export.search_api_key);
+    }
+    for profile in export.profiles.values_mut() {
+        if !profile.api_key.is_empty() && !profile.api_key.starts_with("enc:") {
+            profile.api_key = crypto::encrypt(&profile.api_key);
+        }
+    }
+    serde_json::to_string_pretty(&export).map_err(|e| e.to_string())
 }
 
 /// Import configuration from a JSON string
 fn try_decrypt_key(key: &str) -> (String, bool) {
-    if !key.starts_with("enc:v1:") && !key.starts_with("enc:v2:") {
+    if key.is_empty() {
+        return (String::new(), false);
+    }
+    if !key.starts_with("enc:v1:") && !key.starts_with("enc:v2:") && !key.starts_with("enc:") {
         return (key.to_string(), false);
     }
     let decrypted = crypto::decrypt(key);
-    if decrypted.starts_with("enc:v1:") || decrypted.starts_with("enc:v2:") || !decrypted.is_ascii() || decrypted.contains('\0') {
+    if decrypted.starts_with("enc:v1:") || decrypted.starts_with("enc:v2:") || decrypted.starts_with("enc:") || !decrypted.is_ascii() || decrypted.contains('\0') {
         (String::new(), true)
     } else {
         (decrypted, false)
@@ -431,6 +449,10 @@ fn import_config(app: AppHandle, json: String) -> Result<AppConfig, String> {
     let mut needs_rekey = false;
     let (decrypted, rekey) = try_decrypt_key(&config.api_key);
     config.api_key = decrypted;
+    needs_rekey = needs_rekey || rekey;
+    // Also handle search_api_key
+    let (decrypted, rekey) = try_decrypt_key(&config.search_api_key);
+    config.search_api_key = decrypted;
     needs_rekey = needs_rekey || rekey;
     for profile in config.profiles.values_mut() {
         let (decrypted, rekey) = try_decrypt_key(&profile.api_key);

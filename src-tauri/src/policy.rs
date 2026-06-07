@@ -81,6 +81,49 @@ fn extract_command_name(cmd: &str) -> String {
     name_trimmed.to_lowercase()
 }
 
+/// Check if a command contains compound syntax that could bypass whitelist matching.
+/// Commands with these operators should not be auto-approved based on prefix matching.
+fn has_compound_syntax(cmd: &str) -> bool {
+    // Skip checking inside quoted strings
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let chars: Vec<char> = cmd.chars().collect();
+
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+        } else if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+        } else if !in_single_quote && !in_double_quote {
+            // Semicolon: command chaining
+            if c == ';' {
+                return true;
+            }
+            // Pipe operator (| but not ||)
+            if c == '|' && (i + 1 >= chars.len() || chars[i + 1] != '|') && (i == 0 || chars[i - 1] != '|') {
+                return true;
+            }
+            // Backtick (PowerShell line continuation / escape)
+            if c == '`' {
+                return true;
+            }
+            // Redirect operators: >, >>, 2>, < (but not inside paths like C:\>)
+            if c == '>' {
+                return true;
+            }
+            if c == '<' && i > 0 && chars[i - 1] != '\\' && chars[i - 1] != '/' {
+                return true;
+            }
+            // Subexpression $(...)
+            if c == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn check_approval(
     tool_name: &str,
     args_str: &str,
@@ -262,6 +305,13 @@ fn is_trusted(tool_name: &str, args_str: &str, patterns: &[TrustedPattern]) -> b
                     if let Some(cmd) = args["command"].as_str() {
                         let cmd_trimmed = cmd.trim();
                         let pattern_trimmed = p.pattern.trim();
+
+                        // Block compound syntax from auto-approval to prevent bypass
+                        // e.g. "git status; Set-Content x y" should not match "git status"
+                        if has_compound_syntax(cmd_trimmed) {
+                            continue; // Skip this pattern, don't auto-approve
+                        }
+
                         // Match: command starts with pattern, or command name matches
                         if cmd_trimmed.to_lowercase().starts_with(&pattern_trimmed.to_lowercase()) {
                             return true;

@@ -265,10 +265,9 @@ async fn run_write_file(path: &str, content: &str, work_dir: &str) -> Result<(),
 async fn run_list_dir(path: &str, work_dir: &str) -> Result<String, String> {
     let full_path = resolve_path(path, work_dir)?;
     
-    // Automatically create workspace directory if it doesn't exist to avoid os error 3
     let path_obj = Path::new(&full_path);
     if !path_obj.exists() {
-        let _ = tokio::fs::create_dir_all(path_obj).await;
+        return Err(format!("Directory not found: {}", full_path));
     }
 
     let mut entries = tokio::fs::read_dir(&full_path)
