@@ -100,6 +100,24 @@ fn has_compound_syntax(cmd: &str) -> bool {
             if c == ';' {
                 return true;
             }
+            // Newline / carriage return: statement separator in PowerShell and bash
+            // But skip if it's preceded by a line continuation character
+            if c == '\n' || c == '\r' {
+                // Check if previous non-whitespace char is a continuation
+                let mut prev_idx = i;
+                while prev_idx > 0 {
+                    prev_idx -= 1;
+                    let prev_c = chars[prev_idx];
+                    if prev_c == '\\' || prev_c == '`' {
+                        // Line continuation, not a separator
+                        break;
+                    }
+                    if prev_c != ' ' && prev_c != '\t' {
+                        // Found a real character, this newline is a separator
+                        return true;
+                    }
+                }
+            }
             // Pipe operator (| but not ||)
             if c == '|' && (i + 1 >= chars.len() || chars[i + 1] != '|') && (i == 0 || chars[i - 1] != '|') {
                 return true;

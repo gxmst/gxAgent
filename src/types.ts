@@ -62,17 +62,34 @@ export interface ToolAction {
   approval_level?: string;
 }
 
+export interface SearchResult {
+  title: string;
+  link: string;
+  snippet: string;
+}
+
 export interface SearchStatus {
   type: "searching" | "results" | "error";
   query: string;
   results?: string;
+  sources?: SearchResult[];
+  resultCount?: number;
   message?: string;
   duration?: number;
+  provider?: string;
+}
+
+export interface Attachment {
+  name: string;
+  type: "image" | "text";
+  data: string;
+  mimeType?: string;
 }
 
 export interface Message {
   role: "user" | "assistant" | "system" | "context_divider";
   content: string;
+  attachments?: Attachment[];
   actions?: ToolAction[];
   reasoningContent?: string;
   variants?: string[];
@@ -100,6 +117,7 @@ export interface SessionConfig {
   thinkingLevel: "low" | "medium" | "high";
   backgroundImage: string;
   activeRolePresetId: string | null;
+  searchMode: "off" | "auto" | "force";
 }
 
 export interface UsageStats {

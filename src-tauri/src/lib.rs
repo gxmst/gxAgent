@@ -25,9 +25,13 @@ async fn start_agent_session(
     config: AppConfig,
     session_messages: Vec<Value>,
     session_mode: Option<String>,
+    search_mode: Option<String>,
+    image_attachments: Option<Vec<agent::ImageAttachment>>,
 ) -> Result<(), String> {
     let mode = session_mode.unwrap_or_else(|| "chat".to_string());
-    let result = agent::start_agent_loop(window.clone(), prompt, config, session_messages, mode).await;
+    let smode = search_mode.unwrap_or_else(|| "auto".to_string());
+    let images = image_attachments.unwrap_or_default();
+    let result = agent::start_agent_loop(window.clone(), prompt, config, session_messages, mode, smode, images).await;
     if let Err(ref e) = result {
         let _ = window.emit("agent-stream-chunk", format!("\n❌ Error: {}\n", e));
         let _ = window.emit("agent-stream-done", json!({
@@ -109,14 +113,24 @@ fn load_config() -> Result<AppConfig, String> {
 #[tauri::command]
 async fn list_directory(path: String) -> Result<String, String> {
     let work_dir = load_config().map(|c| c.default_work_dir).unwrap_or_else(|_| ".".to_string());
-    Ok(tools::execute_tool("list_dir", &serde_json::json!({"path": path}).to_string(), &work_dir, "duckduckgo", "").await)
+    let result = tools::execute_tool("list_dir", &serde_json::json!({"path": path}).to_string(), &work_dir, "duckduckgo", "").await;
+    if result.starts_with("Error:") {
+        Err(result)
+    } else {
+        Ok(result)
+    }
 }
 
 /// Read a file (for workspace file viewer)
 #[tauri::command]
 async fn read_file_content(path: String) -> Result<String, String> {
     let work_dir = load_config().map(|c| c.default_work_dir).unwrap_or_else(|_| ".".to_string());
-    Ok(tools::execute_tool("read_file", &serde_json::json!({"path": path}).to_string(), &work_dir, "duckduckgo", "").await)
+    let result = tools::execute_tool("read_file", &serde_json::json!({"path": path}).to_string(), &work_dir, "duckduckgo", "").await;
+    if result.starts_with("Error:") {
+        Err(result)
+    } else {
+        Ok(result)
+    }
 }
 
 /// Save code block content to a local file (with native save dialog)
@@ -200,9 +214,10 @@ async fn toggle_always_on_top(window: tauri::Window) -> Result<bool, String> {
 /// Add trusted patterns to the config and persist
 #[tauri::command]
 fn add_trusted_patterns(
-    mut config: AppConfig,
+    current_config: AppConfig,
     patterns: Vec<TrustedPattern>,
 ) -> Result<AppConfig, String> {
+    let mut config = current_config;
     for p in patterns {
         let is_dup = config.trusted_patterns.iter().any(|existing| {
             existing.tool_name == p.tool_name && existing.pattern == p.pattern
@@ -218,10 +233,11 @@ fn add_trusted_patterns(
 /// Remove a trusted pattern from the config and persist
 #[tauri::command]
 fn remove_trusted_pattern(
-    mut config: AppConfig,
+    current_config: AppConfig,
     tool_name: String,
     pattern: String,
 ) -> Result<AppConfig, String> {
+    let mut config = current_config;
     config.trusted_patterns.retain(|p| !(p.tool_name == tool_name && p.pattern == pattern));
     persist_config(&config)?;
     Ok(config)
@@ -236,9 +252,10 @@ async fn check_python_available() -> bool {
 /// Save or update an API profile
 #[tauri::command]
 fn save_profile(
-    mut config: AppConfig,
+    current_config: AppConfig,
     profile: ApiProfile,
 ) -> Result<AppConfig, String> {
+    let mut config = current_config;
     let key = profile.name.clone();
     config.profiles.insert(key, profile);
     persist_config(&config)?;
@@ -248,9 +265,10 @@ fn save_profile(
 /// Delete an API profile by name
 #[tauri::command]
 fn delete_profile(
-    mut config: AppConfig,
+    current_config: AppConfig,
     name: String,
 ) -> Result<AppConfig, String> {
+    let mut config = current_config;
     config.profiles.remove(&name);
     if config.active_profile.as_deref() == Some(&name) {
         config.active_profile = None;
@@ -262,9 +280,10 @@ fn delete_profile(
 /// Set the active profile and apply its settings to the main config
 #[tauri::command]
 fn set_active_profile(
-    mut config: AppConfig,
+    current_config: AppConfig,
     name: String,
 ) -> Result<AppConfig, String> {
+    let mut config = current_config;
     let profile = config.profiles.get(&name).cloned().ok_or_else(|| format!("Profile '{}' not found", name))?;
     config.base_url = profile.base_url;
     config.api_key = profile.api_key;
@@ -277,8 +296,9 @@ fn set_active_profile(
 /// Clear the active profile (revert to manual config)
 #[tauri::command]
 fn clear_active_profile(
-    mut config: AppConfig,
+    current_config: AppConfig,
 ) -> Result<AppConfig, String> {
+    let mut config = current_config;
     config.active_profile = None;
     persist_config(&config)?;
     Ok(config)
@@ -303,12 +323,13 @@ fn persist_config(config: &AppConfig) -> Result<(), String> {
 /// Save or update an MCP server configuration
 #[tauri::command]
 fn save_mcp_server(
-    mut config: AppConfig,
+    current_config: AppConfig,
     name: String,
     command: String,
     args: Vec<String>,
     env: std::collections::HashMap<String, String>,
 ) -> Result<AppConfig, String> {
+    let mut config = current_config;
     let server = config::McpServerConfig {
         command,
         args,
@@ -322,9 +343,10 @@ fn save_mcp_server(
 /// Delete an MCP server configuration by name
 #[tauri::command]
 fn delete_mcp_server(
-    mut config: AppConfig,
+    current_config: AppConfig,
     name: String,
 ) -> Result<AppConfig, String> {
+    let mut config = current_config;
     config.mcp_servers.remove(&name);
     persist_config(&config)?;
     Ok(config)
@@ -346,9 +368,10 @@ async fn push_steering_message(message: String) -> Result<(), String> {
 /// Compress conversation history using the current model
 #[tauri::command]
 async fn compact_history(
-    config: AppConfig,
+    current_config: AppConfig,
     messages: Vec<Value>,
 ) -> Result<String, String> {
+    let config = current_config;
     let client = reqwest::Client::new();
 
     let compact_prompt = "Please read the conversation history above and compress it into a comprehensive summary. Preserve all core achievements, file locations, pending tasks, code changes, and user configurations. Keep the output strictly as a structured summary that can serve as context for continuing the conversation. Do NOT add any commentary — just the summary.";
