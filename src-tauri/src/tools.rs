@@ -363,16 +363,27 @@ async fn run_web_search(query: &str, provider: &str, api_key: &str) -> Result<St
         }
         "searxng" => run_searxng_search(query).await,
         _ => {
+            // DDG → Tavily fallback → error
             let ddg_timeout = std::time::Duration::from_secs(8);
             match tokio::time::timeout(ddg_timeout, run_duckduckgo_search(query)).await {
                 Ok(Ok(results)) => Ok(results),
                 Ok(Err(e)) => {
-                    eprintln!("[search] DuckDuckGo failed: {}, falling back to SearXNG", e);
-                    run_searxng_search(query).await
+                    eprintln!("[search] DuckDuckGo failed: {}, trying fallback", e);
+                    if !api_key.is_empty() {
+                        eprintln!("[search] Falling back to Tavily");
+                        run_tavily_search(query, api_key).await
+                    } else {
+                        Err(format!("DuckDuckGo search failed: {}. Consider configuring a Tavily API key in settings for more reliable search.", e))
+                    }
                 }
                 Err(_) => {
-                    eprintln!("[search] DuckDuckGo timed out after 8s, falling back to SearXNG");
-                    run_searxng_search(query).await
+                    eprintln!("[search] DuckDuckGo timed out after 8s, trying fallback");
+                    if !api_key.is_empty() {
+                        eprintln!("[search] Falling back to Tavily");
+                        run_tavily_search(query, api_key).await
+                    } else {
+                        Err("DuckDuckGo search timed out. Consider configuring a Tavily API key in settings for more reliable search.".to_string())
+                    }
                 }
             }
         }
@@ -398,6 +409,9 @@ async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String>
         .map_err(|e| format!("Tavily request failed: {}", e))?;
 
     let val: Value = response.json().await.map_err(|e| format!("Tavily response parse error: {}", e))?;
+
+    // Reset failure counter on successful Tavily response
+    CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
 
     if let Some(answer) = val["answer"].as_str() {
         if !answer.is_empty() {

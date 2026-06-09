@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, type ClipboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
@@ -28,7 +28,6 @@ import {
   ChevronDown,
   Globe,
   Save,
-  ImageIcon,
   Pin,
   ShieldAlert,
   RefreshCw,
@@ -70,6 +69,11 @@ const i18n: Record<string, Record<string, string>> = {
     "settings.title": "设置",
     "settings.save": "保存设置",
     "settings.close": "关闭",
+    "settings.tab.model": "模型与 API",
+    "settings.tab.chat": "聊天体验",
+    "settings.tab.agent": "Agent 与工具",
+    "settings.tab.search": "搜索",
+    "settings.tab.data": "数据与高级",
     "settings.theme": "主题",
     "settings.theme.light": "浅色",
     "settings.theme.dark": "深色",
@@ -108,12 +112,18 @@ const i18n: Record<string, Record<string, string>> = {
     "compact.failed": "压缩失败: ",
     "compact.tooShort": "对话太短，无需压缩",
     "search.toggle": "联网搜索",
+    "search.modeOff": "搜索: 关闭",
+    "search.modeAuto": "搜索: 自动",
+    "search.modeForce": "搜索: 强制",
     "search.provider": "搜索引擎",
     "search.provider.ddg": "DuckDuckGo (免费免Key)",
     "search.provider.tavily": "Tavily (专业搜索)",
     "search.provider.searxng": "SearXNG (免费免Key)",
     "search.apiKey": "API Key",
     "search.apiKeyPlaceholder": "输入 Tavily API Key",
+    "search.settings.desc": "配置搜索行为和搜索引擎。搜索模式可在输入框旁切换：关闭=不搜索，自动=模型判断，强制=每次必搜。",
+    "search.settings.fallbackDesc": "使用 DuckDuckGo 时，搜索失败或超时会自动尝试 Tavily 备用路径（需配置 API Key）。SearXNG 无自动备用。",
+    "search.settings.ollamaNote": "注意：Ollama 本地模型暂不支持工具调用，搜索功能对 Ollama 不生效。",
     "code.copy": "复制代码",
     "code.save": "保存为文件",
     "code.copied": "已复制",
@@ -126,6 +136,10 @@ const i18n: Record<string, Record<string, string>> = {
     "window.unpin": "取消置顶",
     "tools.active": "已启用工具",
     "terminal": "终端",
+    "activity": "活动",
+    "activity.empty": "暂无工具活动",
+    "activity.searchSources": "搜索来源",
+    "activity.toolCalls": "工具调用",
     "files": "文件",
     "files.workspace": "工作区",
     "files.refresh": "刷新",
@@ -245,6 +259,11 @@ const i18n: Record<string, Record<string, string>> = {
     "settings.title": "Settings",
     "settings.save": "Save Settings",
     "settings.close": "Close",
+    "settings.tab.model": "Model & API",
+    "settings.tab.chat": "Chat Experience",
+    "settings.tab.agent": "Agent & Tools",
+    "settings.tab.search": "Search",
+    "settings.tab.data": "Data & Advanced",
     "settings.theme": "Theme",
     "settings.theme.light": "Light",
     "settings.theme.dark": "Dark",
@@ -283,12 +302,18 @@ const i18n: Record<string, Record<string, string>> = {
     "compact.failed": "Compression failed: ",
     "compact.tooShort": "Conversation too short to compress",
     "search.toggle": "Web Search",
+    "search.modeOff": "Search: Off",
+    "search.modeAuto": "Search: Auto",
+    "search.modeForce": "Search: Force",
     "search.provider": "Search Engine",
     "search.provider.ddg": "DuckDuckGo (Free, No Key)",
     "search.provider.tavily": "Tavily (Professional)",
     "search.provider.searxng": "SearXNG (Free, No Key)",
     "search.apiKey": "API Key",
     "search.apiKeyPlaceholder": "Enter Tavily API Key",
+    "search.settings.desc": "Configure search behavior and search engine. Toggle search mode next to the input: Off=No search, Auto=Model decides, Force=Always search.",
+    "search.settings.fallbackDesc": "When using DuckDuckGo, failed or timed-out searches will automatically try Tavily as fallback (requires API Key). SearXNG has no automatic fallback.",
+    "search.settings.ollamaNote": "Note: Ollama local models do not support tool calls, so search does not work with Ollama.",
     "code.copy": "Copy Code",
     "code.save": "Save to File",
     "code.copied": "Copied",
@@ -301,6 +326,10 @@ const i18n: Record<string, Record<string, string>> = {
     "window.unpin": "Unpin Window",
     "tools.active": "Active Tools",
     "terminal": "Terminal",
+    "activity": "Activity",
+    "activity.empty": "No tool activity yet",
+    "activity.searchSources": "Search Sources",
+    "activity.toolCalls": "Tool Calls",
     "files": "Files",
     "files.workspace": "Workspace",
     "files.refresh": "Refresh",
@@ -440,7 +469,9 @@ import {
   SessionConfig,
   UsageStats,
   PendingApproval,
-  SearchStatus
+  SearchStatus,
+  Message,
+  Attachment
 } from "./types";
 
 const DEFAULT_SESSION_CONFIG: SessionConfig = {
@@ -455,6 +486,7 @@ const DEFAULT_SESSION_CONFIG: SessionConfig = {
   thinkingLevel: "medium",
   backgroundImage: "",
   activeRolePresetId: null,
+  searchMode: "auto",
 };
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -617,11 +649,12 @@ function MermaidDiagram({ chart }: { chart: string }) {
   return <div ref={ref} className="mermaid-container" />;
 }
 
-function McpAddForm({ setConfig, addLog, lang, t }: {
+function McpAddForm({ setConfig, addLog, lang, t, config }: {
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   addLog: (text: string, type: "info" | "success" | "error" | "cmd") => void;
   lang: string;
   t: (key: string, lang: string, vars?: Record<string, string>) => string;
+  config: AppConfig;
 }) {
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
@@ -641,6 +674,7 @@ function McpAddForm({ setConfig, addLog, lang, t }: {
     }
     try {
       const updated = await invoke<AppConfig>("save_mcp_server", {
+        currentConfig: config,
         name: name.trim(),
         command: command.trim(),
         args: args.trim() ? args.split(",").map(a => a.trim()) : [],
@@ -712,15 +746,15 @@ function App() {
   const [prompt, setPrompt] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"appearance" | "api" | "behavior" | "advanced">("appearance");
-  const [activeTab, setActiveTab] = useState<"terminal" | "files" | "preview">("terminal");
+  const [settingsTab, setSettingsTab] = useState<"model" | "chat" | "agent" | "search" | "data">("model");
+  const [activeTab, setActiveTab] = useState<"activity" | "files" | "preview">("activity");
   const [previewSrc, setPreviewSrc] = useState<string>("");
-  const [webSearchEnabled, setWebSearchEnabled] = useState<boolean>(false);
+  const [searchMode, setSearchMode] = useState<"off" | "auto" | "force">("auto");
   const [previewDevice, setPreviewDevice] = useState<"desktop" | "mobile">("desktop");
   const [newProfileName, setNewProfileName] = useState("");
   const [modifiedFiles, setModifiedFiles] = useState<Record<string, { old: string; new: string }>>({});
   const [diffView, setDiffView] = useState(false);
-  const [attachments, setAttachments] = useState<{ name: string; type: "image" | "text"; data: string }[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [rolePresetsOpen, setRolePresetsOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -800,6 +834,7 @@ function App() {
 
   useEffect(() => {
     setRightPanelOpen(currentMode === "code");
+    setSearchMode(currentSession.sessionConfig.searchMode || "auto");
   }, [currentSessionId]);
 
   // ==========================================
@@ -958,7 +993,16 @@ function App() {
       if (data.length > 4 * 1024 * 1024) {
         const trimmed = sessions.map((s: ChatSession) => ({
           ...s,
-          messages: s.messages.slice(-20),
+          messages: s.messages.slice(-20).map((m) => (
+            m.attachments
+              ? {
+                  ...m,
+                  attachments: m.attachments.map((att) =>
+                    att.type === "image" ? { ...att, data: "" } : att
+                  ),
+                }
+              : m
+          )),
         }));
         localStorage.setItem("gx_sessions", JSON.stringify(trimmed));
       } else {
@@ -1017,6 +1061,81 @@ function App() {
     });
   };
 
+  const imageExtensionFromMime = (mimeType: string) => {
+    const subtype = mimeType.split("/")[1]?.split(";")[0]?.toLowerCase();
+    if (!subtype) return "png";
+    return subtype === "jpeg" ? "jpg" : subtype.replace(/[^a-z0-9]/g, "") || "png";
+  };
+
+  const pastedImageName = (mimeType: string) => {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return `pasted-image-${stamp}.${imageExtensionFromMime(mimeType)}`;
+  };
+
+  const readFileAsAttachment = async (file: File): Promise<Attachment> => {
+    const name = file.name || (file.type.startsWith("image/") ? pastedImageName(file.type || "image/png") : "pasted-file.txt");
+    if (file.type.startsWith("image/")) {
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => resolve(String(ev.target?.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("Failed to read image"));
+        reader.readAsDataURL(file);
+      });
+      return { name, type: "image", data, mimeType: file.type || "image/png" };
+    }
+
+    const text = await file.text();
+    return { name, type: "text", data: text.substring(0, 50000), mimeType: file.type || "text/plain" };
+  };
+
+  const addFilesAsAttachments = async (files: File[]) => {
+    if (files.length === 0) return;
+    try {
+      const next = await Promise.all(files.map(readFileAsAttachment));
+      setAttachments((prev) => [...prev, ...next]);
+    } catch (e) {
+      addLog(`Failed to attach file: ${e}`, "error");
+    }
+  };
+
+  const imageAttachmentsForApi = (list: Attachment[]) =>
+    list.filter((att) => att.type === "image" && att.data);
+
+  const buildPromptWithAttachments = (message: string, list: Attachment[]) => {
+    if (list.length === 0) return message;
+    const parts = list.map((att) => {
+      if (att.type === "image") {
+        return `[Attached Image: ${att.name}]`;
+      }
+      return `[Attached File: ${att.name}]\n\`\`\`\n${att.data}\n\`\`\``;
+    });
+    const trimmed = message.trim();
+    return trimmed ? `${parts.join("\n\n")}\n\n${trimmed}` : parts.join("\n\n");
+  };
+
+  const serializeMessageForApi = (message: Message) => {
+    const imgs = imageAttachmentsForApi(message.attachments || []);
+    return {
+      role: message.role,
+      content: message.variants ? (message.variants[message.currentVariantIndex || 0] || message.content) : message.content,
+      ...(imgs.length > 0 ? { attachments: imgs } : {}),
+    };
+  };
+
+  const handlePasteImage = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const itemFiles = Array.from(e.clipboardData.items || [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    const fileList = itemFiles.length > 0
+      ? itemFiles
+      : Array.from(e.clipboardData.files || []).filter((file) => file.type.startsWith("image/"));
+
+    if (fileList.length === 0) return;
+    e.preventDefault();
+    await addFilesAsAttachments(fileList);
+  };
+
   const refreshFileList = async () => {
     try {
       const result = await invoke<string>("list_directory", {
@@ -1061,6 +1180,7 @@ function App() {
     if (!name) return;
     try {
       const updated = await invoke<AppConfig>("save_profile", {
+        currentConfig: config,
         profile: { name, base_url: config.base_url, api_key: config.api_key, default_model: config.model },
       });
       setConfig(updated);
@@ -1100,7 +1220,7 @@ function App() {
 
   const handleActivateProfile = async (name: string) => {
     try {
-      const updated = await invoke<AppConfig>("set_active_profile", { name });
+      const updated = await invoke<AppConfig>("set_active_profile", { currentConfig: config, name });
       setConfig(updated);
       const profile = updated.profiles[name];
       if (profile) cacheModelDisplayName(profile.default_model, profile.name);
@@ -1112,7 +1232,7 @@ function App() {
 
   const handleDeleteProfile = async (name: string) => {
     try {
-      const updated = await invoke<AppConfig>("delete_profile", { name });
+      const updated = await invoke<AppConfig>("delete_profile", { currentConfig: config, name });
       setConfig(updated);
     } catch (e) {
       addLog(String(e), "error");
@@ -1121,7 +1241,7 @@ function App() {
 
   const handleClearActiveProfile = async () => {
     try {
-      const updated = await invoke<AppConfig>("clear_active_profile");
+      const updated = await invoke<AppConfig>("clear_active_profile", { currentConfig: config });
       setConfig(updated);
     } catch (e) {
       addLog(String(e), "error");
@@ -1138,7 +1258,7 @@ function App() {
     addLog(t("compact.start", lang), "info");
     try {
       const result = await invoke<string>("compact_history", {
-        config,
+        currentConfig: config,
         messages: messages.map((m) => ({ role: m.role, content: m.content })),
       });
       // Replace session history with compressed summary
@@ -1243,7 +1363,23 @@ function App() {
               const messages = [...s.messages];
               if (messages.length === 0) return s;
               const last = { ...messages[messages.length - 1] };
-              if (last.role !== "assistant") return s;
+              // If last message is not assistant (e.g. user msg during force search),
+              // only create assistant message when we have results, not for "searching" status
+              if (last.role !== "assistant") {
+                if (status.type === "searching") {
+                  // Don't create empty assistant message yet, wait for results or stream start
+                  return s;
+                }
+                // Create assistant message now that we have results or error
+                const assistantMsg: Message = {
+                  role: "assistant",
+                  content: "",
+                  searchStatus: [status],
+                  actions: [],
+                };
+                messages.push(assistantMsg);
+                return { ...s, messages };
+              }
               const existing = last.searchStatus || [];
               if (status.type === "searching") {
                 last.searchStatus = [...existing, status];
@@ -1514,17 +1650,17 @@ function App() {
   // ==========================================
 
   const handleSendMessage = async () => {
-    if (!prompt.trim() || isStreaming) return;
+    if ((!prompt.trim() && attachments.length === 0) || isStreaming) return;
 
     // Slash command: /compact — compress conversation history
-    if (prompt.trim().toLowerCase() === "/compact") {
+    if (attachments.length === 0 && prompt.trim().toLowerCase() === "/compact") {
       setPrompt("");
       await handleCompact();
       return;
     }
 
     // Slash command: /clear — insert context divider
-    if (prompt.trim().toLowerCase() === "/clear") {
+    if (attachments.length === 0 && prompt.trim().toLowerCase() === "/clear") {
       setPrompt("");
       setSessions(prev => prev.map(s => s.id === currentSessionId ? {
         ...s,
@@ -1540,21 +1676,12 @@ function App() {
     }
 
     const userMessage = prompt.trim();
+    const pendingAttachments = [...attachments];
+    const imageAttachments = imageAttachmentsForApi(pendingAttachments);
     setPrompt("");
     setIsStreaming(true);
 
-    let finalMessage = userMessage;
-    if (attachments.length > 0) {
-      const parts: string[] = [];
-      for (const att of attachments) {
-        if (att.type === "image") {
-          parts.push(`[Attached Image: ${att.name}]`);
-        } else {
-          parts.push(`[Attached File: ${att.name}]\n\`\`\`\n${att.data}\n\`\`\``);
-        }
-      }
-      finalMessage = parts.join("\n\n") + "\n\n" + userMessage;
-    }
+    const finalMessage = buildPromptWithAttachments(userMessage, pendingAttachments);
     setAttachments([]);
 
     const sessionMessages = (() => {
@@ -1569,10 +1696,7 @@ function App() {
       const activeMsgs = lastDividerIdx >= 0 ? msgs.slice(lastDividerIdx + 1) : msgs;
       return activeMsgs
         .filter((m) => m.role !== "context_divider")
-        .map((m) => ({
-          role: m.role,
-          content: m.variants ? (m.variants[m.currentVariantIndex || 0] || m.content) : m.content,
-        }));
+        .map(serializeMessageForApi);
     })();
 
     setSessions((prev) =>
@@ -1580,12 +1704,21 @@ function App() {
         if (s.id !== currentSessionId) return s;
         let title = s.title;
         if (s.messages.length === 0) {
-          title = userMessage.length > 25 ? userMessage.substring(0, 25) + "..." : userMessage;
+          const titleSource = userMessage || pendingAttachments[0]?.name || "Attachment";
+          title = titleSource.length > 25 ? titleSource.substring(0, 25) + "..." : titleSource;
         }
         return {
           ...s,
           title,
-          messages: [...s.messages, { role: "user" as const, content: userMessage, timestamp: Date.now() }],
+          messages: [
+            ...s.messages,
+            {
+              role: "user" as const,
+              content: userMessage,
+              attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
+              timestamp: Date.now(),
+            },
+          ],
         };
       })
     );
@@ -1601,7 +1734,7 @@ function App() {
         max_tokens: sc.maxTokens,
         streaming: sc.streaming,
         context_limit: sc.contextLimit,
-        tools_enabled: webSearchEnabled
+        tools_enabled: searchMode !== "off"
           ? [...config.tools_enabled.filter(t => t !== "web_search"), "web_search"]
           : config.tools_enabled.filter(t => t !== "web_search"),
       };
@@ -1610,11 +1743,14 @@ function App() {
         config: mergedConfig,
         sessionMessages,
         sessionMode: currentMode,
+        searchMode,
+        imageAttachments,
       });
     } catch (e) {
       setIsStreaming(false);
       addLog(`Agent error: ${e}`, "error");
       setPrompt(userMessage);
+      setAttachments(pendingAttachments);
       setSessions((prev) =>
         prev.map((s) => {
           if (s.id !== currentSessionId) return s;
@@ -1634,13 +1770,15 @@ function App() {
     if (isStreaming) return;
     const msgs = currentSession.messages;
     let userMsg = "";
+    let userAttachments: Attachment[] = [];
     for (let i = msgIdx; i >= 0; i--) {
       if (msgs[i].role === "user") {
         userMsg = msgs[i].content;
+        userAttachments = imageAttachmentsForApi(msgs[i].attachments || []);
         break;
       }
     }
-    if (!userMsg) return;
+    if (!userMsg && userAttachments.length === 0) return;
 
     const existingMsg = msgs[msgIdx];
     const existingVariants = existingMsg.variants || [existingMsg.content];
@@ -1671,10 +1809,7 @@ function App() {
       const activeMsgs = lastDividerIdx >= 0 ? slicedMsgs.slice(lastDividerIdx + 1) : slicedMsgs;
       return activeMsgs
         .filter((m) => m.role !== "context_divider")
-        .map((m) => ({
-          role: m.role,
-          content: m.variants ? (m.variants[m.currentVariantIndex || 0] || m.content) : m.content,
-        }));
+        .map(serializeMessageForApi);
     })();
     try {
       const sc = currentSession.sessionConfig;
@@ -1687,15 +1822,17 @@ function App() {
         max_tokens: sc.maxTokens,
         streaming: sc.streaming,
         context_limit: sc.contextLimit,
-        tools_enabled: webSearchEnabled
+        tools_enabled: searchMode !== "off"
           ? [...config.tools_enabled.filter(t => t !== "web_search"), "web_search"]
           : config.tools_enabled.filter(t => t !== "web_search"),
       };
       await invoke("start_agent_session", {
-        prompt: userMsg,
+        prompt: buildPromptWithAttachments(userMsg, userAttachments),
         config: mergedConfig,
         sessionMessages,
         sessionMode: currentMode,
+        searchMode,
+        imageAttachments: userAttachments,
       });
     } catch (e) {
       setIsStreaming(false);
@@ -1755,7 +1892,7 @@ function App() {
 
         try {
           const updatedConfig = await invoke<AppConfig>("add_trusted_patterns", {
-            config,
+            currentConfig: config,
             patterns: newPatterns,
           });
           setConfig(updatedConfig);
@@ -1807,7 +1944,7 @@ function App() {
   const removeTrustedPattern = async (toolName: string, pattern: string) => {
     try {
       const updatedConfig = await invoke<AppConfig>("remove_trusted_pattern", {
-        config,
+        currentConfig: config,
         toolName,
         pattern,
       });
@@ -2561,23 +2698,64 @@ function App() {
                                 {msg.searchStatus.map((ss, ssIdx) => {
                                   if (ss.type === "searching") {
                                     return (
-                                      <div key={ssIdx} className="search-status searching">
-                                        🔍 Searching: {ss.query}...
+                                      <div key={ssIdx} className="search-card searching">
+                                        <div className="search-card-header">
+                                          <span className="search-card-icon">&#128269;</span>
+                                          <span className="search-card-query">{ss.query}</span>
+                                          <span className="search-card-spinner" />
+                                        </div>
                                       </div>
                                     );
                                   }
                                   if (ss.type === "error") {
                                     return (
-                                      <div key={ssIdx} className="search-status search-error">
-                                        ⚠️ {ss.message} (took {ss.duration?.toFixed(1)}s)
+                                      <div key={ssIdx} className="search-card search-error">
+                                        <div className="search-card-header">
+                                          <span className="search-card-icon">&#9888;&#65039;</span>
+                                          <span className="search-card-query">{ss.query}</span>
+                                        </div>
+                                        <div className="search-card-meta">
+                                          <span>{ss.message}</span>
+                                          {ss.duration != null && <span> &middot; {ss.duration.toFixed(1)}s</span>}
+                                        </div>
                                       </div>
                                     );
                                   }
                                   if (ss.type === "results") {
+                                    // Use structured sources from backend, fallback to parsing if not available
+                                    const sources = ss.sources && ss.sources.length > 0
+                                      ? ss.sources
+                                      : ss.results
+                                        ? ss.results.split("\n---\n").map((block) => {
+                                            const title = (block.match(/Title:\s*(.+)/) || [])[1] || "";
+                                            const link = (block.match(/Link:\s*(.+)/) || [])[1] || "";
+                                            const snippet = (block.match(/Snippet:\s*([\s\S]+)/) || [])[1] || "";
+                                            return { title, link, snippet: snippet.trim() };
+                                          }).filter((s) => s.title || s.snippet)
+                                        : [];
                                     return (
-                                      <details key={ssIdx} className="search-results">
-                                        <summary>📋 Search results (took {ss.duration?.toFixed(1)}s)</summary>
-                                        <div className="search-results-content">{ss.results}</div>
+                                      <details key={ssIdx} className="search-card results" open>
+                                        <summary className="search-card-header">
+                                          <span className="search-card-icon">&#128270;</span>
+                                          <span className="search-card-query">{ss.query}</span>
+                                          <span className="search-card-meta-inline">
+                                            {ss.resultCount ?? sources.length} {lang === "zh" ? "个结果" : "results"}
+                                            {ss.duration != null && ` · ${ss.duration.toFixed(1)}s`}
+                                            {ss.provider && ` · ${ss.provider}`}
+                                          </span>
+                                        </summary>
+                                        {sources.length > 0 && (
+                                          <div className="search-card-sources">
+                                            {sources.slice(0, 5).map((src, si) => (
+                                              <div key={si} className="search-source-item">
+                                                <div className="search-source-title">
+                                                  {src.link ? <a href={src.link} target="_blank" rel="noopener noreferrer">{src.title || src.link}</a> : src.title}
+                                                </div>
+                                                {src.snippet && <div className="search-source-snippet">{src.snippet}</div>}
+                                              </div>
+                                            ))}
+                                          </div>
+                                        )}
                                       </details>
                                     );
                                   }
@@ -2705,7 +2883,28 @@ function App() {
                               )}
                           </>
                         ) : (
-                          msg.content
+                          <>
+                            {msg.attachments && msg.attachments.length > 0 && (
+                              <div className="message-attachments">
+                                {msg.attachments.map((att, aIdx) => (
+                                  att.type === "image" && att.data ? (
+                                    <img
+                                      key={aIdx}
+                                      className="message-attachment-image"
+                                      src={att.data}
+                                      alt={att.name}
+                                    />
+                                  ) : (
+                                    <div key={aIdx} className="message-attachment-file">
+                                      <FileText size={12} />
+                                      <span>{att.name}</span>
+                                    </div>
+                                  )
+                                ))}
+                              </div>
+                            )}
+                            {msg.content && <div className="user-message-text">{msg.content}</div>}
+                          </>
                         )}
                         {/* Hover action buttons */}
                         <div className="bubble-actions">
@@ -2828,20 +3027,7 @@ function App() {
             onDrop={async (e) => {
               e.preventDefault();
               setDragOver(false);
-              const files = Array.from(e.dataTransfer.files);
-              for (const file of files) {
-                if (file.type.startsWith("image/")) {
-                  const reader = new FileReader();
-                  reader.onload = (ev) => {
-                    const base64 = ev.target?.result as string;
-                    setAttachments((prev) => [...prev, { name: file.name, type: "image", data: base64 }]);
-                  };
-                  reader.readAsDataURL(file);
-                } else {
-                  const text = await file.text();
-                  setAttachments((prev) => [...prev, { name: file.name, type: "text", data: text.substring(0, 50000) }]);
-                }
-              }
+              await addFilesAsAttachments(Array.from(e.dataTransfer.files));
             }}
           >
             {dragOver && (
@@ -2850,8 +3036,12 @@ function App() {
             {attachments.length > 0 && (
               <div className="attachments-bar">
                 {attachments.map((att, i) => (
-                  <div key={i} className="attachment-chip">
-                    {att.type === "image" ? <ImageIcon size={11} /> : <FileText size={11} />}
+                  <div key={i} className={`attachment-chip ${att.type}`}>
+                    {att.type === "image" ? (
+                      <img className="attachment-thumb" src={att.data} alt={att.name} />
+                    ) : (
+                      <FileText size={11} />
+                    )}
                     <span className="attachment-name">{att.name}</span>
                     <button className="attachment-remove" onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}>
                       <X size={10} />
@@ -2870,6 +3060,7 @@ function App() {
                   e.target.style.height = "auto";
                   e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px";
                 }}
+                onPaste={handlePasteImage}
                 onKeyDown={handleKeyPress}
                 placeholder={isStreaming && currentMode === "code" ? t("input.steering", lang) : `${t("input.placeholder", lang)} (Shift+Enter ${lang === "zh" ? "换行" : "newline"})`}
                 disabled={isStreaming && currentMode === "chat"}
@@ -3010,19 +3201,7 @@ function App() {
                   input.multiple = true;
                   input.onchange = async () => {
                     if (!input.files) return;
-                    for (const file of Array.from(input.files)) {
-                      if (file.type.startsWith("image/")) {
-                        const reader = new FileReader();
-                        reader.onload = (ev) => {
-                          const base64 = ev.target?.result as string;
-                          setAttachments((prev) => [...prev, { name: file.name, type: "image", data: base64 }]);
-                        };
-                        reader.readAsDataURL(file);
-                      } else {
-                        const text = await file.text();
-                        setAttachments((prev) => [...prev, { name: file.name, type: "text", data: text.substring(0, 50000) }]);
-                      }
-                    }
+                    await addFilesAsAttachments(Array.from(input.files));
                   };
                   input.click();
                 }}
@@ -3042,13 +3221,24 @@ function App() {
                     <Type size={12} />
                   </button>
                   <button
-                    className={`input-icon-btn ${webSearchEnabled ? "active" : ""}`}
-                    title={t("search.toggle", lang)}
-                    onClick={() => setWebSearchEnabled(!webSearchEnabled)}
+                    className={`input-icon-btn ${searchMode !== "off" ? "active" : ""}`}
+                    title={searchMode === "off" ? t("search.modeOff", lang) : searchMode === "auto" ? t("search.modeAuto", lang) : t("search.modeForce", lang)}
+                    onClick={() => {
+                      const next = searchMode === "off" ? "auto" : searchMode === "auto" ? "force" : "off";
+                      setSearchMode(next);
+                      setSessions((prev) => prev.map((s) =>
+                        s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, searchMode: next } } : s
+                      ));
+                    }}
                   >
                     <Globe size={12} />
-                    {webSearchEnabled && <span className="search-active-dot" />}
+                    {searchMode !== "off" && <span className={`search-active-dot ${searchMode === "force" ? "force" : ""}`} />}
                   </button>
+                  {config.provider === "ollama" && searchMode !== "off" && (
+                    <span className="ollama-search-hint" title={lang === "zh" ? "Ollama 本地模型不支持工具调用，搜索功能可能不会生效" : "Ollama local models don't support tool calls, search may not work"}>
+                      !
+                    </span>
+                  )}
                 </div>
                 <div className="chat-input-toolbar-right">
                 <div style={{ position: "relative" }}>
@@ -3165,10 +3355,10 @@ function App() {
         >
           <div className="canvas-tab-bar">
             <button
-              className={`canvas-tab ${activeTab === "terminal" ? "active" : ""}`}
-              onClick={() => setActiveTab("terminal")}
+              className={`canvas-tab ${activeTab === "activity" ? "active" : ""}`}
+              onClick={() => setActiveTab("activity")}
             >
-              <TerminalIcon size={12} /> {t("terminal", lang)}
+              <Zap size={12} /> {t("activity", lang)}
             </button>
             <button
               className={`canvas-tab ${activeTab === "files" ? "active" : ""}`}
@@ -3185,14 +3375,90 @@ function App() {
           </div>
 
           <div className="canvas-body">
-            <div className={`canvas-content-pane ${activeTab === "terminal" ? "active" : ""}`}>
-              <div className="console-container">
-                {terminalLogs.map((log, idx) => (
-                  <div key={idx} className={`console-line ${log.type}`}>
-                    {log.type === "cmd" ? "> " : ""}
-                    {log.text}
+            <div className={`canvas-content-pane ${activeTab === "activity" ? "active" : ""}`}>
+              <div className="activity-panel">
+                {/* Tool Calls from current session */}
+                <div className="activity-section">
+                  <div className="activity-section-header">
+                    <Zap size={11} /> {t("activity.toolCalls", lang)}
                   </div>
-                ))}
+                  {(() => {
+                    const allActions = currentSession.messages
+                      .filter(m => m.role === "assistant" && m.actions && m.actions.length > 0)
+                      .flatMap(m => m.actions || []);
+                    if (allActions.length === 0) {
+                      return <div className="activity-empty">{t("activity.empty", lang)}</div>;
+                    }
+                    return (
+                      <div className="activity-list">
+                        {allActions.slice(-20).reverse().map((act, idx) => (
+                          <div key={idx} className={`activity-item ${act.status}`}>
+                            <div className="activity-item-header">
+                              <span className="activity-item-name">{act.name}</span>
+                              <span className={`activity-item-badge ${act.status}`}>{statusLabel(act.status)}</span>
+                            </div>
+                            {act.output && (
+                              <div className="activity-item-output">
+                                {act.output.length > 120 ? act.output.slice(0, 120) + "..." : act.output}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Search Sources from current session */}
+                <div className="activity-section">
+                  <div className="activity-section-header">
+                    <Globe size={11} /> {t("activity.searchSources", lang)}
+                  </div>
+                  {(() => {
+                    const allSearchStatus = currentSession.messages
+                      .filter(m => m.searchStatus && m.searchStatus.length > 0)
+                      .flatMap(m => m.searchStatus || []);
+                    const resultsWithSources = allSearchStatus.filter(s => s.type === "results" && s.sources && s.sources.length > 0);
+                    if (resultsWithSources.length === 0) {
+                      return <div className="activity-empty">{lang === "zh" ? "暂无搜索来源" : "No search sources yet"}</div>;
+                    }
+                    // Deduplicate sources by link
+                    const allSources = resultsWithSources.flatMap(ss => ss.sources || []);
+                    const seenLinks = new Set<string>();
+                    const uniqueSources = allSources.filter(src => {
+                      if (!src.link || seenLinks.has(src.link)) return false;
+                      seenLinks.add(src.link);
+                      return true;
+                    });
+                    return (
+                      <div className="activity-list">
+                        {uniqueSources.slice(0, 15).map((src, idx) => (
+                          <div key={idx} className="activity-source-item">
+                            <div className="activity-source-title">
+                              {src.link ? <a href={src.link} target="_blank" rel="noopener noreferrer">{src.title || src.link}</a> : src.title}
+                            </div>
+                            {src.snippet && <div className="activity-source-snippet">{src.snippet}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Recent Logs (collapsed by default) */}
+                <details className="activity-section activity-logs-section">
+                  <summary className="activity-section-header">
+                    <TerminalIcon size={11} /> {t("terminal", lang)}
+                  </summary>
+                  <div className="console-container">
+                    {terminalLogs.slice(-50).map((log, idx) => (
+                      <div key={idx} className={`console-line ${log.type}`}>
+                        {log.type === "cmd" ? "> " : ""}
+                        {log.text}
+                      </div>
+                    ))}
+                  </div>
+                </details>
               </div>
             </div>
 
@@ -3313,7 +3579,12 @@ function App() {
 
       {/* ====== Settings Modal ====== */}
       {settingsOpen && (
-        <div className="modal-overlay" onClick={() => setSettingsOpen(false)}>
+        <div className="modal-overlay" onMouseDown={(e) => {
+          // Only close if clicking directly on overlay, not if mousedown started inside modal
+          if (e.target === e.currentTarget) {
+            setSettingsOpen(false);
+          }
+        }}>
           <div className="modal-content settings-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 style={{ fontWeight: 700, fontSize: "0.92rem" }}>{t("settings.title", lang)}</h3>
@@ -3323,74 +3594,26 @@ function App() {
             </div>
 
             <div className="settings-tabs">
-              <button className={`settings-tab ${settingsTab === "appearance" ? "active" : ""}`} onClick={() => setSettingsTab("appearance")}>
-                <Sun size={13} /> {lang === "zh" ? "外观" : "Appearance"}
+              <button className={`settings-tab ${settingsTab === "model" ? "active" : ""}`} onClick={() => setSettingsTab("model")}>
+                <Zap size={13} /> {t("settings.tab.model", lang)}
               </button>
-              <button className={`settings-tab ${settingsTab === "api" ? "active" : ""}`} onClick={() => setSettingsTab("api")}>
-                <Zap size={13} /> API
+              <button className={`settings-tab ${settingsTab === "chat" ? "active" : ""}`} onClick={() => setSettingsTab("chat")}>
+                <MessageSquare size={13} /> {t("settings.tab.chat", lang)}
               </button>
-              <button className={`settings-tab ${settingsTab === "behavior" ? "active" : ""}`} onClick={() => setSettingsTab("behavior")}>
-                <ShieldAlert size={13} /> {lang === "zh" ? "行为" : "Behavior"}
+              <button className={`settings-tab ${settingsTab === "agent" ? "active" : ""}`} onClick={() => setSettingsTab("agent")}>
+                <ShieldAlert size={13} /> {t("settings.tab.agent", lang)}
               </button>
-              <button className={`settings-tab ${settingsTab === "advanced" ? "active" : ""}`} onClick={() => setSettingsTab("advanced")}>
-                <Server size={13} /> {lang === "zh" ? "高级" : "Advanced"}
+              <button className={`settings-tab ${settingsTab === "search" ? "active" : ""}`} onClick={() => setSettingsTab("search")}>
+                <Globe size={13} /> {t("settings.tab.search", lang)}
+              </button>
+              <button className={`settings-tab ${settingsTab === "data" ? "active" : ""}`} onClick={() => setSettingsTab("data")}>
+                <Server size={13} /> {t("settings.tab.data", lang)}
               </button>
             </div>
 
             <div className="modal-body">
-              {settingsTab === "appearance" && (
-              <>
-              <div className="form-group">
-                <label className="form-label">{t("settings.theme", lang)}</label>
-                <div className="theme-toggle">
-                  <Sun size={14} style={{ color: config.theme === "light" ? "var(--accent)" : "var(--text-tertiary)" }} />
-                  <div
-                    className={`theme-switch ${config.theme === "dark" ? "active" : ""}`}
-                    onClick={toggleTheme}
-                  >
-                    <div className="theme-switch-knob" />
-                  </div>
-                  <Moon size={14} style={{ color: config.theme === "dark" ? "var(--accent)" : "var(--text-tertiary)" }} />
-                  <span className="theme-toggle-label">
-                    {config.theme === "dark" ? t("settings.theme.dark", lang) : t("settings.theme.light", lang)}
-                  </span>
-                </div>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">{t("settings.language", lang)}</label>
-                <div className="lang-toggle">
-                  <button
-                    className={`lang-btn ${lang === "zh" ? "active" : ""}`}
-                    onClick={() => setConfig((prev) => ({ ...prev, language: "zh" }))}
-                  >
-                    中文
-                  </button>
-                  <button
-                    className={`lang-btn ${lang === "en" ? "active" : ""}`}
-                    onClick={() => setConfig((prev) => ({ ...prev, language: "en" }))}
-                  >
-                    English
-                  </button>
-                </div>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label"><Type size={12} /> {t("settings.fontSize", lang)}: {config.font_size}px</label>
-                <input
-                  type="range"
-                  min={10}
-                  max={24}
-                  step={1}
-                  value={config.font_size}
-                  onChange={(e) => setConfig((prev) => ({ ...prev, font_size: parseInt(e.target.value) }))}
-                  style={{ width: "100%" }}
-                />
-              </div>
-              </>
-              )}
-
-              {settingsTab === "api" && (
+              {/* ===== Tab 1: 模型与 API ===== */}
+              {settingsTab === "model" && (
               <>
               {/* API Profiles */}
               <div className="form-group">
@@ -3514,6 +3737,59 @@ function App() {
                   </button>
                 </div>
               </div>
+              </>
+              )}
+
+              {/* ===== Tab 2: 聊天体验 ===== */}
+              {settingsTab === "chat" && (
+              <>
+              <div className="form-group">
+                <label className="form-label">{t("settings.theme", lang)}</label>
+                <div className="theme-toggle">
+                  <Sun size={14} style={{ color: config.theme === "light" ? "var(--accent)" : "var(--text-tertiary)" }} />
+                  <div
+                    className={`theme-switch ${config.theme === "dark" ? "active" : ""}`}
+                    onClick={toggleTheme}
+                  >
+                    <div className="theme-switch-knob" />
+                  </div>
+                  <Moon size={14} style={{ color: config.theme === "dark" ? "var(--accent)" : "var(--text-tertiary)" }} />
+                  <span className="theme-toggle-label">
+                    {config.theme === "dark" ? t("settings.theme.dark", lang) : t("settings.theme.light", lang)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">{t("settings.language", lang)}</label>
+                <div className="lang-toggle">
+                  <button
+                    className={`lang-btn ${lang === "zh" ? "active" : ""}`}
+                    onClick={() => setConfig((prev) => ({ ...prev, language: "zh" }))}
+                  >
+                    中文
+                  </button>
+                  <button
+                    className={`lang-btn ${lang === "en" ? "active" : ""}`}
+                    onClick={() => setConfig((prev) => ({ ...prev, language: "en" }))}
+                  >
+                    English
+                  </button>
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label"><Type size={12} /> {t("settings.fontSize", lang)}: {config.font_size}px</label>
+                <input
+                  type="range"
+                  min={10}
+                  max={24}
+                  step={1}
+                  value={config.font_size}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, font_size: parseInt(e.target.value) }))}
+                  style={{ width: "100%" }}
+                />
+              </div>
 
               <div className="form-group">
                 <label className="form-label">{t("settings.systemPrompt", lang)}</label>
@@ -3577,7 +3853,8 @@ function App() {
               </>
               )}
 
-              {settingsTab === "behavior" && (
+              {/* ===== Tab 3: Agent 与工具 ===== */}
+              {settingsTab === "agent" && (
               <>
               <div className="form-group">
                 <label className="form-label">{t("settings.approvalPolicy", lang)}</label>
@@ -3670,6 +3947,15 @@ function App() {
                   onChange={(e) => setConfig((prev) => ({ ...prev, command_timeout: parseInt(e.target.value) || 30 }))}
                 />
               </div>
+              </>
+              )}
+
+              {/* ===== Tab 4: 搜索 ===== */}
+              {settingsTab === "search" && (
+              <>
+              <div className="settings-section-desc">
+                {t("search.settings.desc", lang)}
+              </div>
 
               <div className="form-group">
                 <label className="form-label">{t("search.provider", lang)}</label>
@@ -3687,7 +3973,13 @@ function App() {
                 )}
               </div>
 
-              {config.search_provider === "tavily" && (
+              {config.search_provider === "duckduckgo" && (
+                <div className="settings-section-desc" style={{ background: "rgba(245, 158, 11, 0.06)", borderColor: "rgba(245, 158, 11, 0.2)" }}>
+                  {t("search.settings.fallbackDesc", lang)}
+                </div>
+              )}
+
+              {config.search_provider !== "searxng" && (
                 <div className="form-group">
                   <label className="form-label">{t("search.apiKey", lang)}</label>
                   <input
@@ -3697,12 +3989,24 @@ function App() {
                     onChange={(e) => setConfig((prev) => ({ ...prev, search_api_key: e.target.value }))}
                     placeholder={t("search.apiKeyPlaceholder", lang)}
                   />
+                  {config.search_provider !== "tavily" && (
+                    <span style={{ fontSize: "0.66rem", opacity: 0.5, display: "block", marginTop: 2 }}>
+                      {lang === "zh" ? "作为备用搜索引擎的 API Key" : "API Key for fallback search provider"}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {config.provider === "ollama" && (
+                <div className="settings-section-desc" style={{ background: "rgba(239, 68, 68, 0.06)", borderColor: "rgba(239, 68, 68, 0.2)" }}>
+                  {t("search.settings.ollamaNote", lang)}
                 </div>
               )}
               </>
               )}
 
-              {settingsTab === "advanced" && (
+              {/* ===== Tab 5: 数据与高级 ===== */}
+              {settingsTab === "data" && (
               <>
               <div className="form-group">
                 <label className="form-label"><Server size={12} /> {t("mcp.title", lang)}</label>
@@ -3718,7 +4022,7 @@ function App() {
                         style={{ padding: "2px 6px", fontSize: "0.68rem", color: "var(--error)" }}
                         onClick={async () => {
                           try {
-                            const updated = await invoke<AppConfig>("delete_mcp_server", { name });
+                            const updated = await invoke<AppConfig>("delete_mcp_server", { currentConfig: config, name });
                             setConfig(updated);
                           } catch (e) {
                             addLog(String(e), "error");
@@ -3733,7 +4037,7 @@ function App() {
                     <div className="mcp-empty">{t("mcp.empty", lang)}</div>
                   )}
                 </div>
-                <McpAddForm setConfig={setConfig} addLog={addLog} lang={lang} t={t} />
+                <McpAddForm setConfig={setConfig} addLog={addLog} lang={lang} t={t} config={config} />
               </div>
 
               {/* Ollama Model Fetch */}

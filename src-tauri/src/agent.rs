@@ -8,10 +8,48 @@ use std::path::Path;
 use std::time::Instant;
 use tauri::{Emitter, Window};
 
+/// Parse search result text into structured sources for frontend display
+fn parse_search_sources(tool_output: &str) -> Vec<Value> {
+    tool_output
+        .split("\n---\n")
+        .filter_map(|block| {
+            let title = block.lines().find(|l| l.starts_with("Title:")).map(|l| l.trim_start_matches("Title:").trim().to_string()).unwrap_or_default();
+            let link = block.lines().find(|l| l.starts_with("Link:")).map(|l| l.trim_start_matches("Link:").trim().to_string()).unwrap_or_default();
+            let snippet = block.lines().find(|l| l.starts_with("Snippet:")).map(|l| l.trim_start_matches("Snippet:").trim().to_string()).unwrap_or_default();
+            if title.is_empty() && snippet.is_empty() {
+                None
+            } else {
+                Some(json!({ "title": title, "link": link, "snippet": snippet }))
+            }
+        })
+        .take(5)
+        .collect()
+}
+
 const MAX_LOOPS: u32 = 20;
+
+const SEARCH_FOLLOWUP_INSTRUCTION: &str = "You have just received web search results. You MUST base your answer on these search results. Cite the sources by mentioning the title and link when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing and what you could find. Do not make up information not present in the search results.";
 
 static STEERING_QUEUE: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<Vec<String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(Vec::new())));
+
+/// Check if search followup instruction already exists in recent messages
+fn has_search_instruction(messages: &[Value]) -> bool {
+    messages.iter().rev().take(3).any(|msg| {
+        msg["role"] == "system" &&
+        msg["content"].as_str().unwrap_or("").contains("MUST base your answer on these search results")
+    })
+}
+
+/// Add search followup instruction if not already present
+fn add_search_instruction(messages: &mut Vec<Value>) {
+    if !has_search_instruction(messages) {
+        messages.push(json!({
+            "role": "system",
+            "content": SEARCH_FOLLOWUP_INSTRUCTION
+        }));
+    }
+}
 
 pub async fn push_steering_message(msg: String) {
     let mut queue = STEERING_QUEUE.lock().await;
@@ -122,6 +160,103 @@ pub struct AccumulatedToolCall {
     pub arguments: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImageAttachment {
+    pub name: String,
+    pub data: String,
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+}
+
+fn attachment_mime_type(att: &ImageAttachment) -> &str {
+    att.mime_type.as_deref().filter(|s| !s.is_empty()).unwrap_or("image/png")
+}
+
+fn attachment_data_url(att: &ImageAttachment) -> String {
+    let data = att.data.trim();
+    if data.starts_with("data:") {
+        data.to_string()
+    } else {
+        format!("data:{};base64,{}", attachment_mime_type(att), data)
+    }
+}
+
+fn attachment_base64(att: &ImageAttachment) -> String {
+    let data = att.data.trim();
+    if let Some((_, base64)) = data.split_once(',') {
+        base64.to_string()
+    } else {
+        data.to_string()
+    }
+}
+
+fn build_user_message(content: String, image_attachments: &[ImageAttachment], is_ollama: bool) -> Value {
+    if image_attachments.is_empty() {
+        return json!({
+            "role": "user",
+            "content": content
+        });
+    }
+
+    if is_ollama {
+        return json!({
+            "role": "user",
+            "content": content,
+            "images": image_attachments.iter().map(attachment_base64).collect::<Vec<_>>()
+        });
+    }
+
+    let mut parts = vec![json!({
+        "type": "text",
+        "text": content
+    })];
+    for att in image_attachments {
+        parts.push(json!({
+            "type": "image_url",
+            "image_url": {
+                "url": attachment_data_url(att)
+            }
+        }));
+    }
+
+    json!({
+        "role": "user",
+        "content": parts
+    })
+}
+
+fn image_attachments_from_message(msg: &Value) -> Vec<ImageAttachment> {
+    msg.get("attachments")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| serde_json::from_value::<ImageAttachment>(item.clone()).ok())
+                .filter(|att| !att.data.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn normalize_session_messages(messages: Vec<Value>, is_ollama: bool) -> Vec<Value> {
+    messages
+        .into_iter()
+        .map(|mut msg| {
+            let images = image_attachments_from_message(&msg);
+            let is_user = msg.get("role").and_then(|v| v.as_str()) == Some("user");
+            if is_user && !images.is_empty() {
+                let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return build_user_message(content, &images, is_ollama);
+            }
+
+            if let Some(obj) = msg.as_object_mut() {
+                obj.remove("attachments");
+            }
+            msg
+        })
+        .collect()
+}
+
 /// Core agent loop with streaming and human-in-the-loop approval
 pub async fn start_agent_loop(
     window: Window,
@@ -129,6 +264,8 @@ pub async fn start_agent_loop(
     config: AppConfig,
     session_messages: Vec<Value>,
     session_mode: String,
+    search_mode: String,
+    image_attachments: Vec<ImageAttachment>,
 ) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -137,7 +274,7 @@ pub async fn start_agent_loop(
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
     if session_mode == "chat" {
-        return run_chat_mode(window, client, user_prompt, config, session_messages).await;
+        return run_chat_mode(window, client, user_prompt, config, session_messages, search_mode, image_attachments).await;
     }
 
     let mut mcp_manager = McpManager::new();
@@ -164,7 +301,7 @@ pub async fn start_agent_loop(
         Vec::new()
     };
 
-    let result = start_agent_loop_inner(window, client, user_prompt, config, session_messages, mcp_manager, mcp_tool_defs).await;
+    let result = start_agent_loop_inner(window, client, user_prompt, config, session_messages, image_attachments, mcp_manager, mcp_tool_defs).await;
     result
 }
 
@@ -174,12 +311,16 @@ async fn run_chat_mode(
     user_prompt: String,
     config: AppConfig,
     session_messages: Vec<Value>,
+    search_mode: String,
+    image_attachments: Vec<ImageAttachment>,
 ) -> Result<(), String> {
     let chat_system_prompt = if config.system_prompt.contains("PowerShell") || config.system_prompt.contains("Windows PowerShell") {
         "You are a helpful AI assistant. You can search the web when needed to provide up-to-date information. Be concise, friendly, and helpful. Respond in the same language the user uses.".to_string()
     } else {
         config.system_prompt.clone()
     };
+    let has_web_search = config.tools_enabled.contains(&"web_search".to_string());
+    let is_ollama = config.provider == "ollama";
 
     let mut messages: Vec<Value> = vec![json!({
         "role": "system",
@@ -192,13 +333,62 @@ async fn run_chat_mode(
     } else {
         session_messages
     };
-    messages.extend(limited_messages);
-    messages.push(json!({
-        "role": "user",
-        "content": user_prompt
-    }));
+    messages.extend(normalize_session_messages(limited_messages, is_ollama));
+    messages.push(build_user_message(user_prompt.clone(), &image_attachments, is_ollama));
 
-    let has_web_search = config.tools_enabled.contains(&"web_search".to_string());
+    // Force search mode: execute search before sending to model
+    if search_mode == "force" && has_web_search && !is_ollama {
+        let search_query = user_prompt.clone();
+        let _ = window.emit("agent-search-status", json!({
+            "type": "searching",
+            "query": search_query,
+        }));
+        let search_start = std::time::Instant::now();
+        let search_args = json!({"query": search_query}).to_string();
+        let tool_output = execute_tool_with_timeout(
+            "web_search",
+            &search_args,
+            &config.default_work_dir,
+            &config.search_provider,
+            &config.search_api_key,
+            config.command_timeout,
+        ).await;
+        let search_elapsed = search_start.elapsed().as_secs_f64();
+
+        if tool_output.starts_with("Error:") {
+            let _ = window.emit("agent-search-status", json!({
+                "type": "error",
+                "query": search_query,
+                "message": &tool_output,
+                "duration": search_elapsed,
+                "provider": config.search_provider,
+            }));
+            let _ = window.emit("agent-stream-chunk", format!("\n❌ Search failed: {}\n", tool_output));
+            let _ = window.emit("agent-stream-done", json!({ "success": false }));
+            return Err(format!("Force search failed: {}", tool_output));
+        } else {
+            let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
+            let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+            let sources = parse_search_sources(&tool_output);
+
+            let _ = window.emit("agent-search-status", json!({
+                "type": "results",
+                "query": search_query,
+                "results": preview,
+                "duration": search_elapsed,
+                "resultCount": result_count,
+                "provider": config.search_provider,
+                "sources": sources,
+            }));
+
+            // Inject search results as context and instruct model to use them
+            messages.push(json!({
+                "role": "system",
+                "content": format!("Web search results for '{}':\n\n{}\n\nIMPORTANT: You MUST base your answer on the search results above. Cite the sources (title and link) when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing.", search_query, tool_output)
+            }));
+        }
+    }
+
     let web_search_tool = json!({
         "type": "function",
         "function": {
@@ -218,7 +408,6 @@ async fn run_chat_mode(
     });
 
     let request_start = Instant::now();
-    let is_ollama = config.provider == "ollama";
 
     let mut request_body = if is_ollama {
         json!({
@@ -253,7 +442,10 @@ async fn run_chat_mode(
         request_body["top_p"] = json!(config.top_p);
     }
 
-    if has_web_search && !is_ollama {
+    // In force mode, search was already executed and results injected;
+    // don't expose web_search tool to avoid duplicate searches.
+    // In auto mode, let the model decide whether to search.
+    if has_web_search && !is_ollama && search_mode != "force" {
         request_body["tools"] = json!([web_search_tool]);
         request_body["tool_choice"] = json!("auto");
     }
@@ -331,14 +523,20 @@ async fn run_chat_mode(
                             "query": query_display,
                             "message": tool_output,
                             "duration": search_elapsed,
+                            "provider": config.search_provider,
                         }));
                     } else {
+                        let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
                         let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                        let sources = parse_search_sources(&tool_output);
                         let _ = window.emit("agent-search-status", json!({
                             "type": "results",
                             "query": query_display,
                             "results": preview,
                             "duration": search_elapsed,
+                            "resultCount": result_count,
+                            "provider": config.search_provider,
+                            "sources": sources,
                         }));
                     }
 
@@ -352,6 +550,7 @@ async fn run_chat_mode(
                         "tool_call_id": tool_call_id,
                         "content": tool_output
                     }));
+                    add_search_instruction(&mut messages);
 
                     let mut followup_body = json!({
                         "model": config.model,
@@ -431,28 +630,35 @@ async fn run_chat_mode(
                                 "query": query_display,
                                 "message": tool_output.clone(),
                                 "duration": search_elapsed,
+                                "provider": config.search_provider,
                             }));
                         } else {
-                            let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
-                            let _ = window.emit("agent-search-status", json!({
-                                "type": "results",
-                                "query": query_display,
-                                "results": preview,
-                                "duration": search_elapsed,
-                            }));
-                        }
-
-                        messages.push(json!({
-                            "role": "assistant",
-                            "content": if clean_content.is_empty() { Value::Null } else { json!(clean_content) },
-                            "tool_calls": [{ "id": tc.id, "type": "function", "function": { "name": tc.name, "arguments": tc.arguments } }]
-                        }));
-                        messages.push(json!({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": tool_output
+                        let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
+                        let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                        let sources = parse_search_sources(&tool_output);
+                        let _ = window.emit("agent-search-status", json!({
+                            "type": "results",
+                            "query": query_display,
+                            "results": preview,
+                            "duration": search_elapsed,
+                            "resultCount": result_count,
+                            "provider": config.search_provider,
+                            "sources": sources,
                         }));
                     }
+
+                    messages.push(json!({
+                        "role": "assistant",
+                        "content": if clean_content.is_empty() { Value::Null } else { json!(clean_content) },
+                        "tool_calls": [{ "id": tc.id, "type": "function", "function": { "name": tc.name, "arguments": tc.arguments } }]
+                    }));
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tool_output
+                    }));
+                }
+                add_search_instruction(&mut messages);
 
                     let mut followup_body = json!({
                         "model": config.model,
@@ -683,12 +889,17 @@ async fn run_chat_mode(
                     "duration": search_elapsed.as_secs_f64(),
                 }));
             } else {
+                let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
                 let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                let sources = parse_search_sources(&tool_output);
                 let _ = window.emit("agent-search-status", json!({
                     "type": "results",
                     "query": query_display,
                     "results": preview,
                     "duration": search_elapsed.as_secs_f64(),
+                    "resultCount": result_count,
+                    "provider": config.search_provider,
+                    "sources": sources,
                 }));
             }
             tool_results.push(json!({
@@ -715,6 +926,7 @@ async fn run_chat_mode(
         for tr in &tool_results {
             messages.push(tr.clone());
         }
+        add_search_instruction(&mut messages);
 
         let mut followup_body = json!({
             "model": config.model,
@@ -851,14 +1063,20 @@ async fn run_chat_mode(
                             "query": query_display,
                             "message": tool_output.clone(),
                             "duration": search_elapsed,
+                            "provider": config.search_provider,
                         }));
                     } else {
+                        let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
                         let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                        let sources = parse_search_sources(&tool_output);
                         let _ = window.emit("agent-search-status", json!({
                             "type": "results",
                             "query": query_display,
                             "results": preview,
                             "duration": search_elapsed,
+                            "resultCount": result_count,
+                            "provider": config.search_provider,
+                            "sources": sources,
                         }));
                     }
                     tool_results.push(json!({
@@ -872,10 +1090,21 @@ async fn run_chat_mode(
                     messages.push(json!({
                         "role": "assistant",
                         "content": if followup_content.is_empty() { Value::Null } else { json!(followup_content) },
+                        "tool_calls": dsml_calls.iter().map(|tc| {
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": tc.arguments
+                                }
+                            })
+                        }).collect::<Vec<_>>()
                     }));
                     for tr in &tool_results {
                         messages.push(tr.clone());
                     }
+                    add_search_instruction(&mut messages);
 
                     let mut second_followup_body = json!({
                         "model": config.model,
@@ -978,10 +1207,12 @@ async fn start_agent_loop_inner(
     user_prompt: String,
     config: AppConfig,
     session_messages: Vec<Value>,
+    image_attachments: Vec<ImageAttachment>,
     mut mcp_manager: McpManager,
     mcp_tool_defs: Vec<Value>,
 ) -> Result<(), String> {
     let mut system_prompt = config.system_prompt.clone();
+    let is_ollama = config.provider == "ollama";
 
     if let Some((rules, filename)) = load_workspace_rules(&config.default_work_dir) {
         system_prompt.push_str(&format!(
@@ -1005,12 +1236,8 @@ async fn start_agent_loop_inner(
     } else {
         session_messages
     };
-    messages.extend(limited_messages);
-
-    messages.push(json!({
-        "role": "user",
-        "content": user_prompt
-    }));
+    messages.extend(normalize_session_messages(limited_messages, is_ollama));
+    messages.push(build_user_message(user_prompt, &image_attachments, is_ollama));
 
     let mut loop_count = 0;
     let mut total_prompt_tokens: u64 = 0;
@@ -1036,8 +1263,6 @@ async fn start_agent_loop_inner(
         compact_messages(&mut messages, config.context_limit as usize);
 
         let request_start = Instant::now();
-
-        let is_ollama = config.provider == "ollama";
 
         // Build request body
         let mut request_body = if is_ollama {
