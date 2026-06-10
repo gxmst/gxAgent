@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 
 type PendingMap = std::sync::Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
@@ -19,9 +19,59 @@ pub struct McpServer {
     _stderr_handle: tokio::task::JoinHandle<()>,
 }
 
+/// Validate MCP server command before starting
+fn validate_mcp_command(command: &str) -> Result<(), String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("MCP command cannot be empty".to_string());
+    }
+
+    if command.contains('\0') || command.contains('\n') || command.contains('\r') {
+        return Err("MCP command contains invalid characters".to_string());
+    }
+
+    // Plain executable names such as `npx`, `uvx`, `node`, or `python` are resolved by PATH.
+    if !command.contains('\\') && !command.contains('/') {
+        return Ok(());
+    }
+
+    let path = std::path::Path::new(command);
+    if !path.exists() {
+        return Err(format!("MCP command path does not exist: {}", command));
+    }
+    if !path.is_file() {
+        return Err(format!("MCP command is not a file: {}", command));
+    }
+
+    Ok(())
+}
+
+/// Validate environment variables to prevent malicious injection
+fn validate_env_vars(env: &std::collections::HashMap<String, String>) -> Result<(), String> {
+    // Block dangerous environment variables that could be used for code injection
+    let dangerous_vars = ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"];
+
+    for var in dangerous_vars {
+        if env.contains_key(var) {
+            return Err(format!(
+                "Environment variable '{}' is not allowed for security reasons",
+                var
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 impl McpServer {
     /// Start an MCP server process and initialize it
     pub async fn start(config: &McpServerConfig) -> Result<Self, String> {
+        // Validate command path
+        validate_mcp_command(&config.command)?;
+
+        // Validate environment variables
+        validate_env_vars(&config.env)?;
+
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
             .envs(&config.env)
@@ -30,12 +80,9 @@ impl McpServer {
             .stderr(Stdio::piped())
             .creation_flags(0x08000000); // CREATE_NO_WINDOW on Windows
 
-        let mut child = cmd.spawn().map_err(|e| {
-            format!(
-                "Failed to start MCP server '{}': {}",
-                config.command, e
-            )
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to start MCP server '{}': {}", config.command, e))?;
 
         let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
@@ -89,18 +136,23 @@ impl McpServer {
 
         // Send initialize request
         let _init_result = server
-            .send_request("initialize", json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "gxAgent",
-                    "version": "1.0.0"
-                }
-            }))
+            .send_request(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "gxAgent",
+                        "version": "1.0.0"
+                    }
+                }),
+            )
             .await?;
 
         // Send initialized notification
-        server.send_notification("notifications/initialized", json!({})).await?;
+        server
+            .send_notification("notifications/initialized", json!({}))
+            .await?;
 
         // Fetch tool definitions
         let tools_result = server.send_request("tools/list", json!({})).await?;
@@ -142,7 +194,8 @@ impl McpServer {
         })?;
 
         // Wait for the reader task to deliver the response
-        rx.await.map_err(|_| "MCP server closed connection".to_string())?
+        rx.await
+            .map_err(|_| "MCP server closed connection".to_string())?
     }
 
     /// Send a JSON-RPC notification (no response expected)
@@ -159,10 +212,13 @@ impl McpServer {
     /// Call a tool on this MCP server
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
         let result = self
-            .send_request("tools/call", json!({
-                "name": name,
-                "arguments": arguments
-            }))
+            .send_request(
+                "tools/call",
+                json!({
+                    "name": name,
+                    "arguments": arguments
+                }),
+            )
             .await?;
 
         // Extract text content from the result
@@ -251,19 +307,32 @@ impl McpManager {
     }
 
     /// Route a tool call to the appropriate MCP server
-    pub async fn call_tool(&mut self, server_name: &str, tool_name: &str, arguments: Value) -> Result<String, String> {
-        let server = self.servers.get(server_name).ok_or_else(|| format!("MCP server '{}' not found", server_name))?;
+    pub async fn call_tool(
+        &mut self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<String, String> {
+        let server = self
+            .servers
+            .get(server_name)
+            .ok_or_else(|| format!("MCP server '{}' not found", server_name))?;
         server.call_tool(tool_name, arguments).await
     }
 
     /// Route a tool call by tool name — searches all servers for the tool
-    pub async fn route_tool_call(&mut self, tool_name: &str, arguments: Value) -> Result<String, String> {
+    pub async fn route_tool_call(
+        &mut self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<String, String> {
         for (server_name, server) in self.servers.iter() {
             for tool_def in server.tool_definitions() {
                 if tool_def["name"].as_str() == Some(tool_name) {
-                    return server.call_tool(tool_name, arguments).await.map_err(|e| {
-                        format!("MCP server '{}': {}", server_name, e)
-                    });
+                    return server
+                        .call_tool(tool_name, arguments)
+                        .await
+                        .map_err(|e| format!("MCP server '{}': {}", server_name, e));
                 }
             }
         }
