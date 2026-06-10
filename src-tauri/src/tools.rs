@@ -4,18 +4,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
-const FILE_SIZE_LIMIT: usize = 100 * 1024;
+const FILE_SIZE_LIMIT: usize = 1024 * 1024; // 1MB
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const BLOCKED_PATH_PREFIXES: &[&str] = &[
     r"\Windows\System32",
     r"\Windows\SysWOW64",
+    r"\Windows\System32\config",
     r"\ProgramData",
+    r"\Users\All Users",
     r"\.ssh",
     r"\.gnupg",
     r"\.aws",
     r"\.kube",
+    r"\.config\gcloud",
+    r"\AppData\Roaming\Microsoft\Credentials",
+    r"\AppData\Local\Microsoft\Credentials",
 ];
 
 pub fn get_all_tool_definitions() -> Vec<Value> {
@@ -206,14 +211,36 @@ async fn run_execute_command(command: &str, work_dir: &str, timeout_secs: u64) -
     let stdout = String::from_utf8(result.stdout).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
     let stderr = String::from_utf8(result.stderr).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
 
+    let exit_code = result
+        .status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "terminated".to_string());
+    let stdout = stdout.trim_end().to_string();
+    let stderr = stderr.trim_end().to_string();
+
+    if !result.status.success() {
+        let mut details = format!("Command exited with code {}", exit_code);
+        if !stdout.is_empty() {
+            details.push_str(&format!("\nStdout:\n{}", stdout));
+        }
+        if !stderr.is_empty() {
+            details.push_str(&format!("\nStderr:\n{}", stderr));
+        }
+        if stdout.is_empty() && stderr.is_empty() {
+            details.push_str("\n(no stdout/stderr)");
+        }
+        return Err(details);
+    }
+
     if stdout.is_empty() && stderr.is_empty() {
-        Ok("(no output)".to_string())
+        Ok("Command completed successfully (exit code 0) with no stdout/stderr. If you expected data, the command may have launched a GUI app, written output to a file, or require a different CLI flag for console output.".to_string())
     } else if stderr.is_empty() {
-        Ok(stdout)
+        Ok(format!("Exit code: 0\nStdout:\n{}", stdout))
     } else if stdout.is_empty() {
-        Ok(format!("Stderr:\n{}", stderr))
+        Ok(format!("Exit code: 0\nStderr:\n{}", stderr))
     } else {
-        Ok(format!("Stdout:\n{}\nStderr:\n{}", stdout, stderr))
+        Ok(format!("Exit code: 0\nStdout:\n{}\nStderr:\n{}", stdout, stderr))
     }
 }
 

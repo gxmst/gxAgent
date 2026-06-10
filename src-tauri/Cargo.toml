@@ -36,5 +36,7 @@ whoami = "1"
 aes-gcm = "0.10"
 rand = "0.8"
 scraper = "0.22"
-
+argon2 = "0.5"
+hex = "0.4"
+getrandom = "0.2"
 

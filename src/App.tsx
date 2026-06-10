@@ -38,6 +38,7 @@ import {
   Copy,
   Pencil,
   RotateCcw,
+  CircleStop,
   X,
   Eye,
   Monitor,
@@ -1037,6 +1038,48 @@ function App() {
 
   const agentEventSessionId = () => activeRequestSessionIdRef.current || currentSessionIdRef.current;
 
+  const finishStreamingLocally = () => {
+    isStreamingRef.current = false;
+    activeRequestIdRef.current = "";
+    activeRequestSessionIdRef.current = "";
+    setPendingApprovals(null);
+    setIsStreaming(false);
+    setTimeout(() => chatTextareaRef.current?.focus(), 100);
+  };
+
+  const upsertToolActions = (messages: Message[], incoming: ToolAction[]) => {
+    const next = [...messages];
+    if (next.length === 0 || next[next.length - 1].role !== "assistant") {
+      next.push({
+        role: "assistant",
+        content: "",
+        actions: incoming,
+        timestamp: Date.now(),
+        model: activeRequestModelRef.current,
+        contextTokens: activeRequestContextTokensRef.current,
+      });
+      return next;
+    }
+
+    const last = { ...next[next.length - 1] };
+    const actions = last.actions ? [...last.actions] : [];
+    for (const action of incoming) {
+      const idx = actions.findIndex((a) => a.id === action.id);
+      if (idx >= 0) {
+        const merged = { ...actions[idx], ...action };
+        if (!action.arguments && actions[idx].arguments) {
+          merged.arguments = actions[idx].arguments;
+        }
+        actions[idx] = merged;
+      } else {
+        actions.push(action);
+      }
+    }
+    last.actions = actions;
+    next[next.length - 1] = last;
+    return next;
+  };
+
   useEffect(() => {
     setRightPanelOpen(currentMode === "code");
     setSearchMode(currentSession.sessionConfig.searchMode || "auto");
@@ -1106,6 +1149,13 @@ function App() {
     const unlisten = listen<string>("config-import-rekey", (event) => {
       addLog(event.payload, "error");
       setSettingsOpen(true);
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<string>("config-import-warning", (event) => {
+      addLog(event.payload, "info", true);
     });
     return () => { unlisten.then(fn => fn()); };
   }, []);
@@ -1696,9 +1746,17 @@ function App() {
               prev.map((s) => {
                 if (s.id !== agentEventSessionId()) return s;
                 const messages = [...s.messages];
-                if (messages.length === 0) return s;
+                if (messages.length === 0 || messages[messages.length - 1].role !== "assistant") {
+                  messages.push({
+                    role: "assistant",
+                    content: "",
+                    actions: [],
+                    timestamp: Date.now(),
+                    model: activeRequestModelRef.current,
+                    contextTokens: activeRequestContextTokensRef.current,
+                  });
+                }
                 const last = { ...messages[messages.length - 1] };
-                if (last.role !== "assistant") return s;
                 const actions = last.actions ? [...last.actions] : [];
                 if (index >= actions.length || !actions[index]) {
                   actions[index] = {
@@ -1752,7 +1810,12 @@ function App() {
             setSessions((prev) =>
               prev.map((s) => {
                 if (s.id !== agentEventSessionId()) return s;
-                const messages = [...s.messages];
+                const messages = upsertToolActions(s.messages, [{
+                  id,
+                  name,
+                  arguments: args,
+                  status: "executing" as const,
+                }]);
                 if (messages.length === 0) return s;
                 const last = { ...messages[messages.length - 1] };
                 if (last.role !== "assistant" || !last.actions) return s;
@@ -1772,9 +1835,10 @@ function App() {
           "agent-tool-output",
           (event) => {
             const { id, name, output } = event.payload;
+            const isErrorOutput = output.trimStart().startsWith("Error:");
             addLog(
-              `[Done] ${name}: ${output.substring(0, 200)}${output.length > 200 ? "..." : ""}`,
-              "success"
+              `[${isErrorOutput ? "Error" : "Done"}] ${name}: ${output.substring(0, 200)}${output.length > 200 ? "..." : ""}`,
+              isErrorOutput ? "error" : "success"
             );
             if (name === "write_file") {
               refreshFileList();
@@ -1802,12 +1866,18 @@ function App() {
             setSessions((prev) =>
               prev.map((s) => {
                 if (s.id !== agentEventSessionId()) return s;
-                const messages = [...s.messages];
+                const messages = upsertToolActions(s.messages, [{
+                  id,
+                  name,
+                  arguments: "",
+                  status: isErrorOutput ? "error" as const : "done" as const,
+                  output,
+                }]);
                 if (messages.length === 0) return s;
                 const last = { ...messages[messages.length - 1] };
                 if (last.role !== "assistant" || !last.actions) return s;
                 last.actions = last.actions.map((a) =>
-                  a.id === id ? { ...a, status: "done" as const, output } : a
+                  a.id === id ? { ...a, status: isErrorOutput ? "error" as const : "done" as const, output } : a
                 );
                 messages[messages.length - 1] = last;
                 return { ...s, messages };
@@ -1826,7 +1896,13 @@ function App() {
             setSessions((prev) =>
               prev.map((s) => {
                 if (s.id !== agentEventSessionId()) return s;
-                const messages = [...s.messages];
+                const messages = upsertToolActions(s.messages, [{
+                  id,
+                  name,
+                  arguments: "",
+                  status: "blocked" as const,
+                  output: reason,
+                }]);
                 if (messages.length === 0) return s;
                 const last = { ...messages[messages.length - 1] };
                 if (last.role !== "assistant" || !last.actions) return s;
@@ -1844,21 +1920,16 @@ function App() {
       unlisteners.push(
         await listen<PendingApproval>("agent-tool-approval-request", (event) => {
           setPendingApprovals(event.payload);
+          const pendingActions: ToolAction[] = event.payload.tool_calls.map((tc) => ({
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+            status: "pending_approval" as const,
+          }));
           setSessions((prev) =>
             prev.map((s) => {
               if (s.id !== agentEventSessionId()) return s;
-              const messages = [...s.messages];
-              if (messages.length === 0) return s;
-              const last = { ...messages[messages.length - 1] };
-              if (last.role !== "assistant" || !last.actions) return s;
-              const pendingIds = event.payload.tool_calls.map((tc) => tc.id);
-              last.actions = last.actions.map((a) =>
-                pendingIds.includes(a.id)
-                  ? { ...a, status: "pending_approval" as const }
-                  : a
-              );
-              messages[messages.length - 1] = last;
-              return { ...s, messages };
+              return { ...s, messages: upsertToolActions(s.messages, pendingActions) };
             })
           );
         })
@@ -1909,12 +1980,9 @@ function App() {
       unlisteners.push(
         await listen<AgentEventPayload<{ status?: string }>>("agent-complete", (event) => {
           if (!isCurrentRequestPayload(event.payload)) return;
-          isStreamingRef.current = false;
-          activeRequestIdRef.current = "";
-          activeRequestSessionIdRef.current = "";
-          setIsStreaming(false);
-          addLog(t("log.complete", lang), "info");
-          setTimeout(() => chatTextareaRef.current?.focus(), 100);
+          const status = typeof event.payload === "string" ? "" : event.payload.status;
+          finishStreamingLocally();
+          addLog(status === "cancelled" ? (lang === "zh" ? "已停止当前输出。" : "Current output stopped.") : t("log.complete", lang), "info");
         })
       );
 
@@ -2117,6 +2185,41 @@ function App() {
     }
   };
 
+  const handleStopStreaming = async () => {
+    const requestId = activeRequestIdRef.current;
+    if (!requestId || !isStreamingRef.current) {
+      finishStreamingLocally();
+      return;
+    }
+
+    try {
+      await invoke("cancel_agent_session", { requestId });
+      addLog(lang === "zh" ? "已请求停止当前输出。" : "Stop requested for current output.", "info");
+    } catch (e) {
+      addLog(`Stop request failed: ${e}`, "error");
+    } finally {
+      if (activeRequestIdRef.current === requestId) {
+        finishStreamingLocally();
+      }
+    }
+  };
+
+  const handleSteeringMessage = async () => {
+    const message = prompt.trim();
+    if (!message || !isStreamingRef.current || currentMode !== "code") return;
+    try {
+      await invoke("push_steering_message", { message });
+      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+        ...s,
+        messages: [...s.messages, { role: "user" as const, content: `[Steering] ${message}` }]
+      } : s));
+      setPrompt("");
+      addLog(lang === "zh" ? "干预指令已发送" : "Steering message sent", "info");
+    } catch (e) {
+      addLog(`Steering error: ${e}`, "error");
+    }
+  };
+
   const handleRetry = useCallback(async (msgIdx: number) => {
     if (isStreamingRef.current) return;
     const msgs = currentSession.messages;
@@ -2281,6 +2384,37 @@ function App() {
     setPendingApprovals(null);
   };
 
+  const renderApprovalCard = (className = "") => {
+    if (!pendingApprovals) return null;
+    return (
+      <div className={`approval-card ${className}`.trim()}>
+        <div className="approval-card-header">
+          <ShieldAlert size={14} />
+          <span>{t("approval.title", lang)}</span>
+        </div>
+        {pendingApprovals.tool_calls.map((tc) => (
+          <div key={tc.id} className="approval-item">
+            <span style={{ fontWeight: 600, color: "var(--accent)", fontSize: "0.8rem" }}>{tc.name}</span>
+            <pre style={{ fontSize: "0.72rem", color: "var(--text-secondary)", marginTop: 3, whiteSpace: "pre-wrap" }}>
+              {tc.arguments}
+            </pre>
+          </div>
+        ))}
+        <div className="approval-actions">
+          <button className="btn btn-approve" onClick={() => handleApproval(true)}>
+            <CheckCircle2 size={13} /> {t("approval.approve", lang)}
+          </button>
+          <button className="btn btn-approve-trust" onClick={() => handleApproval(true, true)} title={t("approval.trustHint", lang)}>
+            <ShieldAlert size={13} /> {t("approval.approveAndTrust", lang)}
+          </button>
+          <button className="btn btn-reject" onClick={() => handleApproval(false)}>
+            <XCircle size={13} /> {t("approval.reject", lang)}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const createNewSession = () => {
     const newId = `session-${Date.now()}`;
     setSessions((prev) => [
@@ -2345,7 +2479,11 @@ function App() {
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSendMessage();
+      if (isStreamingRef.current && currentMode === "code") {
+        handleSteeringMessage();
+      } else {
+        handleSendMessage();
+      }
     }
   };
 
@@ -2374,6 +2512,7 @@ function App() {
         return <Loader2 size={13} className="animate-spin" style={{ color: "var(--accent)" }} />;
       case "done":
         return <CheckCircle2 size={13} style={{ color: "var(--success)" }} />;
+      case "error":
       case "blocked":
         return <XCircle size={13} style={{ color: "var(--error)" }} />;
       case "pending_approval":
@@ -2388,6 +2527,7 @@ function App() {
       case "drafting": return t("status.parsing", lang);
       case "executing": return t("status.running", lang);
       case "done": return t("status.done", lang);
+      case "error": return lang === "zh" ? "出错" : "error";
       case "blocked": return t("status.blocked", lang);
       case "pending_approval": return t("status.awaiting", lang);
       default: return status;
@@ -2406,6 +2546,9 @@ function App() {
     currentInputAttachmentTokens;
   const currentModelLimit = modelContextLimit(activeModelId);
   const contextUsagePercent = Math.min(100, Math.round((currentContextTokens / currentModelLimit) * 100));
+  const pendingApprovalHasInlineAction = !!pendingApprovals && currentSession.messages.some((msg) =>
+    msg.actions?.some((action) => pendingApprovals.tool_calls.some((tc) => tc.id === action.id))
+  );
 
   // ==========================================
   // Render
@@ -2756,65 +2899,69 @@ function App() {
                 <div className="panel-subtitle">{config.default_work_dir}</div>
               )}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span className={`mode-indicator ${currentMode}`}>
-                {currentMode === "chat" ? <MessageSquare size={11} /> : <TerminalIcon size={11} />}
-                {currentMode === "chat" ? t("mode.chat", lang) : t("mode.code", lang)}
-              </span>
-              <div className="model-indicator">
-                <span className="model-dot" />
-                {getModelDisplayName(currentSession.sessionConfig.model || config.model)}
-              </div>
-              {usageStats && (
-                <div className="usage-badge">
-                  <span className="usage-item" title={`${t("usage.prompt", lang)}: ${usageStats.promptTokens}`}>
-                    {t("usage.prompt", lang)} {usageStats.promptTokens}
-                  </span>
-                  <span className="usage-sep">/</span>
-                  <span className="usage-item" title={`${t("usage.completion", lang)}: ${usageStats.completionTokens}`}>
-                    {usageStats.completionTokens}
-                  </span>
-                  <span className="usage-sep">|</span>
-                  <span className="usage-item" title={t("usage.ttft", lang)}>
-                    {usageStats.ttftMs}ms
-                  </span>
-                  <span className="usage-sep">|</span>
-                  <span className="usage-item" title={t("usage.responseTime", lang)}>
-                    {usageStats.responseTimeMs >= 1000 ? `${(usageStats.responseTimeMs / 1000).toFixed(1)}s` : `${usageStats.responseTimeMs}ms`}
-                  </span>
+            <div className="panel-header-controls">
+              <div className="panel-status-cluster">
+                <span className={`mode-indicator ${currentMode}`}>
+                  {currentMode === "chat" ? <MessageSquare size={11} /> : <TerminalIcon size={11} />}
+                  {currentMode === "chat" ? t("mode.chat", lang) : t("mode.code", lang)}
+                </span>
+                <div className="model-indicator">
+                  <span className="model-dot" />
+                  {getModelDisplayName(currentSession.sessionConfig.model || config.model)}
                 </div>
-              )}
-              <button
-                className="panel-toggle-btn"
-                onClick={toggleTheme}
-                title="Toggle theme"
-              >
-                {config.theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
-              </button>
-              <button
-                className="panel-toggle-btn"
-                onClick={() => setSessionSettingsOpen(!sessionSettingsOpen)}
-                title={t("session.settings", lang)}
-              >
-                <Settings2 size={14} />
-              </button>
-              <button
-                className="panel-toggle-btn"
-                onClick={() => setRightPanelOpen(!rightPanelOpen)}
-                title={rightPanelOpen ? "Close panel" : "Open panel"}
-              >
-                {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-              </button>
-              <button
-                className={`panel-toggle-btn ${alwaysOnTop ? "active" : ""}`}
-                onClick={async () => {
-                  const result = await invoke<boolean>("toggle_always_on_top");
-                  setAlwaysOnTop(result);
-                }}
-                title={alwaysOnTop ? t("window.unpin", lang) : t("window.pin", lang)}
-              >
-                <Pin size={14} />
-              </button>
+                {usageStats && (
+                  <div className="usage-badge">
+                    <span className="usage-item" title={`${t("usage.prompt", lang)}: ${usageStats.promptTokens}`}>
+                      {t("usage.prompt", lang)} {usageStats.promptTokens}
+                    </span>
+                    <span className="usage-sep">/</span>
+                    <span className="usage-item" title={`${t("usage.completion", lang)}: ${usageStats.completionTokens}`}>
+                      {usageStats.completionTokens}
+                    </span>
+                    <span className="usage-sep">|</span>
+                    <span className="usage-item" title={t("usage.ttft", lang)}>
+                      {usageStats.ttftMs}ms
+                    </span>
+                    <span className="usage-sep">|</span>
+                    <span className="usage-item" title={t("usage.responseTime", lang)}>
+                      {usageStats.responseTimeMs >= 1000 ? `${(usageStats.responseTimeMs / 1000).toFixed(1)}s` : `${usageStats.responseTimeMs}ms`}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="panel-action-cluster">
+                <button
+                  className="panel-toggle-btn"
+                  onClick={toggleTheme}
+                  title="Toggle theme"
+                >
+                  {config.theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
+                </button>
+                <button
+                  className="panel-toggle-btn"
+                  onClick={() => setSessionSettingsOpen(!sessionSettingsOpen)}
+                  title={t("session.settings", lang)}
+                >
+                  <Settings2 size={14} />
+                </button>
+                <button
+                  className="panel-toggle-btn"
+                  onClick={() => setRightPanelOpen(!rightPanelOpen)}
+                  title={rightPanelOpen ? "Close panel" : "Open panel"}
+                >
+                  {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+                </button>
+                <button
+                  className={`panel-toggle-btn ${alwaysOnTop ? "active" : ""}`}
+                  onClick={async () => {
+                    const result = await invoke<boolean>("toggle_always_on_top");
+                    setAlwaysOnTop(result);
+                  }}
+                  title={alwaysOnTop ? t("window.unpin", lang) : t("window.pin", lang)}
+                >
+                  <Pin size={14} />
+                </button>
+              </div>
             </div>
           </header>
 
@@ -3339,33 +3486,7 @@ function App() {
                             {pendingApprovals &&
                               msg.actions?.some((a) =>
                                 pendingApprovals.tool_calls.some((tc) => tc.id === a.id)
-                              ) && (
-                                <div className="approval-card">
-                                  <div className="approval-card-header">
-                                    <ShieldAlert size={14} />
-                                    <span>{t("approval.title", lang)}</span>
-                                  </div>
-                                  {pendingApprovals.tool_calls.map((tc) => (
-                                    <div key={tc.id} className="approval-item">
-                                      <span style={{ fontWeight: 600, color: "var(--accent)", fontSize: "0.8rem" }}>{tc.name}</span>
-                                      <pre style={{ fontSize: "0.72rem", color: "var(--text-secondary)", marginTop: 3, whiteSpace: "pre-wrap" }}>
-                                        {tc.arguments}
-                                      </pre>
-                                    </div>
-                                  ))}
-                                  <div className="approval-actions">
-                                    <button className="btn btn-approve" onClick={() => handleApproval(true)}>
-                                      <CheckCircle2 size={13} /> {t("approval.approve", lang)}
-                                    </button>
-                                    <button className="btn btn-approve-trust" onClick={() => handleApproval(true, true)} title={t("approval.trustHint", lang)}>
-                                      <ShieldAlert size={13} /> {t("approval.approveAndTrust", lang)}
-                                    </button>
-                                    <button className="btn btn-reject" onClick={() => handleApproval(false)}>
-                                      <XCircle size={13} /> {t("approval.reject", lang)}
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
+                              ) && renderApprovalCard()}
                           </>
                         ) : (
                           <>
@@ -3489,6 +3610,11 @@ function App() {
             {dragOver && (
               <div className="drag-overlay">{t("attach.drop", lang)}</div>
             )}
+            {pendingApprovals && (
+              <div className={`approval-dock ${pendingApprovalHasInlineAction ? "has-inline" : ""}`}>
+                {renderApprovalCard("approval-card-dock")}
+              </div>
+            )}
             {attachments.length > 0 && (
               <div className="attachments-bar">
                 {attachments.map((att, i) => (
@@ -3524,6 +3650,7 @@ function App() {
               />
               <div className="chat-input-toolbar">
                 <div className="chat-input-toolbar-left">
+                  <div className="input-tool-group">
                   <button
                     className="btn btn-icon input-attach-btn"
                     title={t("role.title", lang)}
@@ -3736,8 +3863,10 @@ function App() {
                       </div>
                     )}
                   </div>
+                  </div>
                 </div>
                 <div className="chat-input-toolbar-right">
+                <div className="input-run-group">
                 <button
                   type="button"
                   className={`input-thinking-btn ${currentThinkingLevel}`}
@@ -3814,25 +3943,14 @@ function App() {
                   )}
                 </div>
                 <button
-                  className="btn btn-primary btn-icon input-send-btn"
-                  onClick={isStreaming && currentMode === "code" ? async () => {
-                    if (!prompt.trim()) return;
-                    try {
-                      await invoke("push_steering_message", { message: prompt.trim() });
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                        ...s,
-                        messages: [...s.messages, { role: "user" as const, content: `🔧 ${prompt.trim()}` }]
-                      } : s));
-                      setPrompt("");
-                      addLog(lang === "zh" ? "干预指令已发送" : "Steering message sent", "info");
-                    } catch (e) {
-                      addLog(`Steering error: ${e}`, "error");
-                    }
-                  } : handleSendMessage}
-                  disabled={isStreaming && currentMode === "chat"}
+                  className={`btn btn-primary btn-icon input-send-btn ${isStreaming ? "stop-active" : ""}`}
+                  onClick={isStreaming ? handleStopStreaming : handleSendMessage}
+                  disabled={!isStreaming && !prompt.trim() && attachments.length === 0}
+                  title={isStreaming ? (lang === "zh" ? "停止当前输出" : "Stop current output") : undefined}
                 >
-                  {isStreaming && currentMode === "code" ? <Zap size={13} /> : <Send size={13} />}
+                  {isStreaming ? <CircleStop size={14} /> : <Send size={13} />}
                 </button>
+                </div>
                 </div>
               </div>
             </div>
@@ -4549,8 +4667,11 @@ function App() {
               {/* ===== Tab 5: 数据与高级 ===== */}
               {settingsTab === "data" && (
               <>
-              <div className="form-group">
-                <label className="form-label"><Server size={12} /> {t("mcp.title", lang)}</label>
+              <div className="settings-panel">
+                <div className="settings-panel-header">
+                  <span><Server size={13} /> {t("mcp.title", lang)}</span>
+                  <span>{Object.keys(config.mcp_servers).length}</span>
+                </div>
                 <div className="mcp-server-list">
                   {Object.entries(config.mcp_servers).map(([name, server]) => (
                     <div key={name} className="mcp-server-item">
@@ -4583,11 +4704,12 @@ function App() {
 
               {/* Ollama Model Fetch */}
               {config.provider === "ollama" && (
-                <div className="form-group">
-                  <label className="form-label"><Zap size={12} /> {t("mcp.fetchModels", lang)}</label>
+                <div className="settings-panel">
+                  <div className="settings-panel-header">
+                    <span><Zap size={13} /> Ollama</span>
+                  </div>
                   <button
-                    className="btn btn-secondary"
-                    style={{ width: "100%", fontSize: "0.78rem" }}
+                    className="settings-action-card"
                     onClick={async () => {
                       try {
                         const list = await invoke<ModelInfo[]>("fetch_ollama_models", { baseUrl: config.base_url });
@@ -4598,17 +4720,20 @@ function App() {
                       }
                     }}
                   >
-                    <Search size={12} /> {t("mcp.fetchModels", lang)}
+                    <Search size={14} />
+                    <span>{t("mcp.fetchModels", lang)}</span>
                   </button>
                 </div>
               )}
 
               {/* Export / Import / Clear */}
-              <div className="form-group">
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <div className="settings-panel">
+                <div className="settings-panel-header">
+                  <span><Save size={13} /> {t("settings.tab.data", lang)}</span>
+                </div>
+                <div className="settings-action-grid">
                   <button
-                    className="btn btn-secondary"
-                    style={{ fontSize: "0.78rem", flex: 1 }}
+                    className="settings-action-card"
                     onClick={async () => {
                       try {
                         const json = await invoke<string>("export_config", { config });
@@ -4625,11 +4750,11 @@ function App() {
                       }
                     }}
                   >
-                    <Download size={12} /> {t("settings.exportConfig", lang)}
+                    <Download size={14} />
+                    <span>{t("settings.exportConfig", lang)}</span>
                   </button>
                   <button
-                    className="btn btn-secondary"
-                    style={{ fontSize: "0.78rem", flex: 1 }}
+                    className="settings-action-card"
                     onClick={() => {
                       const input = document.createElement("input");
                       input.type = "file";
@@ -4648,26 +4773,27 @@ function App() {
                       input.click();
                     }}
                   >
-                    <Upload size={12} /> {t("settings.importConfig", lang)}
+                    <Upload size={14} />
+                    <span>{t("settings.importConfig", lang)}</span>
+                  </button>
+                  <button
+                    className="settings-action-card danger"
+                    onClick={async () => {
+                      if (!window.confirm(t("settings.clearSessionsConfirm", lang))) return;
+                      try {
+                        await invoke("clear_all_sessions");
+                        setSessions([{ id: "default", title: "", messages: [], sessionConfig: { ...DEFAULT_SESSION_CONFIG } }]);
+                        setCurrentSessionId("default");
+                        addLog(t("settings.cleared", lang), "success", true);
+                      } catch (e) {
+                        addLog(String(e), "error");
+                      }
+                    }}
+                  >
+                    <Trash size={14} />
+                    <span>{t("settings.clearSessions", lang)}</span>
                   </button>
                 </div>
-                <button
-                  className="btn btn-secondary"
-                  style={{ fontSize: "0.78rem", width: "100%", marginTop: 6, color: "var(--error)" }}
-                  onClick={async () => {
-                    if (!window.confirm(t("settings.clearSessionsConfirm", lang))) return;
-                    try {
-                      await invoke("clear_all_sessions");
-                      setSessions([{ id: "default", title: "", messages: [], sessionConfig: { ...DEFAULT_SESSION_CONFIG } }]);
-                      setCurrentSessionId("default");
-                      addLog(t("settings.cleared", lang), "success", true);
-                    } catch (e) {
-                      addLog(String(e), "error");
-                    }
-                  }}
-                >
-                  <Trash size={12} /> {t("settings.clearSessions", lang)}
-                </button>
               </div>
               </>
               )}

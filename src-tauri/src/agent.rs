@@ -4,6 +4,7 @@ use crate::policy::{check_approval, ApprovalLevel};
 use crate::tools::{execute_tool_with_timeout, get_enabled_tool_definitions};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::future::Future;
 use std::path::Path;
 use std::time::Instant;
 use tauri::{Emitter, Window};
@@ -33,6 +34,72 @@ const GENERAL_ASSISTANT_INSTRUCTION: &str = "Assistant behavior: Be helpful, car
 
 static STEERING_QUEUE: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<Vec<String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(Vec::new())));
+
+const AGENT_CANCELLED_ERROR: &str = "__GX_AGENT_CANCELLED__";
+
+type CancellationMap = std::collections::HashMap<String, watch::Sender<bool>>;
+
+static AGENT_CANCELLATIONS: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<CancellationMap>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(CancellationMap::new())));
+
+async fn register_cancellation(request_id: &str) -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    let mut cancellations = AGENT_CANCELLATIONS.lock().await;
+    cancellations.insert(request_id.to_string(), tx);
+    rx
+}
+
+async fn unregister_cancellation(request_id: &str) {
+    let mut cancellations = AGENT_CANCELLATIONS.lock().await;
+    cancellations.remove(request_id);
+}
+
+pub async fn cancel_agent_request(request_id: &str) -> Result<(), String> {
+    let cancellations = AGENT_CANCELLATIONS.lock().await;
+    let tx = cancellations
+        .get(request_id)
+        .ok_or_else(|| format!("No active agent request found: {}", request_id))?;
+    tx.send(true)
+        .map_err(|_| "Failed to signal agent cancellation".to_string())
+}
+
+fn is_cancelled(cancel_rx: &watch::Receiver<bool>) -> bool {
+    *cancel_rx.borrow()
+}
+
+fn ensure_not_cancelled(cancel_rx: &watch::Receiver<bool>) -> Result<(), String> {
+    if is_cancelled(cancel_rx) {
+        Err(AGENT_CANCELLED_ERROR.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn is_agent_cancelled_error(err: &str) -> bool {
+    err == AGENT_CANCELLED_ERROR
+}
+
+async fn wait_for_cancellation(cancel_rx: &mut watch::Receiver<bool>) {
+    if *cancel_rx.borrow() {
+        return;
+    }
+    while cancel_rx.changed().await.is_ok() {
+        if *cancel_rx.borrow() {
+            return;
+        }
+    }
+}
+
+async fn await_with_cancel<T, F>(cancel_rx: &watch::Receiver<bool>, future: F) -> Result<T, String>
+where
+    F: Future<Output = T>,
+{
+    let mut cancel_rx = cancel_rx.clone();
+    tokio::select! {
+        _ = wait_for_cancellation(&mut cancel_rx) => Err(AGENT_CANCELLED_ERROR.to_string()),
+        value = future => Ok(value),
+    }
+}
 
 /// Check if search followup instruction already exists in recent messages
 fn has_search_instruction(messages: &[Value]) -> bool {
@@ -356,36 +423,55 @@ pub async fn start_agent_loop(
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
+    let cancel_rx = register_cancellation(&request_id).await;
 
-    if session_mode == "chat" {
-        return run_chat_mode(window, request_id, client, user_prompt, config, session_messages, search_mode, image_attachments).await;
-    }
-
-    let mut mcp_manager = McpManager::new();
-    let mcp_tool_defs = if !config.mcp_servers.is_empty() {
-        match mcp_manager.start_all(&config.mcp_servers).await {
-            Ok(tools) => {
-                let count = tools.len();
-                let _ = window.emit("agent-mcp-status", json!({
-                    "status": "started",
-                    "servers": config.mcp_servers.len(),
-                    "tools": count,
-                }));
-                tools
-            }
-            Err(e) => {
-                let _ = window.emit("agent-mcp-status", json!({
-                    "status": "error",
-                    "error": e,
-                }));
-                Vec::new()
-            }
-        }
+    let result = if session_mode == "chat" {
+        run_chat_mode(window.clone(), request_id.clone(), client, user_prompt, config, session_messages, search_mode, image_attachments, cancel_rx.clone()).await
     } else {
-        Vec::new()
+        let mut mcp_manager = McpManager::new();
+        let mcp_tool_defs = if !config.mcp_servers.is_empty() {
+            match mcp_manager.start_all(&config.mcp_servers).await {
+                Ok(tools) => {
+                    let count = tools.len();
+                    let _ = window.emit("agent-mcp-status", json!({
+                        "status": "started",
+                        "servers": config.mcp_servers.len(),
+                        "tools": count,
+                    }));
+                    tools
+                }
+                Err(e) => {
+                    let _ = window.emit("agent-mcp-status", json!({
+                        "status": "error",
+                        "error": e,
+                    }));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        let result = start_agent_loop_inner(window.clone(), request_id.clone(), client, user_prompt, config, session_messages, image_attachments, &mut mcp_manager, mcp_tool_defs, cancel_rx.clone()).await;
+        mcp_manager.shutdown().await;
+        result
     };
 
-    let result = start_agent_loop_inner(window, request_id, client, user_prompt, config, session_messages, image_attachments, mcp_manager, mcp_tool_defs).await;
+    unregister_cancellation(&request_id).await;
+
+    if let Err(err) = &result {
+        if is_agent_cancelled_error(err) {
+            emit_stream_done(&window, &request_id, json!({
+                "content": "",
+                "status": "cancelled",
+                "loopCount": 0,
+                "ttftMs": 0,
+                "responseTimeMs": 0,
+            }));
+            emit_agent_complete(&window, &request_id, "cancelled");
+            return Ok(());
+        }
+    }
     result
 }
 
@@ -398,7 +484,9 @@ async fn run_chat_mode(
     session_messages: Vec<Value>,
     search_mode: String,
     image_attachments: Vec<ImageAttachment>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
+    ensure_not_cancelled(&cancel_rx)?;
     let mut chat_system_prompt = if config.system_prompt.contains("PowerShell") || config.system_prompt.contains("Windows PowerShell") {
         "You are a helpful AI assistant. Be careful, honest, and practical. Answer in the user's language when practical. If you are unsure or lack enough information, say so instead of guessing. When using web search, ground the answer in the search results and cite relevant sources.".to_string()
     } else {
@@ -425,6 +513,7 @@ async fn run_chat_mode(
 
     // Force search mode: execute search before sending to model
     if search_mode == "force" && has_web_search && !is_ollama {
+        ensure_not_cancelled(&cancel_rx)?;
         let search_query = user_prompt.clone();
         let _ = window.emit("agent-search-status", json!({
             "type": "searching",
@@ -432,14 +521,14 @@ async fn run_chat_mode(
         }));
         let search_start = std::time::Instant::now();
         let search_args = json!({"query": search_query}).to_string();
-        let tool_output = execute_tool_with_timeout(
+        let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
             "web_search",
             &search_args,
             &config.default_work_dir,
             &config.search_provider,
             &config.search_api_key,
             config.command_timeout,
-        ).await;
+        )).await?;
         let search_elapsed = search_start.elapsed().as_secs_f64();
 
         if tool_output.starts_with("Error:") {
@@ -555,10 +644,11 @@ async fn run_chat_mode(
         );
     }
 
-    let response = request_builder
+    ensure_not_cancelled(&cancel_rx)?;
+    let response = await_with_cancel(&cancel_rx, request_builder
         .json(&request_body)
-        .send()
-        .await
+        .send())
+        .await?
         .map_err(|e| format!("Request failed: {}", e))?;
 
     if !response.status().is_success() {
@@ -569,7 +659,9 @@ async fn run_chat_mode(
     }
 
     if !config.streaming {
-        let body: Value = response.json().await.map_err(|e| format!("Parse error: {}", e))?;
+        let body: Value = await_with_cancel(&cancel_rx, response.json())
+            .await?
+            .map_err(|e| format!("Parse error: {}", e))?;
         let content = if is_ollama {
             body["message"]["content"].as_str().unwrap_or("").to_string()
         } else {
@@ -595,14 +687,14 @@ async fn run_chat_mode(
                     }));
                     let search_start = std::time::Instant::now();
 
-                    let tool_output = execute_tool_with_timeout(
+                    let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
                         &tool_name,
                         &tool_args,
                         &config.default_work_dir,
                         &config.search_provider,
                         &config.search_api_key,
                         config.command_timeout,
-                    ).await;
+                    )).await?;
 
                     let search_elapsed = search_start.elapsed().as_secs_f64();
                     if tool_output.starts_with("Error:") {
@@ -652,17 +744,19 @@ async fn run_chat_mode(
                     followup_body["top_p"] = json!(config.top_p);
                     apply_reasoning_effort(&mut followup_body, &config, false);
 
-                    let followup_response = client
+                    let followup_response = await_with_cancel(&cancel_rx, client
                         .post(&url)
                         .header("Content-Type", "application/json")
                         .header("Authorization", format!("Bearer {}", config.api_key))
                         .json(&followup_body)
-                        .send()
-                        .await
+                        .send())
+                        .await?
                         .map_err(|e| format!("Follow-up request failed: {}", e))?;
 
                     if followup_response.status().is_success() {
-                        let followup_body: Value = followup_response.json().await.map_err(|e| format!("Parse error: {}", e))?;
+                        let followup_body: Value = await_with_cancel(&cancel_rx, followup_response.json())
+                            .await?
+                            .map_err(|e| format!("Parse error: {}", e))?;
                         let final_content = followup_body["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
                         emit_stream_chunk(&window, &request_id, &final_content);
                         emit_stream_done(&window, &request_id, json!({
@@ -703,14 +797,14 @@ async fn run_chat_mode(
                         }));
                         let search_start = std::time::Instant::now();
 
-                        let tool_output = execute_tool_with_timeout(
+                        let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
                             &tc.name,
                             &tc.arguments,
                             &config.default_work_dir,
                             &config.search_provider,
                             &config.search_api_key,
                             config.command_timeout,
-                        ).await;
+                        )).await?;
 
                         let search_elapsed = search_start.elapsed().as_secs_f64();
                         if tool_output.starts_with("Error:") {
@@ -761,17 +855,19 @@ async fn run_chat_mode(
                     followup_body["top_p"] = json!(config.top_p);
                     apply_reasoning_effort(&mut followup_body, &config, false);
 
-                    let followup_response = client
+                    let followup_response = await_with_cancel(&cancel_rx, client
                         .post(&url)
                         .header("Content-Type", "application/json")
                         .header("Authorization", format!("Bearer {}", config.api_key))
                         .json(&followup_body)
-                        .send()
-                        .await
+                        .send())
+                        .await?
                         .map_err(|e| format!("Follow-up request failed: {}", e))?;
 
                     if followup_response.status().is_success() {
-                        let fb: Value = followup_response.json().await.map_err(|e| format!("Parse error: {}", e))?;
+                        let fb: Value = await_with_cancel(&cancel_rx, followup_response.json())
+                            .await?
+                            .map_err(|e| format!("Parse error: {}", e))?;
                         let final_content = fb["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
                         emit_stream_chunk(&window, &request_id, &final_content);
                         emit_stream_done(&window, &request_id, json!({
@@ -812,7 +908,7 @@ async fn run_chat_mode(
     let mut dsml_buffering = false;
     let mut dsml_buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = await_with_cancel(&cancel_rx, stream.next()).await? {
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
         let text = String::from_utf8_lossy(&chunk);
 
@@ -961,14 +1057,14 @@ async fn run_chat_mode(
                 "query": query_display,
             }));
             let search_start = std::time::Instant::now();
-            let tool_output = execute_tool_with_timeout(
+            let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
                 &tc.name,
                 &tc.arguments,
                 &config.default_work_dir,
                 &config.search_provider,
                 &config.search_api_key,
                 config.command_timeout,
-            ).await;
+            )).await?;
             let search_elapsed = search_start.elapsed();
             eprintln!("[agent] Search '{}' completed in {:.1}s, result length: {}", query_display, search_elapsed.as_secs_f64(), tool_output.len());
             if tool_output.starts_with("Error:") {
@@ -1033,13 +1129,13 @@ async fn run_chat_mode(
         followup_body["top_p"] = json!(config.top_p);
         apply_reasoning_effort(&mut followup_body, &config, false);
 
-        let followup_response = match client
+        let followup_response = match await_with_cancel(&cancel_rx, client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", config.api_key))
             .json(&followup_body)
-            .send()
-            .await
+            .send())
+            .await?
         {
             Ok(resp) => resp,
             Err(e) => {
@@ -1057,7 +1153,9 @@ async fn run_chat_mode(
 
         if !followup_response.status().is_success() {
             let status = followup_response.status();
-            let error_text = followup_response.text().await.unwrap_or_default();
+            let error_text = await_with_cancel(&cancel_rx, followup_response.text())
+                .await?
+                .unwrap_or_default();
             emit_stream_chunk(&window, &request_id, format!("\nFollow-up API error ({}): {}\n", status, &error_text[..error_text.len().min(300)]));
             emit_stream_done(&window, &request_id, json!({
                 "content": format!("🔍 Search completed but follow-up failed ({}): {}", status, error_text),
@@ -1074,7 +1172,7 @@ async fn run_chat_mode(
         let mut followup_dsml_buffering = false;
         let mut followup_dsml_buffer = String::new();
 
-        while let Some(chunk) = followup_stream.next().await {
+        while let Some(chunk) = await_with_cancel(&cancel_rx, followup_stream.next()).await? {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
@@ -1139,14 +1237,14 @@ async fn run_chat_mode(
                         "query": query_display,
                     }));
                     let search_start = std::time::Instant::now();
-                    let tool_output = execute_tool_with_timeout(
+                    let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
                         &tc.name,
                         &tc.arguments,
                         &config.default_work_dir,
                         &config.search_provider,
                         &config.search_api_key,
                         config.command_timeout,
-                    ).await;
+                    )).await?;
                     let search_elapsed = search_start.elapsed().as_secs_f64();
                     if tool_output.starts_with("Error:") {
                         let _ = window.emit("agent-search-status", json!({
@@ -1209,13 +1307,13 @@ async fn run_chat_mode(
                     second_followup_body["top_p"] = json!(config.top_p);
                     apply_reasoning_effort(&mut second_followup_body, &config, false);
 
-                    let second_followup_response = client
+                    let second_followup_response = await_with_cancel(&cancel_rx, client
                         .post(&url)
                         .header("Content-Type", "application/json")
                         .header("Authorization", format!("Bearer {}", config.api_key))
                         .json(&second_followup_body)
-                        .send()
-                        .await
+                        .send())
+                        .await?
                         .map_err(|e| format!("Second follow-up request failed: {}", e))?;
 
                     if second_followup_response.status().is_success() {
@@ -1224,7 +1322,7 @@ async fn run_chat_mode(
                         let mut second_dsml_buffering = false;
                         let mut second_dsml_buffer = String::new();
 
-                        while let Some(chunk) = second_stream.next().await {
+                        while let Some(chunk) = await_with_cancel(&cancel_rx, second_stream.next()).await? {
                             let chunk = match chunk {
                                 Ok(c) => c,
                                 Err(_) => break,
@@ -1301,9 +1399,11 @@ async fn start_agent_loop_inner(
     config: AppConfig,
     session_messages: Vec<Value>,
     image_attachments: Vec<ImageAttachment>,
-    mut mcp_manager: McpManager,
+    mcp_manager: &mut McpManager,
     mcp_tool_defs: Vec<Value>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
+    ensure_not_cancelled(&cancel_rx)?;
     let mut system_prompt = config.system_prompt.clone();
     let is_ollama = config.provider == "ollama";
 
@@ -1340,6 +1440,7 @@ async fn start_agent_loop_inner(
     let mut total_completion_tokens: u64 = 0;
 
     while loop_count < MAX_LOOPS {
+        ensure_not_cancelled(&cancel_rx)?;
         loop_count += 1;
 
         let steering_msgs = drain_steering_messages().await;
@@ -1419,10 +1520,10 @@ async fn start_agent_loop_inner(
             );
         }
 
-        let response = request_builder
+        let response = await_with_cancel(&cancel_rx, request_builder
             .json(&request_body)
-            .send()
-            .await
+            .send())
+            .await?
             .map_err(|e| format!("API request failed: {}", e))?;
 
         if !response.status().is_success() {
@@ -1433,9 +1534,8 @@ async fn start_agent_loop_inner(
 
         if !config.streaming {
             // Non-streaming mode
-            let body: Value = response
-                .json()
-                .await
+            let body: Value = await_with_cancel(&cancel_rx, response.json())
+                .await?
                 .map_err(|e| format!("Failed to parse response: {}", e))?;
 
             let response_time_ms = request_start.elapsed().as_millis() as u64;
@@ -1518,7 +1618,8 @@ async fn start_agent_loop_inner(
                 &accumulated,
                 &config,
                 &mut messages,
-                &mut mcp_manager,
+                mcp_manager,
+                &cancel_rx,
             )
             .await?;
             if result {
@@ -1539,7 +1640,7 @@ async fn start_agent_loop_inner(
         let mut stream_usage_prompt: u64 = 0;
         let mut stream_usage_completion: u64 = 0;
 
-        while let Some(chunk) = stream.next().await {
+        while let Some(chunk) = await_with_cancel(&cancel_rx, stream.next()).await? {
             let bytes = chunk.map_err(|e| e.to_string())?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -1729,7 +1830,7 @@ async fn start_agent_loop_inner(
 
         // Process tool calls with approval
         let result =
-            process_tool_calls(&window, &accumulated_tool_calls, &config, &mut messages, &mut mcp_manager)
+            process_tool_calls(&window, &accumulated_tool_calls, &config, &mut messages, mcp_manager, &cancel_rx)
                 .await?;
         if result {
             return Ok(());
@@ -1803,7 +1904,9 @@ async fn process_tool_calls(
     config: &AppConfig,
     messages: &mut Vec<Value>,
     mcp_manager: &mut McpManager,
+    cancel_rx: &watch::Receiver<bool>,
 ) -> Result<bool, String> {
+    ensure_not_cancelled(cancel_rx)?;
     let mut needs_confirmation = Vec::new();
     let mut auto_approved = Vec::new();
 
@@ -1859,7 +1962,11 @@ async fn process_tool_calls(
             }),
         );
 
-        let output = execute_tool_with_mcp(&tc.name, &tc.arguments, &config, &mut *mcp_manager).await;
+        let output = await_with_cancel(
+            cancel_rx,
+            execute_tool_with_mcp(&tc.name, &tc.arguments, &config, &mut *mcp_manager),
+        )
+        .await?;
 
         let _ = window.emit(
             "agent-tool-output",
@@ -1889,9 +1996,10 @@ async fn process_tool_calls(
 
         // Wait for user response via Tauri state
         // The frontend will invoke "resolve_tool_approval" command
-        let approval_result = wait_for_approval(window, &request_id).await?;
+        let approval_result = wait_for_approval(window, &request_id, cancel_rx).await?;
 
         for (tc_id, approved) in approval_result {
+            ensure_not_cancelled(cancel_rx)?;
             if approved {
                 // Find the tool call
                 if let Some(tc) = tool_calls.iter().find(|t| t.id == tc_id) {
@@ -1904,8 +2012,11 @@ async fn process_tool_calls(
                         }),
                     );
 
-                    let output =
-                        execute_tool_with_mcp(&tc.name, &tc.arguments, &config, &mut *mcp_manager).await;
+                    let output = await_with_cancel(
+                        cancel_rx,
+                        execute_tool_with_mcp(&tc.name, &tc.arguments, &config, &mut *mcp_manager),
+                    )
+                    .await?;
 
                     let _ = window.emit(
                         "agent-tool-output",
@@ -1954,6 +2065,7 @@ static PENDING_APPROVALS: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<ApprovalM
 async fn wait_for_approval(
     _window: &Window,
     request_id: &str,
+    cancel_rx: &watch::Receiver<bool>,
 ) -> Result<Vec<(String, bool)>, String> {
     const APPROVAL_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
@@ -1969,6 +2081,7 @@ async fn wait_for_approval(
     let mut rx = rx;
     let timeout = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS));
     tokio::pin!(timeout);
+    let mut cancel_rx = cancel_rx.clone();
 
     loop {
         tokio::select! {
@@ -1987,6 +2100,11 @@ async fn wait_for_approval(
                     "Approval request timed out after {} seconds",
                     APPROVAL_TIMEOUT_SECS
                 ));
+            }
+            _ = wait_for_cancellation(&mut cancel_rx) => {
+                let mut pending = PENDING_APPROVALS.lock().await;
+                pending.remove(request_id);
+                return Err(AGENT_CANCELLED_ERROR.to_string());
             }
         }
     }

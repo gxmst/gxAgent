@@ -307,6 +307,27 @@ body {
   box-sizing: border-box;
 }
 
+.panel-header-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.panel-status-cluster,
+.panel-action-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.panel-action-cluster {
+  padding-left: 4px;
+  border-left: 1px solid var(--border-default);
+}
+
 .panel-title {
   font-size: 0.92rem;
   font-weight: 600;
@@ -1462,6 +1483,33 @@ select.input-text {
   flex: 0 0 auto;
 }
 
+.input-tool-group,
+.input-run-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--border-default) 70%, transparent);
+  border-radius: 10px;
+  background: transparent;
+}
+
+.input-tool-group {
+  max-width: 100%;
+  overflow: visible;
+}
+
+.input-run-group {
+  flex-shrink: 0;
+}
+
+.input-tool-group .input-attach-btn,
+.input-run-group .input-send-btn {
+  align-self: center;
+  margin-bottom: 0;
+}
+
 .web-search-toggle {
   color: var(--text-tertiary);
   flex-shrink: 0;
@@ -1598,6 +1646,7 @@ select.input-text {
 
 .agent-action-card.executing { border-color: var(--accent-border); }
 .agent-action-card.done { border-color: var(--success-border); }
+.agent-action-card.error { border-color: var(--error-border); }
 .agent-action-card.blocked { border-color: var(--error-border); }
 .agent-action-card.pending_approval { border-color: var(--warning-border); }
 
@@ -1642,6 +1691,10 @@ select.input-text {
   background: var(--success-subtle);
   color: var(--success);
 }
+.agent-action-badge.error {
+  background: var(--error-subtle);
+  color: var(--error);
+}
 .agent-action-badge.blocked {
   background: var(--error-subtle);
   color: var(--error);
@@ -1684,6 +1737,23 @@ select.input-text {
   background: var(--bg-card);
   overflow: hidden;
   box-shadow: var(--shadow-card);
+}
+
+.approval-dock {
+  width: 100%;
+  max-width: 800px;
+  margin-bottom: 8px;
+  z-index: 4;
+}
+
+.approval-card-dock {
+  margin-top: 0;
+  border-radius: 14px;
+  box-shadow: var(--shadow-elevated);
+}
+
+.approval-dock.has-inline .approval-card-dock {
+  border-color: var(--warning-border);
 }
 
 .approval-card-header {
@@ -2351,6 +2421,72 @@ select.input-text {
   gap: 4px;
 }
 
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
+.settings-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.settings-panel-header span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.settings-action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.settings-action-card {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-main);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.settings-action-card:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+}
+
+.settings-action-card.danger {
+  color: var(--error);
+}
+
+.settings-action-card.danger:hover {
+  border-color: var(--error-border);
+  background: var(--error-subtle);
+}
+
 .form-label {
   font-size: 0.68rem;
   color: var(--text-secondary);
@@ -2876,6 +3012,15 @@ select.input-text {
   width: 28px;
   height: 28px;
   border-radius: 50% !important;
+}
+
+.input-send-btn.stop-active {
+  background: var(--error) !important;
+  color: #fff !important;
+}
+
+.input-send-btn.stop-active:hover {
+  background: #dc2626 !important;
 }
 
 @keyframes steering-glow {

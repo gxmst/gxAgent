@@ -80,6 +80,12 @@ async fn resolve_tool_approval(
     agent::resolve_approval(&request_id, results).await
 }
 
+/// Cancel an active agent session by request id
+#[tauri::command]
+async fn cancel_agent_session(request_id: String) -> Result<(), String> {
+    agent::cancel_agent_request(&request_id).await
+}
+
 /// Fetch available models from an OpenAI-compatible API
 #[tauri::command]
 async fn fetch_models(base_url: String, api_key: String) -> Result<Vec<Value>, String> {
@@ -486,12 +492,26 @@ fn try_decrypt_key(key: &str) -> (String, bool) {
 
 #[tauri::command]
 fn import_config(app: AppHandle, json: String) -> Result<AppConfig, String> {
-    let mut config: AppConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let export_data: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let config_value = if export_data.get("config").is_some() && export_data.get("version").is_some() {
+        let _ = app.emit(
+            "config-import-warning",
+            "Detected wrapped config export. Importing the config payload in personal mode.",
+        );
+        export_data
+            .get("config")
+            .cloned()
+            .ok_or_else(|| "Missing config payload".to_string())?
+    } else {
+        export_data
+    };
+
+    let mut config: AppConfig = serde_json::from_value(config_value).map_err(|e| e.to_string())?;
     let mut needs_rekey = false;
     let (decrypted, rekey) = try_decrypt_key(&config.api_key);
     config.api_key = decrypted;
     needs_rekey = needs_rekey || rekey;
-    // Also handle search_api_key
+
     let (decrypted, rekey) = try_decrypt_key(&config.search_api_key);
     config.search_api_key = decrypted;
     needs_rekey = needs_rekey || rekey;
@@ -604,6 +624,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_agent_session,
             resolve_tool_approval,
+            cancel_agent_session,
             fetch_models,
             get_provider_presets,
             get_default_config,
