@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub max_tokens: Option<u32>,
     pub system_prompt: String,
     pub streaming: bool,
+    #[serde(default = "default_thinking_level")]
+    pub thinking_level: String,
     pub context_limit: u32,
     pub tools_enabled: Vec<String>,
     pub approval_policy: String,
@@ -40,6 +42,10 @@ pub struct AppConfig {
     pub search_api_key: String,
     #[serde(default = "default_font_size")]
     pub font_size: u32,
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
+    #[serde(default)]
+    pub show_advanced_reply_info: bool,
     #[serde(default = "default_command_timeout")]
     pub command_timeout: u64,
     #[serde(default = "default_preview_sandbox")]
@@ -52,6 +58,14 @@ fn default_search_provider() -> String {
 
 fn default_font_size() -> u32 {
     14
+}
+
+fn default_font_family() -> String {
+    "system".to_string()
+}
+
+fn default_thinking_level() -> String {
+    "medium".to_string()
 }
 
 fn default_command_timeout() -> u64 {
@@ -210,8 +224,9 @@ impl Default for AppConfig {
             temperature: 0.7,
             top_p: 1.0,
             max_tokens: None,
-            system_prompt: "You are a helpful AI assistant with access to local tools running on Windows. Help the user accomplish tasks by using the available tools when needed. Be concise and direct.\n\nIMPORTANT: The shell is Windows PowerShell. Do NOT use Unix/bash syntax (no ||, no &&, no /dev/null, no cat/grep/ls). Use PowerShell equivalents: use ; to chain commands, use Select-String instead of grep, use Get-ChildItem instead of ls, use Get-Content instead of cat. Redirect errors with 2>$null. Always use PowerShell-compatible commands.".into(),
+            system_prompt: "You are a helpful AI assistant with access to local tools running on Windows. Help the user accomplish tasks by using the available tools when needed. Be careful, honest, and direct. If you are unsure or lack enough information, say so instead of guessing. Do not invent facts, files, command results, or tool output.\n\nIMPORTANT: The shell is Windows PowerShell. Do NOT use Unix/bash syntax (no ||, no &&, no /dev/null, no cat/grep/ls). Use PowerShell equivalents: use ; to chain commands, use Select-String instead of grep, use Get-ChildItem instead of ls, use Get-Content instead of cat. Redirect errors with 2>$null. Always use PowerShell-compatible commands.".into(),
             streaming: true,
+            thinking_level: "medium".into(),
             context_limit: 50,
             tools_enabled: vec![
                 "execute_command".into(),
@@ -235,6 +250,8 @@ impl Default for AppConfig {
             search_provider: "duckduckgo".into(),
             search_api_key: String::new(),
             font_size: 14,
+            font_family: "system".into(),
+            show_advanced_reply_info: false,
             command_timeout: 30,
             preview_sandbox: true,
         }

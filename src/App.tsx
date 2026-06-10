@@ -53,6 +53,8 @@ import {
   Timer,
   Type,
   Check,
+  Gauge,
+  Brain,
 } from "lucide-react";
 import "./App.css";
 import CaturtleLogo from "./assets/logo.png";
@@ -445,6 +447,110 @@ const i18n: Record<string, Record<string, string>> = {
   },
 };
 
+i18n.ja = {
+  ...i18n.en,
+  "session.new": "新しい会話",
+  "settings.title": "設定",
+  "settings.save": "設定を保存",
+  "settings.close": "閉じる",
+  "settings.language": "言語",
+  "settings.fontSize": "フォントサイズ",
+  "settings.fontFamily": "フォント",
+  "settings.advancedReplyInfo": "AI応答の詳細情報",
+  "settings.advancedReplyInfoDesc": "応答時にモデル、トークン、所要時間を表示します",
+  "settings.on": "オン",
+  "settings.off": "オフ",
+  "input.placeholder": "Agent に依頼する...",
+  "thinking": "考え中...",
+  "usage.tokens": "トークン",
+  "usage.prompt": "入力",
+  "usage.completion": "出力",
+  "usage.total": "合計",
+  "usage.context": "コンテキスト",
+  "usage.modelLimit": "モデル上限",
+  "usage.compress": "コンテキストを圧縮",
+  "context.pin": "会話を固定",
+  "context.unpin": "固定を解除",
+};
+
+i18n.ko = {
+  ...i18n.en,
+  "session.new": "새 대화",
+  "settings.title": "설정",
+  "settings.save": "설정 저장",
+  "settings.close": "닫기",
+  "settings.language": "언어",
+  "settings.fontSize": "글꼴 크기",
+  "settings.fontFamily": "글꼴",
+  "settings.advancedReplyInfo": "AI 응답 상세 정보",
+  "settings.advancedReplyInfoDesc": "응답에 모델, 토큰, 소요 시간을 표시합니다",
+  "settings.on": "켜기",
+  "settings.off": "끄기",
+  "input.placeholder": "Agent에게 요청...",
+  "thinking": "생각 중...",
+  "usage.tokens": "토큰",
+  "usage.prompt": "입력",
+  "usage.completion": "출력",
+  "usage.total": "합계",
+  "usage.context": "컨텍스트",
+  "usage.modelLimit": "모델 한도",
+  "usage.compress": "컨텍스트 압축",
+  "context.pin": "대화 고정",
+  "context.unpin": "고정 해제",
+};
+
+i18n.es = {
+  ...i18n.en,
+  "session.new": "Nueva conversación",
+  "settings.title": "Configuración",
+  "settings.save": "Guardar configuración",
+  "settings.close": "Cerrar",
+  "settings.language": "Idioma",
+  "settings.fontSize": "Tamaño de fuente",
+  "settings.fontFamily": "Fuente",
+  "settings.advancedReplyInfo": "Información avanzada de respuestas",
+  "settings.advancedReplyInfoDesc": "Muestra modelo, tokens y duración en las respuestas",
+  "settings.on": "Activado",
+  "settings.off": "Desactivado",
+  "input.placeholder": "Pide algo al Agent...",
+  "thinking": "Pensando...",
+  "usage.tokens": "Tokens",
+  "usage.prompt": "Entrada",
+  "usage.completion": "Salida",
+  "usage.total": "Total",
+  "usage.context": "Contexto",
+  "usage.modelLimit": "Límite del modelo",
+  "usage.compress": "Comprimir contexto",
+  "context.pin": "Fijar conversación",
+  "context.unpin": "Desfijar conversación",
+};
+
+Object.assign(i18n.zh, {
+  "settings.fontFamily": "字体",
+  "settings.advancedReplyInfo": "AI 回复高级信息",
+  "settings.advancedReplyInfoDesc": "在回复旁显示模型、上下文 token、输出 token 和耗时",
+  "settings.on": "开启",
+  "settings.off": "关闭",
+  "usage.context": "上下文",
+  "usage.modelLimit": "模型限制",
+  "usage.compress": "压缩上下文",
+  "context.pin": "置顶会话",
+  "context.unpin": "取消置顶",
+});
+
+Object.assign(i18n.en, {
+  "settings.fontFamily": "Font",
+  "settings.advancedReplyInfo": "Advanced reply info",
+  "settings.advancedReplyInfoDesc": "Show model, context tokens, output tokens, and duration on replies",
+  "settings.on": "On",
+  "settings.off": "Off",
+  "usage.context": "Context",
+  "usage.modelLimit": "Model limit",
+  "usage.compress": "Compress context",
+  "context.pin": "Pin conversation",
+  "context.unpin": "Unpin conversation",
+});
+
 function t(key: string, lang: string, vars?: Record<string, string>): string {
   let text = (i18n[lang] || i18n["en"])[key] || (i18n["en"][key]) || key;
   if (vars) {
@@ -474,6 +580,20 @@ import {
   Attachment
 } from "./types";
 
+type ToastNotice = {
+  id: number;
+  text: string;
+  type: "info" | "success" | "error" | "cmd";
+};
+
+type AgentEventPayload<T extends Record<string, unknown> = Record<string, unknown>> =
+  | string
+  | (T & {
+      requestId?: string;
+      content?: string;
+      status?: string;
+    });
+
 const DEFAULT_SESSION_CONFIG: SessionConfig = {
   mode: "chat",
   systemPrompt: "",
@@ -489,6 +609,8 @@ const DEFAULT_SESSION_CONFIG: SessionConfig = {
   searchMode: "auto",
 };
 
+const THINKING_LEVELS: SessionConfig["thinkingLevel"][] = ["low", "medium", "high"];
+
 const DEFAULT_CONFIG: AppConfig = {
   provider: "openai",
   base_url: "https://api.deepseek.com/v1",
@@ -498,8 +620,9 @@ const DEFAULT_CONFIG: AppConfig = {
   top_p: 1.0,
   max_tokens: null,
   system_prompt:
-    "You are a helpful AI assistant with access to local tools running on Windows. Help the user accomplish tasks by using the available tools when needed. Be concise and direct.\n\nIMPORTANT: The shell is Windows PowerShell. Do NOT use Unix/bash syntax (no ||, no &&, no /dev/null, no cat/grep/ls). Use PowerShell equivalents: use ; to chain commands, use Select-String instead of grep, use Get-ChildItem instead of ls, use Get-Content instead of cat. Redirect errors with 2>$null. Always use PowerShell-compatible commands.",
+    "You are a helpful AI assistant with access to local tools running on Windows. Help the user accomplish tasks by using the available tools when needed. Be careful, honest, and direct. If you are unsure or lack enough information, say so instead of guessing. Do not invent facts, files, command results, or tool output.\n\nIMPORTANT: The shell is Windows PowerShell. Do NOT use Unix/bash syntax (no ||, no &&, no /dev/null, no cat/grep/ls). Use PowerShell equivalents: use ; to chain commands, use Select-String instead of grep, use Get-ChildItem instead of ls, use Get-Content instead of cat. Redirect errors with 2>$null. Always use PowerShell-compatible commands.",
   streaming: true,
+  thinking_level: "medium",
   context_limit: 50,
   tools_enabled: [
     "execute_command",
@@ -521,18 +644,75 @@ const DEFAULT_CONFIG: AppConfig = {
   search_provider: "duckduckgo",
   search_api_key: "",
   font_size: 14,
+  font_family: "system",
+  show_advanced_reply_info: false,
   command_timeout: 30,
   preview_sandbox: true,
 };
 
-const TOOL_NAMES: { key: string; label: string }[] = [
-  { key: "execute_command", label: "Shell" },
-  { key: "read_file", label: "Read" },
-  { key: "write_file", label: "Write" },
-  { key: "list_dir", label: "List Dir" },
-  { key: "run_python", label: "Python" },
-  { key: "web_search", label: "Search" },
+const TOOL_NAMES: { key: string; label: string; shortLabel: string; description: string; risk: "low" | "medium" | "high" }[] = [
+  { key: "execute_command", label: "PowerShell", shortLabel: "Shell", description: "Run local Windows PowerShell commands.", risk: "high" },
+  { key: "read_file", label: "Read File", shortLabel: "Read", description: "Inspect local text files and logs.", risk: "low" },
+  { key: "write_file", label: "Write File", shortLabel: "Write", description: "Create or update local files.", risk: "high" },
+  { key: "list_dir", label: "List Folder", shortLabel: "Files", description: "Browse folders in the workspace.", risk: "low" },
+  { key: "run_python", label: "Python", shortLabel: "Py", description: "Run short Python scripts for analysis.", risk: "medium" },
+  { key: "web_search", label: "Web Search", shortLabel: "Web", description: "Search the web for current information.", risk: "low" },
 ];
+
+const toolIcon = (key: string, size = 11) => {
+  switch (key) {
+    case "execute_command":
+      return <TerminalIcon size={size} />;
+    case "read_file":
+      return <FileText size={size} />;
+    case "write_file":
+      return <Pencil size={size} />;
+    case "list_dir":
+      return <FolderOpen size={size} />;
+    case "run_python":
+      return <Zap size={size} />;
+    case "web_search":
+      return <Globe size={size} />;
+    default:
+      return <Settings2 size={size} />;
+  }
+};
+
+const LANGUAGE_OPTIONS = [
+  { code: "zh", label: "中文", locale: "zh-CN" },
+  { code: "en", label: "English", locale: "en-US" },
+  { code: "ja", label: "日本語", locale: "ja-JP" },
+  { code: "ko", label: "한국어", locale: "ko-KR" },
+  { code: "es", label: "Español", locale: "es-ES" },
+];
+
+const FONT_OPTIONS = [
+  { value: "system", label: "System", css: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
+  { value: "segoe", label: "Segoe UI", css: "'Segoe UI', sans-serif" },
+  { value: "inter", label: "Inter", css: "'Inter', sans-serif" },
+  { value: "arial", label: "Arial", css: "Arial, sans-serif" },
+  { value: "verdana", label: "Verdana", css: "Verdana, Geneva, sans-serif" },
+  { value: "tahoma", label: "Tahoma", css: "Tahoma, Geneva, sans-serif" },
+  { value: "trebuchet", label: "Trebuchet MS", css: "'Trebuchet MS', Arial, sans-serif" },
+  { value: "yahei", label: "Microsoft YaHei", css: "'Microsoft YaHei', 'Segoe UI', sans-serif" },
+  { value: "pingfang", label: "PingFang SC", css: "'PingFang SC', 'Microsoft YaHei', sans-serif" },
+  { value: "noto", label: "Noto Sans", css: "'Noto Sans', 'Noto Sans CJK SC', sans-serif" },
+  { value: "jp", label: "Japanese Sans", css: "'Yu Gothic', 'Hiragino Sans', 'Noto Sans JP', sans-serif" },
+  { value: "kr", label: "Korean Sans", css: "'Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif" },
+  { value: "serif", label: "Serif", css: "Georgia, 'Times New Roman', serif" },
+  { value: "mono", label: "Monospace", css: "'Cascadia Code', 'JetBrains Mono', Consolas, monospace" },
+];
+
+const modelContextLimit = (modelId: string) => {
+  const id = modelId.toLowerCase();
+  if (id.includes("gpt-4o") || id.includes("gpt-4.1") || id.includes("gpt-5")) return 128000;
+  if (id.includes("claude")) return 200000;
+  if (id.includes("gemini")) return 1000000;
+  if (id.includes("deepseek")) return 64000;
+  if (id.includes("qwen")) return 128000;
+  if (id.includes("llama")) return 128000;
+  return 128000;
+};
 
 function DiffView({ oldContent, newContent }: { oldContent: string; newContent: string }) {
   const changes = Diff.diffLines(oldContent, newContent);
@@ -784,6 +964,7 @@ function App() {
   const [previewConsoleLogs, setPreviewConsoleLogs] = useState<
     { text: string; type: "log" | "error" | "warn" | "info" }[]
   >([]);
+  const [toasts, setToasts] = useState<ToastNotice[]>([]);
 
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
     try {
@@ -806,6 +987,7 @@ function App() {
   const [sidebarNav, setSidebarNav] = useState<"chat" | "code">("chat");
   const [editingMessageIdx, setEditingMessageIdx] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
+  const [contextUsageOpen, setContextUsageOpen] = useState(false);
 
   // Resize state
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -822,15 +1004,38 @@ function App() {
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
   const isAtBottomRef = useRef(true);
   const currentSessionIdRef = useRef(currentSessionId);
+  const isStreamingRef = useRef(false);
+  const activeRequestIdRef = useRef("");
+  const activeRequestSessionIdRef = useRef("");
+  const activeRequestModelRef = useRef("");
+  const activeRequestContextTokensRef = useRef(0);
 
   // Keep the ref in sync with the reactive state
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
 
+  useEffect(() => {
+    isStreamingRef.current = isStreaming;
+  }, [isStreaming]);
+
   const currentSession = sessions.find((s) => s.id === currentSessionId) || sessions[0];
   const currentMode = currentSession.sessionConfig.mode || "chat";
   const lang = config.language || "zh";
+  const currentLocale = LANGUAGE_OPTIONS.find((l) => l.code === lang)?.locale || "en-US";
+
+  const createRequestId = () => `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const isCurrentRequestPayload = (payload: unknown) => {
+    if (!payload || typeof payload !== "object") return true;
+    const requestId = (payload as { requestId?: string }).requestId;
+    return !requestId || requestId === activeRequestIdRef.current;
+  };
+
+  const payloadContent = (payload: AgentEventPayload) =>
+    typeof payload === "string" ? payload : String(payload.content || "");
+
+  const agentEventSessionId = () => activeRequestSessionIdRef.current || currentSessionIdRef.current;
 
   useEffect(() => {
     setRightPanelOpen(currentMode === "code");
@@ -877,6 +1082,11 @@ function App() {
   useEffect(() => {
     document.documentElement.style.setProperty("--dynamic-font-size", `${config.font_size || 14}px`);
   }, [config.font_size]);
+
+  useEffect(() => {
+    const selected = FONT_OPTIONS.find((font) => font.value === (config.font_family || "system")) || FONT_OPTIONS[0];
+    document.documentElement.style.setProperty("--app-font-family", selected.css);
+  }, [config.font_family]);
 
   useEffect(() => {
     const handleIframeMessage = (event: MessageEvent) => {
@@ -975,7 +1185,7 @@ function App() {
           invoke<AppConfig>("load_config"),
           invoke<ProviderPreset[]>("get_provider_presets"),
         ]);
-        setConfig(loadedConfig);
+        setConfig({ ...DEFAULT_CONFIG, ...loadedConfig });
         setPresets(loadedPresets);
       } catch (e) {
         console.error("Failed to load config:", e);
@@ -1054,11 +1264,42 @@ function App() {
   // ==========================================
 
   const MAX_LOG_LINES = 500;
-  const addLog = (text: string, type: "info" | "success" | "error" | "cmd" = "info") => {
+  const notify = (text: string, type: "info" | "success" | "error" | "cmd" = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev.slice(-3), { id, text, type }]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((toast) => toast.id !== id));
+    }, 3200);
+  };
+
+  const addLog = (text: string, type: "info" | "success" | "error" | "cmd" = "info", showToast = false) => {
     setTerminalLogs((prev) => {
       const next = [...prev, { text, type }];
       return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
     });
+    if (showToast) notify(text, type);
+  };
+
+  const estimateTextTokens = (text: string) => Math.ceil((text || "").length / 4);
+
+  const estimateMessagesTokens = (messages: Message[]) =>
+    messages
+      .filter((m) => m.role !== "context_divider")
+      .reduce((sum, msg) => {
+        const content = msg.variants ? (msg.variants[msg.currentVariantIndex || 0] || msg.content) : msg.content;
+        const attachmentTokens = (msg.attachments || []).reduce((attSum, att) => {
+          if (att.type === "image" && att.data) return attSum + 1100;
+          return attSum + estimateTextTokens(att.data || "");
+        }, 0);
+        return sum + estimateTextTokens(content) + attachmentTokens + 6;
+      }, 0);
+
+  const formatTokenCount = (value: number) =>
+    value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : String(value);
+
+  const formatDuration = (ms?: number) => {
+    if (ms == null) return "";
+    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
   };
 
   const imageExtensionFromMime = (mimeType: string) => {
@@ -1114,11 +1355,16 @@ function App() {
   };
 
   const serializeMessageForApi = (message: Message) => {
+    if (!["user", "assistant", "system"].includes(message.role)) return null;
     const imgs = imageAttachmentsForApi(message.attachments || []);
+    const content = message.variants
+      ? (message.variants[message.currentVariantIndex || 0] || message.content)
+      : message.content;
+    if (message.role === "assistant" && !content.trim()) return null;
     return {
       role: message.role,
-      content: message.variants ? (message.variants[message.currentVariantIndex || 0] || message.content) : message.content,
-      ...(imgs.length > 0 ? { attachments: imgs } : {}),
+      content,
+      ...(message.role === "user" && imgs.length > 0 ? { attachments: imgs } : {}),
     };
   };
 
@@ -1254,6 +1500,7 @@ function App() {
       addLog(t("compact.tooShort", lang), "info");
       return;
     }
+    isStreamingRef.current = true;
     setIsStreaming(true);
     addLog(t("compact.start", lang), "info");
     try {
@@ -1277,6 +1524,7 @@ function App() {
     } catch (e) {
       addLog(t("compact.failed", lang) + String(e), "error");
     } finally {
+      isStreamingRef.current = false;
       setIsStreaming(false);
     }
   };
@@ -1284,9 +1532,9 @@ function App() {
   const saveConfig = async () => {
     try {
       await invoke("save_config", { config });
-      addLog(t("log.configSaved", lang), "success");
+      addLog(t("log.configSaved", lang), "success", true);
     } catch (e) {
-      addLog(t("log.configFailed", lang) + e, "error");
+      addLog(t("log.configFailed", lang) + e, "error", true);
     }
   };
 
@@ -1310,11 +1558,14 @@ function App() {
 
   useEffect(() => {
     const unlisteners: (() => void)[] = [];
+    let disposed = false;
 
     async function setup() {
       unlisteners.push(
-        await listen<string>("agent-stream-chunk", (event) => {
-          let payload = event.payload;
+        await listen<AgentEventPayload>("agent-stream-chunk", (event) => {
+          if (!isCurrentRequestPayload(event.payload)) return;
+          let payload = payloadContent(event.payload);
+          if (!payload) return;
           if (payload.includes("DSML")) {
             payload = payload.replace(/<[｜|][｜|][^>]*>/g, "");
             payload = payload.replace(/<\/[｜|][｜|][^>]*>/g, "");
@@ -1323,7 +1574,7 @@ function App() {
           const filteredPayload = payload;
           setSessions((prev) =>
             prev.map((s) => {
-              if (s.id !== currentSessionIdRef.current) return s;
+              if (s.id !== agentEventSessionId()) return s;
               const messages = [...s.messages];
               if (
                 messages.length === 0 ||
@@ -1336,6 +1587,8 @@ function App() {
                   variants: [filteredPayload],
                   currentVariantIndex: 0,
                   timestamp: Date.now(),
+                  model: activeRequestModelRef.current,
+                  contextTokens: activeRequestContextTokensRef.current,
                 });
               } else {
                 const last = { ...messages[messages.length - 1] };
@@ -1359,7 +1612,7 @@ function App() {
           const status = event.payload;
           setSessions((prev) =>
             prev.map((s) => {
-              if (s.id !== currentSessionIdRef.current) return s;
+              if (s.id !== agentEventSessionId()) return s;
               const messages = [...s.messages];
               if (messages.length === 0) return s;
               const last = { ...messages[messages.length - 1] };
@@ -1402,10 +1655,13 @@ function App() {
       );
 
       unlisteners.push(
-        await listen<string>("agent-reasoning-chunk", (event) => {
+        await listen<AgentEventPayload>("agent-reasoning-chunk", (event) => {
+          if (!isCurrentRequestPayload(event.payload)) return;
+          const payload = payloadContent(event.payload);
+          if (!payload) return;
           setSessions((prev) =>
             prev.map((s) => {
-              if (s.id !== currentSessionIdRef.current) return s;
+              if (s.id !== agentEventSessionId()) return s;
               const messages = [...s.messages];
               if (
                 messages.length === 0 ||
@@ -1415,12 +1671,14 @@ function App() {
                   role: "assistant",
                   content: "",
                   actions: [],
-                  reasoningContent: event.payload,
+                  reasoningContent: payload,
                   timestamp: Date.now(),
+                  model: activeRequestModelRef.current,
+                  contextTokens: activeRequestContextTokensRef.current,
                 });
               } else {
                 const last = { ...messages[messages.length - 1] };
-                last.reasoningContent = (last.reasoningContent || "") + event.payload;
+                last.reasoningContent = (last.reasoningContent || "") + payload;
                 messages[messages.length - 1] = last;
               }
               return { ...s, messages };
@@ -1436,7 +1694,7 @@ function App() {
             const { index, id: toolId, name, arguments: args } = event.payload;
             setSessions((prev) =>
               prev.map((s) => {
-                if (s.id !== currentSessionIdRef.current) return s;
+                if (s.id !== agentEventSessionId()) return s;
                 const messages = [...s.messages];
                 if (messages.length === 0) return s;
                 const last = { ...messages[messages.length - 1] };
@@ -1493,7 +1751,7 @@ function App() {
             }
             setSessions((prev) =>
               prev.map((s) => {
-                if (s.id !== currentSessionIdRef.current) return s;
+                if (s.id !== agentEventSessionId()) return s;
                 const messages = [...s.messages];
                 if (messages.length === 0) return s;
                 const last = { ...messages[messages.length - 1] };
@@ -1522,7 +1780,7 @@ function App() {
               refreshFileList();
               // Auto-preview HTML files — get path from action arguments, not output
               setSessions((prev) => {
-                const session = prev.find((s) => s.id === currentSessionIdRef.current);
+                const session = prev.find((s) => s.id === agentEventSessionId());
                 if (!session) return prev;
                 const lastMsg = session.messages[session.messages.length - 1];
                 const action = lastMsg?.actions?.find((a) => a.id === id);
@@ -1543,7 +1801,7 @@ function App() {
             }
             setSessions((prev) =>
               prev.map((s) => {
-                if (s.id !== currentSessionIdRef.current) return s;
+                if (s.id !== agentEventSessionId()) return s;
                 const messages = [...s.messages];
                 if (messages.length === 0) return s;
                 const last = { ...messages[messages.length - 1] };
@@ -1567,7 +1825,7 @@ function App() {
             addLog(`[Blocked] ${name}: ${reason}`, "error");
             setSessions((prev) =>
               prev.map((s) => {
-                if (s.id !== currentSessionIdRef.current) return s;
+                if (s.id !== agentEventSessionId()) return s;
                 const messages = [...s.messages];
                 if (messages.length === 0) return s;
                 const last = { ...messages[messages.length - 1] };
@@ -1588,7 +1846,7 @@ function App() {
           setPendingApprovals(event.payload);
           setSessions((prev) =>
             prev.map((s) => {
-              if (s.id !== currentSessionIdRef.current) return s;
+              if (s.id !== agentEventSessionId()) return s;
               const messages = [...s.messages];
               if (messages.length === 0) return s;
               const last = { ...messages[messages.length - 1] };
@@ -1607,7 +1865,53 @@ function App() {
       );
 
       unlisteners.push(
-        await listen<string>("agent-complete", () => {
+        await listen<{
+          requestId?: string;
+          content?: string;
+          loopCount?: number;
+          ttftMs?: number;
+          responseTimeMs?: number;
+        }>("agent-stream-done", (event) => {
+          if (!isCurrentRequestPayload(event.payload)) return;
+          const done = event.payload || {};
+          setSessions((prev) =>
+            prev.map((s) => {
+              if (s.id !== agentEventSessionId()) return s;
+              const messages = [...s.messages];
+              if (messages.length === 0) return s;
+              const last = { ...messages[messages.length - 1] };
+              if (last.role !== "assistant") return s;
+              const usage = last.usage || {
+                promptTokens: last.contextTokens || activeRequestContextTokensRef.current || 0,
+                completionTokens: estimateTextTokens(last.content),
+                totalPromptTokens: last.contextTokens || activeRequestContextTokensRef.current || 0,
+                totalCompletionTokens: estimateTextTokens(last.content),
+                ttftMs: done.ttftMs || 0,
+                responseTimeMs: done.responseTimeMs || 0,
+                loopCount: done.loopCount || 1,
+              };
+              last.model = last.model || activeRequestModelRef.current;
+              last.contextTokens = last.contextTokens || activeRequestContextTokensRef.current;
+              last.usage = {
+                ...usage,
+                completionTokens: usage.completionTokens || estimateTextTokens(last.content),
+                ttftMs: done.ttftMs ?? usage.ttftMs,
+                responseTimeMs: done.responseTimeMs ?? usage.responseTimeMs,
+                loopCount: done.loopCount ?? usage.loopCount,
+              };
+              messages[messages.length - 1] = last;
+              return { ...s, messages };
+            })
+          );
+        })
+      );
+
+      unlisteners.push(
+        await listen<AgentEventPayload<{ status?: string }>>("agent-complete", (event) => {
+          if (!isCurrentRequestPayload(event.payload)) return;
+          isStreamingRef.current = false;
+          activeRequestIdRef.current = "";
+          activeRequestSessionIdRef.current = "";
           setIsStreaming(false);
           addLog(t("log.complete", lang), "info");
           setTimeout(() => chatTextareaRef.current?.focus(), 100);
@@ -1616,6 +1920,7 @@ function App() {
 
       unlisteners.push(
         await listen<{
+          requestId?: string;
           prompt_tokens: number;
           completion_tokens: number;
           total_prompt_tokens: number;
@@ -1624,7 +1929,8 @@ function App() {
           response_time_ms: number;
           loop_count: number;
         }>("agent-usage", (event) => {
-          setUsageStats({
+          if (!isCurrentRequestPayload(event.payload)) return;
+          const usage = {
             promptTokens: event.payload.prompt_tokens,
             completionTokens: event.payload.completion_tokens,
             totalPromptTokens: event.payload.total_prompt_tokens,
@@ -1632,15 +1938,37 @@ function App() {
             ttftMs: event.payload.ttft_ms,
             responseTimeMs: event.payload.response_time_ms,
             loopCount: event.payload.loop_count,
-          });
+          };
+          setUsageStats(usage);
+          setSessions((prev) =>
+            prev.map((s) => {
+              if (s.id !== agentEventSessionId()) return s;
+              const messages = [...s.messages];
+              if (messages.length === 0) return s;
+              const last = { ...messages[messages.length - 1] };
+              if (last.role !== "assistant") return s;
+              last.model = last.model || activeRequestModelRef.current;
+              last.contextTokens = usage.promptTokens || last.contextTokens || activeRequestContextTokensRef.current;
+              last.usage = usage;
+              messages[messages.length - 1] = last;
+              return { ...s, messages };
+            })
+          );
         })
       );
     }
 
-    setup();
+    setup().then(() => {
+      if (disposed) {
+        unlisteners.splice(0).forEach((fn) => fn());
+      }
+    }).catch((e) => {
+      addLog(`Listener setup failed: ${e}`, "error");
+    });
 
     return () => {
-      unlisteners.forEach((fn) => fn());
+      disposed = true;
+      unlisteners.splice(0).forEach((fn) => fn());
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1650,7 +1978,7 @@ function App() {
   // ==========================================
 
   const handleSendMessage = async () => {
-    if ((!prompt.trim() && attachments.length === 0) || isStreaming) return;
+    if ((!prompt.trim() && attachments.length === 0) || isStreamingRef.current) return;
 
     // Slash command: /compact — compress conversation history
     if (attachments.length === 0 && prompt.trim().toLowerCase() === "/compact") {
@@ -1678,7 +2006,11 @@ function App() {
     const userMessage = prompt.trim();
     const pendingAttachments = [...attachments];
     const imageAttachments = imageAttachmentsForApi(pendingAttachments);
+    const requestId = createRequestId();
+    activeRequestIdRef.current = requestId;
+    activeRequestSessionIdRef.current = currentSessionId;
     setPrompt("");
+    isStreamingRef.current = true;
     setIsStreaming(true);
 
     const finalMessage = buildPromptWithAttachments(userMessage, pendingAttachments);
@@ -1696,8 +2028,22 @@ function App() {
       const activeMsgs = lastDividerIdx >= 0 ? msgs.slice(lastDividerIdx + 1) : msgs;
       return activeMsgs
         .filter((m) => m.role !== "context_divider")
-        .map(serializeMessageForApi);
+        .flatMap((m) => {
+          const serialized = serializeMessageForApi(m);
+          return serialized ? [serialized] : [];
+        });
     })();
+
+    const requestModel = currentSession.sessionConfig.model || config.model;
+    activeRequestModelRef.current = requestModel;
+    activeRequestContextTokensRef.current =
+      sessionMessages.reduce((sum, msg) => sum + estimateTextTokens(String(msg.content || "")) + ((msg as { attachments?: Attachment[] }).attachments || []).length * 1100 + 6, 0) +
+      estimateTextTokens(finalMessage) +
+      imageAttachments.length * 1100;
+    addLog(
+      `[Request ${requestId}] mode=${currentMode} model=${requestModel} history=${sessionMessages.length} roles=${sessionMessages.map((m) => String(m.role || "?")[0]).join("") || "-"}`,
+      "info"
+    );
 
     setSessions((prev) =>
       prev.map((s) => {
@@ -1733,12 +2079,14 @@ function App() {
         top_p: sc.topP,
         max_tokens: sc.maxTokens,
         streaming: sc.streaming,
+        thinking_level: sc.thinkingLevel || "medium",
         context_limit: sc.contextLimit,
         tools_enabled: searchMode !== "off"
           ? [...config.tools_enabled.filter(t => t !== "web_search"), "web_search"]
           : config.tools_enabled.filter(t => t !== "web_search"),
       };
       await invoke("start_agent_session", {
+        requestId,
         prompt: finalMessage,
         config: mergedConfig,
         sessionMessages,
@@ -1747,6 +2095,9 @@ function App() {
         imageAttachments,
       });
     } catch (e) {
+      isStreamingRef.current = false;
+      activeRequestIdRef.current = "";
+      activeRequestSessionIdRef.current = "";
       setIsStreaming(false);
       addLog(`Agent error: ${e}`, "error");
       setPrompt(userMessage);
@@ -1767,7 +2118,7 @@ function App() {
   };
 
   const handleRetry = useCallback(async (msgIdx: number) => {
-    if (isStreaming) return;
+    if (isStreamingRef.current) return;
     const msgs = currentSession.messages;
     let userMsg = "";
     let userAttachments: Attachment[] = [];
@@ -1796,6 +2147,10 @@ function App() {
       } : m)
     } : s));
 
+    const requestId = createRequestId();
+    activeRequestIdRef.current = requestId;
+    activeRequestSessionIdRef.current = currentSessionId;
+    isStreamingRef.current = true;
     setIsStreaming(true);
     const sessionMessages = (() => {
       const slicedMsgs = msgs.slice(0, msgIdx);
@@ -1809,8 +2164,22 @@ function App() {
       const activeMsgs = lastDividerIdx >= 0 ? slicedMsgs.slice(lastDividerIdx + 1) : slicedMsgs;
       return activeMsgs
         .filter((m) => m.role !== "context_divider")
-        .map(serializeMessageForApi);
+        .flatMap((m) => {
+          const serialized = serializeMessageForApi(m);
+          return serialized ? [serialized] : [];
+        });
     })();
+    const retryPrompt = buildPromptWithAttachments(userMsg, userAttachments);
+    const requestModel = currentSession.sessionConfig.model || config.model;
+    activeRequestModelRef.current = requestModel;
+    activeRequestContextTokensRef.current =
+      sessionMessages.reduce((sum, msg) => sum + estimateTextTokens(String(msg.content || "")) + ((msg as { attachments?: Attachment[] }).attachments || []).length * 1100 + 6, 0) +
+      estimateTextTokens(retryPrompt) +
+      userAttachments.length * 1100;
+    addLog(
+      `[Request:retry ${requestId}] mode=${currentMode} model=${requestModel} history=${sessionMessages.length} roles=${sessionMessages.map((m) => String(m.role || "?")[0]).join("") || "-"}`,
+      "info"
+    );
     try {
       const sc = currentSession.sessionConfig;
       const mergedConfig: AppConfig = {
@@ -1821,13 +2190,15 @@ function App() {
         top_p: sc.topP,
         max_tokens: sc.maxTokens,
         streaming: sc.streaming,
+        thinking_level: sc.thinkingLevel || "medium",
         context_limit: sc.contextLimit,
         tools_enabled: searchMode !== "off"
           ? [...config.tools_enabled.filter(t => t !== "web_search"), "web_search"]
           : config.tools_enabled.filter(t => t !== "web_search"),
       };
       await invoke("start_agent_session", {
-        prompt: buildPromptWithAttachments(userMsg, userAttachments),
+        requestId,
+        prompt: retryPrompt,
         config: mergedConfig,
         sessionMessages,
         sessionMode: currentMode,
@@ -1835,6 +2206,9 @@ function App() {
         imageAttachments: userAttachments,
       });
     } catch (e) {
+      isStreamingRef.current = false;
+      activeRequestIdRef.current = "";
+      activeRequestSessionIdRef.current = "";
       setIsStreaming(false);
       addLog(`Agent error: ${e}`, "error");
     }
@@ -1926,6 +2300,11 @@ function App() {
     if (currentSessionId === id) {
       setCurrentSessionId(remaining[0].id);
     }
+    addLog(
+      lang === "zh" ? `已删除会话：${target?.title || "未命名"}` : `Deleted session: ${target?.title || "Untitled"}`,
+      "success",
+      true
+    );
   };
 
   const toggleActionExpanded = (id: string) => {
@@ -1933,12 +2312,21 @@ function App() {
   };
 
   const toggleTool = (tool: string) => {
+    const meta = TOOL_NAMES.find((item) => item.key === tool);
+    const wasEnabled = config.tools_enabled.includes(tool);
     setConfig((prev) => ({
       ...prev,
       tools_enabled: prev.tools_enabled.includes(tool)
         ? prev.tools_enabled.filter((t) => t !== tool)
         : [...prev.tools_enabled, tool],
     }));
+    addLog(
+      lang === "zh"
+        ? `${meta?.label || tool} 已${wasEnabled ? "禁用" : "启用"}`
+        : `${meta?.label || tool} ${wasEnabled ? "disabled" : "enabled"}`,
+      wasEnabled ? "info" : "success",
+      true
+    );
   };
 
   const removeTrustedPattern = async (toolName: string, pattern: string) => {
@@ -1959,6 +2347,24 @@ function App() {
       e.preventDefault();
       handleSendMessage();
     }
+  };
+
+  const thinkingLevelLabel = (level: SessionConfig["thinkingLevel"]) =>
+    t(`session.thinking${level.charAt(0).toUpperCase() + level.slice(1)}`, lang);
+
+  const setCurrentThinkingLevel = (level: SessionConfig["thinkingLevel"]) => {
+    setSessions((prev) => prev.map((s) =>
+      s.id === currentSessionId
+        ? { ...s, sessionConfig: { ...s.sessionConfig, thinkingLevel: level } }
+        : s
+    ));
+  };
+
+  const cycleThinkingLevel = () => {
+    const currentLevel = currentSession.sessionConfig.thinkingLevel || "medium";
+    const currentIndex = THINKING_LEVELS.indexOf(currentLevel);
+    const nextLevel = THINKING_LEVELS[(currentIndex + 1) % THINKING_LEVELS.length];
+    setCurrentThinkingLevel(nextLevel);
   };
 
   const statusIcon = (status: ToolAction["status"]) => {
@@ -1988,12 +2394,34 @@ function App() {
     }
   };
 
+  const activeModelId = currentSession.sessionConfig.model || config.model;
+  const currentThinkingLevel = currentSession.sessionConfig.thinkingLevel || "medium";
+  const currentInputAttachmentTokens = attachments.reduce((sum, att) => {
+    if (att.type === "image" && att.data) return sum + 1100;
+    return sum + estimateTextTokens(att.data || "");
+  }, 0);
+  const currentContextTokens =
+    estimateMessagesTokens(currentSession.messages) +
+    estimateTextTokens(prompt) +
+    currentInputAttachmentTokens;
+  const currentModelLimit = modelContextLimit(activeModelId);
+  const contextUsagePercent = Math.min(100, Math.round((currentContextTokens / currentModelLimit) * 100));
+
   // ==========================================
   // Render
   // ==========================================
 
   return (
     <div className="app-container">
+      <div className="toast-stack" aria-live="polite">
+        {toasts.map((toast) => (
+          <div key={toast.id} className={`toast-item ${toast.type === "cmd" ? "info" : toast.type}`}>
+            <span className="toast-dot" />
+            <span className="toast-text">{toast.text}</span>
+          </div>
+        ))}
+      </div>
+
       {/* ====== Sidebar ====== */}
       <aside className="sidebar" style={{ width: sidebarWidth }}>
         {/* Pill Navigation */}
@@ -2049,12 +2477,13 @@ function App() {
               const recentMsgs = s.messages.slice(-10);
               return recentMsgs.some(m => m.content.toLowerCase().includes(q));
             })
+            .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))
             .map((s) => {
               const activePreset = ALL_PRESETS.find(p => p.id === s.sessionConfig.activeRolePresetId);
               return (
             <div
               key={s.id}
-              className={`history-item ${s.id === currentSessionId ? "active" : ""}`}
+              className={`history-item ${s.id === currentSessionId ? "active" : ""} ${s.pinned ? "pinned" : ""}`}
               onClick={() => setCurrentSessionId(s.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -2080,7 +2509,7 @@ function App() {
                 </div>
               </div>
               <span className="history-mode-tag" title={s.sessionConfig.mode === "code" ? t("mode.code", lang) : t("mode.chat", lang)}>
-                {s.sessionConfig.mode === "code" ? <TerminalIcon size={10} /> : <MessageSquare size={10} />}
+                {s.pinned ? <Pin size={10} /> : s.sessionConfig.mode === "code" ? <TerminalIcon size={10} /> : <MessageSquare size={10} />}
               </span>
             </div>
             );
@@ -2121,6 +2550,15 @@ function App() {
                     setContextMenu(null);
                   }}>
                     <Pencil size={12} /> {t("context.editPreset", lang)}
+                  </button>
+                  <button className="context-menu-item" onClick={() => {
+                    setSessions(prev => prev.map(s => s.id === contextMenu.sessionId ? {
+                      ...s,
+                      pinned: !s.pinned,
+                    } : s));
+                    setContextMenu(null);
+                  }}>
+                    <Pin size={12} /> {targetSession?.pinned ? t("context.unpin", lang) : t("context.pin", lang)}
                   </button>
                   {hasPreset && (
                     <button className="context-menu-item" onClick={() => {
@@ -2261,17 +2699,25 @@ function App() {
 
         {/* Sidebar Footer */}
         <div className="sidebar-footer">
-          <div className="sidebar-tools-label">{t("tools.active", lang)}</div>
-          <div className="sidebar-tools-grid">
-            {TOOL_NAMES.map((t) => (
+          <div className="sidebar-tools-header">
+            <span>{t("tools.active", lang)}</span>
+            <span>{config.tools_enabled.length}/{TOOL_NAMES.length}</span>
+          </div>
+          <div className="sidebar-tool-strip">
+            {TOOL_NAMES.filter((tool) => config.tools_enabled.includes(tool.key)).map((tool) => (
               <button
-                key={t.key}
-                onClick={() => toggleTool(t.key)}
-                className={`tool-toggle ${config.tools_enabled.includes(t.key) ? "active" : ""}`}
+                key={tool.key}
+                onClick={() => toggleTool(tool.key)}
+                className="tool-chip active"
+                title={`${tool.label}: ${tool.description}`}
               >
-                {t.label}
+                {toolIcon(tool.key, 11)}
+                <span>{tool.shortLabel}</span>
               </button>
             ))}
+            {config.tools_enabled.length === 0 && (
+              <span className="sidebar-tools-empty">{lang === "zh" ? "未启用工具" : "No tools enabled"}</span>
+            )}
           </div>
           {/* Profile Card */}
           <div className="sidebar-profile-card">
@@ -2643,6 +3089,63 @@ function App() {
                     </div>
                   ) : (
                     <>
+                      {msg.role === "assistant" && msg.variants && msg.variants.length > 1 && (
+                        <div className="variant-nav variant-nav-top">
+                          <button
+                            className="variant-nav-btn"
+                            disabled={(msg.currentVariantIndex || 0) === 0}
+                            onClick={() => {
+                              const newIdx = Math.max(0, (msg.currentVariantIndex || 0) - 1);
+                              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+                                ...s,
+                                messages: s.messages.map((m, i) => i === mIdx ? {
+                                  ...m,
+                                  currentVariantIndex: newIdx,
+                                  content: m.variants![newIdx],
+                                } : m)
+                              } : s));
+                            }}
+                          >
+                            <ChevronLeft size={10} />
+                          </button>
+                          <span className="variant-nav-label">
+                            {(msg.currentVariantIndex || 0) + 1} / {msg.variants.length}
+                          </span>
+                          <button
+                            className="variant-nav-btn"
+                            disabled={(msg.currentVariantIndex || 0) >= msg.variants.length - 1}
+                            onClick={() => {
+                              const newIdx = Math.min(msg.variants!.length - 1, (msg.currentVariantIndex || 0) + 1);
+                              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+                                ...s,
+                                messages: s.messages.map((m, i) => i === mIdx ? {
+                                  ...m,
+                                  currentVariantIndex: newIdx,
+                                  content: m.variants![newIdx],
+                                } : m)
+                              } : s));
+                            }}
+                          >
+                            <ChevronRight size={10} />
+                          </button>
+                        </div>
+                      )}
+                      {msg.role === "assistant" && msg.reasoningContent && (
+                        <details className="reasoning-chain reasoning-chain-top">
+                          <summary className="reasoning-chain-summary">
+                            <span className="reasoning-chain-icon">CoT</span>
+                            {t("reasoning.label", lang)}
+                            {isStreaming && mIdx === currentSession.messages.length - 1 && !msg.content && (
+                              <span className="reasoning-chain-typing">...</span>
+                            )}
+                          </summary>
+                          <div className="reasoning-chain-content">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {msg.reasoningContent}
+                            </ReactMarkdown>
+                          </div>
+                        </details>
+                      )}
                       <div className="chat-bubble">
                         {msg.role === "assistant" ? (
                           <>
@@ -2762,24 +3265,6 @@ function App() {
                                   return null;
                                 })}
                               </div>
-                            )}
-
-                            {/* Reasoning chain (DeepSeek-R1, etc.) */}
-                            {msg.reasoningContent && (
-                              <details className="reasoning-chain" open={!msg.content}>
-                                <summary className="reasoning-chain-summary">
-                                  <span className="reasoning-chain-icon">&#128161;</span>
-                                  {t("reasoning.label", lang)}
-                                  {msg.reasoningContent && !msg.content && (
-                                    <span className="reasoning-chain-typing"> ...</span>
-                                  )}
-                                </summary>
-                                <div className="reasoning-chain-content">
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                    {msg.reasoningContent}
-                                  </ReactMarkdown>
-                                </div>
-                              </details>
                             )}
 
                             {/* Markdown content — rendered AFTER tool actions */}
@@ -2950,50 +3435,21 @@ function App() {
                           </button>
                         </div>
                       </div>
-                      {msg.role === "assistant" && msg.variants && msg.variants.length > 1 && (
-                        <div className="variant-nav">
-                          <button
-                            className="variant-nav-btn"
-                            disabled={(msg.currentVariantIndex || 0) === 0}
-                            onClick={() => {
-                              const newIdx = Math.max(0, (msg.currentVariantIndex || 0) - 1);
-                              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                ...s,
-                                messages: s.messages.map((m, i) => i === mIdx ? {
-                                  ...m,
-                                  currentVariantIndex: newIdx,
-                                  content: m.variants![newIdx],
-                                } : m)
-                              } : s));
-                            }}
-                          >
-                            <ChevronLeft size={10} />
-                          </button>
-                          <span className="variant-nav-label">
-                            {(msg.currentVariantIndex || 0) + 1} / {msg.variants.length}
-                          </span>
-                          <button
-                            className="variant-nav-btn"
-                            disabled={(msg.currentVariantIndex || 0) >= msg.variants.length - 1}
-                            onClick={() => {
-                              const newIdx = Math.min(msg.variants!.length - 1, (msg.currentVariantIndex || 0) + 1);
-                              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                ...s,
-                                messages: s.messages.map((m, i) => i === mIdx ? {
-                                  ...m,
-                                  currentVariantIndex: newIdx,
-                                  content: m.variants![newIdx],
-                                } : m)
-                              } : s));
-                            }}
-                          >
-                            <ChevronRight size={10} />
-                          </button>
-                        </div>
-                      )}
                       {msg.timestamp && (
                         <div className="bubble-timestamp">
-                          {new Date(msg.timestamp).toLocaleTimeString(lang === "zh" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                          <span>{new Date(msg.timestamp).toLocaleTimeString(currentLocale, { hour: "2-digit", minute: "2-digit" })}</span>
+                          {config.show_advanced_reply_info && msg.role === "assistant" && (
+                            <>
+                              <span className="bubble-meta-sep">·</span>
+                              <span>{getModelDisplayName(msg.model || activeRequestModelRef.current || currentSession.sessionConfig.model || config.model)}</span>
+                              <span className="bubble-meta-sep">·</span>
+                              <span>{t("usage.context", lang)} {formatTokenCount(msg.usage?.promptTokens || msg.contextTokens || 0)} tk</span>
+                              <span className="bubble-meta-sep">·</span>
+                              <span>{t("usage.completion", lang)} {formatTokenCount(msg.usage?.completionTokens || estimateTextTokens(msg.content))} tk</span>
+                              <span className="bubble-meta-sep">·</span>
+                              <span>{formatDuration(msg.usage?.responseTimeMs)}</span>
+                            </>
+                          )}
                         </div>
                       )}
                     </>
@@ -3239,15 +3695,65 @@ function App() {
                       !
                     </span>
                   )}
+                  <div
+                    className="context-usage-widget"
+                    onMouseEnter={() => setContextUsageOpen(true)}
+                    onMouseLeave={() => setContextUsageOpen(false)}
+                  >
+                    <button
+                      type="button"
+                      className="context-usage-trigger"
+                      title={`${t("usage.context", lang)} ${currentContextTokens.toLocaleString(currentLocale)} / ${currentModelLimit.toLocaleString(currentLocale)}`}
+                    >
+                      <Gauge size={12} />
+                      <span>{formatTokenCount(currentContextTokens)}</span>
+                    </button>
+                    {contextUsageOpen && (
+                      <div className="context-usage-popover">
+                        <div className="context-usage-row">
+                          <span>{t("usage.context", lang)}</span>
+                          <strong>{currentContextTokens.toLocaleString(currentLocale)} tk</strong>
+                        </div>
+                        <div className="context-usage-row">
+                          <span>{t("usage.modelLimit", lang)}</span>
+                          <strong>{currentModelLimit.toLocaleString(currentLocale)} tk</strong>
+                        </div>
+                        <div className="context-usage-meter">
+                          <span style={{ width: `${contextUsagePercent}%` }} />
+                        </div>
+                        <button
+                          type="button"
+                          className="context-compress-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleCompact();
+                          }}
+                          disabled={isStreaming || currentSession.messages.filter((m) => m.role !== "context_divider").length < 3}
+                        >
+                          <RefreshCw size={11} />
+                          {t("usage.compress", lang)}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div className="chat-input-toolbar-right">
+                <button
+                  type="button"
+                  className={`input-thinking-btn ${currentThinkingLevel}`}
+                  onClick={cycleThinkingLevel}
+                  title={`${t("session.thinkingLevel", lang)}: ${thinkingLevelLabel(currentThinkingLevel)}`}
+                >
+                  <Brain size={12} />
+                  <span>{thinkingLevelLabel(currentThinkingLevel)}</span>
+                </button>
                 <div style={{ position: "relative" }}>
                   <button
                     className="input-model-btn"
                     onClick={() => setModelPickerOpen(!modelPickerOpen)}
                     title={t("session.model", lang)}
                   >
-                    {getModelDisplayName(currentSession.sessionConfig.model || config.model)}
+                    <span>{getModelDisplayName(currentSession.sessionConfig.model || config.model)}</span>
                     <ChevronDown size={9} />
                   </button>
                   {modelPickerOpen && (
@@ -3763,18 +4269,15 @@ function App() {
               <div className="form-group">
                 <label className="form-label">{t("settings.language", lang)}</label>
                 <div className="lang-toggle">
-                  <button
-                    className={`lang-btn ${lang === "zh" ? "active" : ""}`}
-                    onClick={() => setConfig((prev) => ({ ...prev, language: "zh" }))}
-                  >
-                    中文
-                  </button>
-                  <button
-                    className={`lang-btn ${lang === "en" ? "active" : ""}`}
-                    onClick={() => setConfig((prev) => ({ ...prev, language: "en" }))}
-                  >
-                    English
-                  </button>
+                  {LANGUAGE_OPTIONS.map((option) => (
+                    <button
+                      key={option.code}
+                      className={`lang-btn ${lang === option.code ? "active" : ""}`}
+                      onClick={() => setConfig((prev) => ({ ...prev, language: option.code }))}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -3789,6 +4292,34 @@ function App() {
                   onChange={(e) => setConfig((prev) => ({ ...prev, font_size: parseInt(e.target.value) }))}
                   style={{ width: "100%" }}
                 />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label"><Type size={12} /> {t("settings.fontFamily", lang)}</label>
+                <select
+                  className="input-text"
+                  value={config.font_family || "system"}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, font_family: e.target.value }))}
+                >
+                  {FONT_OPTIONS.map((font) => (
+                    <option key={font.value} value={font.value}>{font.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">{t("settings.advancedReplyInfo", lang)}</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button
+                    className={`tool-toggle ${config.show_advanced_reply_info ? "active" : ""}`}
+                    onClick={() => setConfig((prev) => ({ ...prev, show_advanced_reply_info: !prev.show_advanced_reply_info }))}
+                  >
+                    {config.show_advanced_reply_info ? t("settings.on", lang) : t("settings.off", lang)}
+                  </button>
+                  <span style={{ fontSize: "0.68rem", color: "var(--text-tertiary)" }}>
+                    {t("settings.advancedReplyInfoDesc", lang)}
+                  </span>
+                </div>
               </div>
 
               <div className="form-group">
@@ -3882,16 +4413,26 @@ function App() {
 
               <div className="form-group">
                 <label className="form-label">{t("settings.tools", lang)}</label>
-                <div className="tools-grid">
-                  {TOOL_NAMES.map((t) => (
+                <div className="tools-grid tool-card-grid">
+                  {TOOL_NAMES.map((tool) => (
                     <button
-                      key={t.key}
-                      onClick={() => toggleTool(t.key)}
-                      className={`tool-toggle ${config.tools_enabled.includes(t.key) ? "active" : ""}`}
+                      key={tool.key}
+                      onClick={() => toggleTool(tool.key)}
+                      className={`tool-card-toggle ${config.tools_enabled.includes(tool.key) ? "active" : ""}`}
                     >
-                      {t.label}
+                      <span className="tool-card-icon">{toolIcon(tool.key, 13)}</span>
+                      <span className="tool-card-body">
+                        <span className="tool-card-title">{tool.label}</span>
+                        <span className="tool-card-desc">{tool.description}</span>
+                      </span>
+                      <span className={`tool-risk ${tool.risk}`}>{tool.risk}</span>
                     </button>
                   ))}
+                </div>
+                <div className="tool-suggestion-note">
+                  {lang === "zh"
+                    ? "可考虑后续新增：Git 专用工具、网页抓取、SQLite/CSV 查询、PDF/Office 解析。现在先把高风险能力收敛在 Shell/Write，并保留审批策略。"
+                    : "Good next additions: dedicated Git, web fetch, SQLite/CSV query, and PDF/Office parsing. For now, high-risk actions stay behind Shell/Write and approval policy."}
                 </div>
               </div>
 
@@ -4078,7 +4619,7 @@ function App() {
                         a.download = "gxagent-config.json";
                         a.click();
                         URL.revokeObjectURL(url);
-                        addLog(t("settings.exported", lang), "success");
+                        addLog(t("settings.exported", lang), "success", true);
                       } catch (e) {
                         addLog(String(e), "error");
                       }
@@ -4099,9 +4640,9 @@ function App() {
                           const text = await input.files[0].text();
                           const updated = await invoke<AppConfig>("import_config", { json: text });
                           setConfig(updated);
-                          addLog(t("settings.imported", lang), "success");
+                          addLog(t("settings.imported", lang), "success", true);
                         } catch (e) {
-                          addLog(t("settings.importFailed", lang) + String(e), "error");
+                          addLog(t("settings.importFailed", lang) + String(e), "error", true);
                         }
                       };
                       input.click();
@@ -4119,7 +4660,7 @@ function App() {
                       await invoke("clear_all_sessions");
                       setSessions([{ id: "default", title: "", messages: [], sessionConfig: { ...DEFAULT_SESSION_CONFIG } }]);
                       setCurrentSessionId("default");
-                      addLog(t("settings.cleared", lang), "success");
+                      addLog(t("settings.cleared", lang), "success", true);
                     } catch (e) {
                       addLog(String(e), "error");
                     }
