@@ -29,6 +29,7 @@ fn parse_search_sources(tool_output: &str) -> Vec<Value> {
 const MAX_LOOPS: u32 = 20;
 
 const SEARCH_FOLLOWUP_INSTRUCTION: &str = "You have just received web search results. You MUST base your answer on these search results. Cite the sources by mentioning the title and link when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing and what you could find. Do not make up information not present in the search results.";
+const GENERAL_ASSISTANT_INSTRUCTION: &str = "Assistant behavior: Be helpful, careful, and honest. Answer in the user's language when practical. If information is uncertain, outdated, or unavailable, say so clearly. Do not invent facts, citations, files, command results, or tool output. Ask for clarification when the user's goal is ambiguous and a wrong assumption would be risky.";
 
 static STEERING_QUEUE: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<Vec<String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(Vec::new())));
@@ -49,6 +50,88 @@ fn add_search_instruction(messages: &mut Vec<Value>) {
             "content": SEARCH_FOLLOWUP_INSTRUCTION
         }));
     }
+}
+
+fn append_general_assistant_instruction(system_prompt: &mut String) {
+    system_prompt.push_str("\n\n");
+    system_prompt.push_str(GENERAL_ASSISTANT_INSTRUCTION);
+}
+
+fn emit_stream_chunk(window: &Window, request_id: &str, content: impl Into<String>) {
+    let _ = window.emit("agent-stream-chunk", json!({
+        "requestId": request_id,
+        "content": content.into(),
+    }));
+}
+
+fn emit_reasoning_chunk(window: &Window, request_id: &str, content: impl Into<String>) {
+    let _ = window.emit("agent-reasoning-chunk", json!({
+        "requestId": request_id,
+        "content": content.into(),
+    }));
+}
+
+fn emit_stream_done(window: &Window, request_id: &str, mut payload: Value) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("requestId".to_string(), json!(request_id));
+    }
+    let _ = window.emit("agent-stream-done", payload);
+}
+
+fn emit_agent_complete(window: &Window, request_id: &str, status: &str) {
+    let _ = window.emit("agent-complete", json!({
+        "requestId": request_id,
+        "status": status,
+    }));
+}
+
+fn emit_usage(window: &Window, request_id: &str, mut payload: Value) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("requestId".to_string(), json!(request_id));
+    }
+    let _ = window.emit("agent-usage", payload);
+}
+
+fn normalized_thinking_level(level: &str) -> &'static str {
+    if level.eq_ignore_ascii_case("low") {
+        "low"
+    } else if level.eq_ignore_ascii_case("high") {
+        "high"
+    } else {
+        "medium"
+    }
+}
+
+fn thinking_instruction(level: &str) -> &'static str {
+    match normalized_thinking_level(level) {
+        "low" => "Reasoning effort: low. Prefer direct answers and avoid unnecessary exploration unless the task clearly requires it.",
+        "high" => "Reasoning effort: high. Spend more internal effort on planning, edge cases, and verification, but do not reveal hidden chain-of-thought.",
+        _ => "Reasoning effort: medium. Balance speed with enough internal checking for correctness, and do not reveal hidden chain-of-thought.",
+    }
+}
+
+fn append_thinking_instruction(system_prompt: &mut String, level: &str) {
+    system_prompt.push_str("\n\n");
+    system_prompt.push_str(thinking_instruction(level));
+}
+
+fn supports_reasoning_effort(config: &AppConfig) -> bool {
+    let base_url = config.base_url.to_ascii_lowercase();
+    let model = config.model.to_ascii_lowercase();
+    let is_openai = base_url.contains("api.openai.com") || base_url.contains("openai.azure.com");
+    is_openai && (
+        model.starts_with("o1")
+            || model.starts_with("o3")
+            || model.starts_with("o4")
+            || model.starts_with("gpt-5")
+    )
+}
+
+fn apply_reasoning_effort(request_body: &mut Value, config: &AppConfig, is_ollama: bool) {
+    if is_ollama || !supports_reasoning_effort(config) {
+        return;
+    }
+    request_body["reasoning_effort"] = json!(normalized_thinking_level(&config.thinking_level));
 }
 
 pub async fn push_steering_message(msg: String) {
@@ -260,6 +343,7 @@ fn normalize_session_messages(messages: Vec<Value>, is_ollama: bool) -> Vec<Valu
 /// Core agent loop with streaming and human-in-the-loop approval
 pub async fn start_agent_loop(
     window: Window,
+    request_id: String,
     user_prompt: String,
     config: AppConfig,
     session_messages: Vec<Value>,
@@ -274,7 +358,7 @@ pub async fn start_agent_loop(
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
     if session_mode == "chat" {
-        return run_chat_mode(window, client, user_prompt, config, session_messages, search_mode, image_attachments).await;
+        return run_chat_mode(window, request_id, client, user_prompt, config, session_messages, search_mode, image_attachments).await;
     }
 
     let mut mcp_manager = McpManager::new();
@@ -301,12 +385,13 @@ pub async fn start_agent_loop(
         Vec::new()
     };
 
-    let result = start_agent_loop_inner(window, client, user_prompt, config, session_messages, image_attachments, mcp_manager, mcp_tool_defs).await;
+    let result = start_agent_loop_inner(window, request_id, client, user_prompt, config, session_messages, image_attachments, mcp_manager, mcp_tool_defs).await;
     result
 }
 
 async fn run_chat_mode(
     window: Window,
+    request_id: String,
     client: reqwest::Client,
     user_prompt: String,
     config: AppConfig,
@@ -314,11 +399,13 @@ async fn run_chat_mode(
     search_mode: String,
     image_attachments: Vec<ImageAttachment>,
 ) -> Result<(), String> {
-    let chat_system_prompt = if config.system_prompt.contains("PowerShell") || config.system_prompt.contains("Windows PowerShell") {
-        "You are a helpful AI assistant. You can search the web when needed to provide up-to-date information. Be concise, friendly, and helpful. Respond in the same language the user uses.".to_string()
+    let mut chat_system_prompt = if config.system_prompt.contains("PowerShell") || config.system_prompt.contains("Windows PowerShell") {
+        "You are a helpful AI assistant. Be careful, honest, and practical. Answer in the user's language when practical. If you are unsure or lack enough information, say so instead of guessing. When using web search, ground the answer in the search results and cite relevant sources.".to_string()
     } else {
         config.system_prompt.clone()
     };
+    append_general_assistant_instruction(&mut chat_system_prompt);
+    append_thinking_instruction(&mut chat_system_prompt, &config.thinking_level);
     let has_web_search = config.tools_enabled.contains(&"web_search".to_string());
     let is_ollama = config.provider == "ollama";
 
@@ -363,8 +450,8 @@ async fn run_chat_mode(
                 "duration": search_elapsed,
                 "provider": config.search_provider,
             }));
-            let _ = window.emit("agent-stream-chunk", format!("\n❌ Search failed: {}\n", tool_output));
-            let _ = window.emit("agent-stream-done", json!({ "success": false }));
+            emit_stream_chunk(&window, &request_id, format!("\nSearch failed: {}\n", tool_output));
+            emit_stream_done(&window, &request_id, json!({ "success": false }));
             return Err(format!("Force search failed: {}", tool_output));
         } else {
             let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
@@ -441,6 +528,7 @@ async fn run_chat_mode(
         request_body["temperature"] = json!(config.temperature);
         request_body["top_p"] = json!(config.top_p);
     }
+    apply_reasoning_effort(&mut request_body, &config, is_ollama);
 
     // In force mode, search was already executed and results injected;
     // don't expose web_search tool to avoid duplicate searches.
@@ -562,6 +650,7 @@ async fn run_chat_mode(
                     }
                     followup_body["temperature"] = json!(config.temperature);
                     followup_body["top_p"] = json!(config.top_p);
+                    apply_reasoning_effort(&mut followup_body, &config, false);
 
                     let followup_response = client
                         .post(&url)
@@ -575,22 +664,22 @@ async fn run_chat_mode(
                     if followup_response.status().is_success() {
                         let followup_body: Value = followup_response.json().await.map_err(|e| format!("Parse error: {}", e))?;
                         let final_content = followup_body["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
-                        let _ = window.emit("agent-stream-chunk", &final_content);
-                        let _ = window.emit("agent-stream-done", json!({
+                        emit_stream_chunk(&window, &request_id, &final_content);
+                        emit_stream_done(&window, &request_id, json!({
                             "content": final_content,
                             "loopCount": 2,
                             "ttftMs": request_start.elapsed().as_millis() as u64,
                             "responseTimeMs": request_start.elapsed().as_millis() as u64,
                         }));
                     } else {
-                        let _ = window.emit("agent-stream-done", json!({
+                        emit_stream_done(&window, &request_id, json!({
                             "content": content,
                             "loopCount": 1,
                             "ttftMs": request_start.elapsed().as_millis() as u64,
                             "responseTimeMs": request_start.elapsed().as_millis() as u64,
                         }));
                     }
-                    let _ = window.emit("agent-complete", "success");
+                    emit_agent_complete(&window, &request_id, "success");
                     return Ok(());
                 }
             }
@@ -670,6 +759,7 @@ async fn run_chat_mode(
                     }
                     followup_body["temperature"] = json!(config.temperature);
                     followup_body["top_p"] = json!(config.top_p);
+                    apply_reasoning_effort(&mut followup_body, &config, false);
 
                     let followup_response = client
                         .post(&url)
@@ -683,34 +773,34 @@ async fn run_chat_mode(
                     if followup_response.status().is_success() {
                         let fb: Value = followup_response.json().await.map_err(|e| format!("Parse error: {}", e))?;
                         let final_content = fb["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
-                        let _ = window.emit("agent-stream-chunk", &final_content);
-                        let _ = window.emit("agent-stream-done", json!({
+                        emit_stream_chunk(&window, &request_id, &final_content);
+                        emit_stream_done(&window, &request_id, json!({
                             "content": final_content,
                             "loopCount": 2,
                             "ttftMs": request_start.elapsed().as_millis() as u64,
                             "responseTimeMs": request_start.elapsed().as_millis() as u64,
                         }));
                     } else {
-                        let _ = window.emit("agent-stream-done", json!({
+                        emit_stream_done(&window, &request_id, json!({
                             "content": clean_content,
                             "loopCount": 1,
                             "ttftMs": request_start.elapsed().as_millis() as u64,
                             "responseTimeMs": request_start.elapsed().as_millis() as u64,
                         }));
                     }
-                    let _ = window.emit("agent-complete", "success");
+                    emit_agent_complete(&window, &request_id, "success");
                     return Ok(());
                 }
             }
         }
 
-        let _ = window.emit("agent-stream-done", json!({
+        emit_stream_done(&window, &request_id, json!({
             "content": content,
             "loopCount": 1,
             "ttftMs": request_start.elapsed().as_millis() as u64,
             "responseTimeMs": request_start.elapsed().as_millis() as u64,
         }));
-        let _ = window.emit("agent-complete", "success");
+        emit_agent_complete(&window, &request_id, "success");
         return Ok(());
     }
 
@@ -746,7 +836,7 @@ async fn run_chat_mode(
                             dsml_buffering = true;
                             dsml_buffer.push_str(content);
                         } else {
-                            let _ = window.emit("agent-stream-chunk", content);
+                            emit_stream_chunk(&window, &request_id, content);
                         }
                     }
                 }
@@ -793,7 +883,7 @@ async fn run_chat_mode(
                             dsml_buffering = true;
                             dsml_buffer.push_str(content);
                         } else {
-                            let _ = window.emit("agent-stream-chunk", content);
+                            emit_stream_chunk(&window, &request_id, content);
                         }
                     }
                 }
@@ -833,7 +923,7 @@ async fn run_chat_mode(
             let clean_content = strip_dsml_tags(&assistant_content);
             let buffer_clean = strip_dsml_tags(&dsml_buffer);
             if !buffer_clean.trim().is_empty() {
-                let _ = window.emit("agent-stream-chunk", &buffer_clean);
+                emit_stream_chunk(&window, &request_id, &buffer_clean);
             }
             if has_web_search {
                 accumulated_tool_calls = dsml_calls;
@@ -843,7 +933,7 @@ async fn run_chat_mode(
             eprintln!("[agent] DSML detected but no tool calls parsed, sending cleaned content");
             let clean_content = strip_dsml_tags(&assistant_content);
             if !clean_content.trim().is_empty() {
-                let _ = window.emit("agent-stream-chunk", &clean_content);
+                emit_stream_chunk(&window, &request_id, &clean_content);
             }
             assistant_content = clean_content;
         }
@@ -941,6 +1031,7 @@ async fn run_chat_mode(
         }
         followup_body["temperature"] = json!(config.temperature);
         followup_body["top_p"] = json!(config.top_p);
+        apply_reasoning_effort(&mut followup_body, &config, false);
 
         let followup_response = match client
             .post(&url)
@@ -952,14 +1043,14 @@ async fn run_chat_mode(
         {
             Ok(resp) => resp,
             Err(e) => {
-                let _ = window.emit("agent-stream-chunk", &format!("\n❌ Follow-up request failed: {}\n", e));
-                let _ = window.emit("agent-stream-done", json!({
+                emit_stream_chunk(&window, &request_id, format!("\nFollow-up request failed: {}\n", e));
+                emit_stream_done(&window, &request_id, json!({
                     "content": format!("🔍 Search completed but follow-up failed: {}", e),
                     "loopCount": 1,
                     "ttftMs": ttft_ms.unwrap_or(0),
                     "responseTimeMs": request_start.elapsed().as_millis() as u64,
                 }));
-                let _ = window.emit("agent-complete", "success");
+                emit_agent_complete(&window, &request_id, "success");
                 return Ok(());
             }
         };
@@ -967,14 +1058,14 @@ async fn run_chat_mode(
         if !followup_response.status().is_success() {
             let status = followup_response.status();
             let error_text = followup_response.text().await.unwrap_or_default();
-            let _ = window.emit("agent-stream-chunk", &format!("\n❌ Follow-up API error ({}): {}\n", status, &error_text[..error_text.len().min(300)]));
-            let _ = window.emit("agent-stream-done", json!({
+            emit_stream_chunk(&window, &request_id, format!("\nFollow-up API error ({}): {}\n", status, &error_text[..error_text.len().min(300)]));
+            emit_stream_done(&window, &request_id, json!({
                 "content": format!("🔍 Search completed but follow-up failed ({}): {}", status, error_text),
                 "loopCount": 1,
                 "ttftMs": ttft_ms.unwrap_or(0),
                 "responseTimeMs": request_start.elapsed().as_millis() as u64,
             }));
-            let _ = window.emit("agent-complete", "success");
+            emit_agent_complete(&window, &request_id, "success");
             return Ok(());
         }
 
@@ -987,7 +1078,7 @@ async fn run_chat_mode(
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = window.emit("agent-stream-chunk", &format!("\n❌ Stream error: {}\n", e));
+                    emit_stream_chunk(&window, &request_id, format!("\nStream error: {}\n", e));
                     break;
                 }
             };
@@ -1008,7 +1099,7 @@ async fn run_chat_mode(
                             followup_dsml_buffering = true;
                             followup_dsml_buffer.push_str(content);
                         } else {
-                            let _ = window.emit("agent-stream-chunk", content);
+                            emit_stream_chunk(&window, &request_id, content);
                         }
                     }
                 }
@@ -1021,7 +1112,7 @@ async fn run_chat_mode(
             let clean_content = strip_dsml_tags(&followup_content);
             let buffer_clean = strip_dsml_tags(&followup_dsml_buffer);
             if !buffer_clean.trim().is_empty() {
-                let _ = window.emit("agent-stream-chunk", &buffer_clean);
+                emit_stream_chunk(&window, &request_id, &buffer_clean);
             }
             followup_content = clean_content;
 
@@ -1116,6 +1207,7 @@ async fn run_chat_mode(
                     }
                     second_followup_body["temperature"] = json!(config.temperature);
                     second_followup_body["top_p"] = json!(config.top_p);
+                    apply_reasoning_effort(&mut second_followup_body, &config, false);
 
                     let second_followup_response = client
                         .post(&url)
@@ -1154,7 +1246,7 @@ async fn run_chat_mode(
                                             second_dsml_buffering = true;
                                             second_dsml_buffer.push_str(content);
                                         } else {
-                                            let _ = window.emit("agent-stream-chunk", content);
+                                            emit_stream_chunk(&window, &request_id, content);
                                         }
                                     }
                                 }
@@ -1164,45 +1256,46 @@ async fn run_chat_mode(
                         if second_dsml_buffering {
                             let clean = strip_dsml_tags(&second_dsml_buffer);
                             if !clean.trim().is_empty() {
-                                let _ = window.emit("agent-stream-chunk", &clean);
+                                emit_stream_chunk(&window, &request_id, &clean);
                             }
                         }
 
-                        let _ = window.emit("agent-stream-done", json!({
+                        emit_stream_done(&window, &request_id, json!({
                             "content": second_content,
                             "loopCount": 3,
                             "ttftMs": ttft_ms.unwrap_or(0),
                             "responseTimeMs": request_start.elapsed().as_millis() as u64,
                         }));
-                        let _ = window.emit("agent-complete", "success");
+                        emit_agent_complete(&window, &request_id, "success");
                         return Ok(());
                     }
                 }
             }
         }
 
-        let _ = window.emit("agent-stream-done", json!({
+        emit_stream_done(&window, &request_id, json!({
             "content": followup_content,
             "loopCount": 2,
             "ttftMs": ttft_ms.unwrap_or(0),
             "responseTimeMs": request_start.elapsed().as_millis() as u64,
         }));
-        let _ = window.emit("agent-complete", "success");
+        emit_agent_complete(&window, &request_id, "success");
         return Ok(());
     }
 
-    let _ = window.emit("agent-stream-done", json!({
+    emit_stream_done(&window, &request_id, json!({
         "content": assistant_content,
         "loopCount": 1,
         "ttftMs": ttft_ms.unwrap_or(0),
         "responseTimeMs": request_start.elapsed().as_millis() as u64,
     }));
-    let _ = window.emit("agent-complete", "success");
+    emit_agent_complete(&window, &request_id, "success");
     Ok(())
 }
 
 async fn start_agent_loop_inner(
     window: Window,
+    request_id: String,
     client: reqwest::Client,
     user_prompt: String,
     config: AppConfig,
@@ -1224,6 +1317,9 @@ async fn start_agent_loop_inner(
             "length": rules.len(),
         }));
     }
+
+    append_general_assistant_instruction(&mut system_prompt);
+    append_thinking_instruction(&mut system_prompt, &config.thinking_level);
 
     let mut messages: Vec<Value> = vec![json!({
         "role": "system",
@@ -1297,6 +1393,7 @@ async fn start_agent_loop_inner(
             request_body["temperature"] = json!(config.temperature);
             request_body["top_p"] = json!(config.top_p);
         }
+        apply_reasoning_effort(&mut request_body, &config, is_ollama);
 
         // Add enabled tools
         let mut enabled_tools = get_enabled_tool_definitions(&config.tools_enabled);
@@ -1349,7 +1446,7 @@ async fn start_agent_loop_inner(
             total_prompt_tokens += prompt_tokens;
             total_completion_tokens += completion_tokens;
 
-            let _ = window.emit("agent-usage", json!({
+            emit_usage(&window, &request_id, json!({
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_prompt_tokens": total_prompt_tokens,
@@ -1370,11 +1467,11 @@ async fn start_agent_loop_inner(
                 .to_string();
 
             if !reasoning_content.is_empty() {
-                let _ = window.emit("agent-reasoning-chunk", &reasoning_content);
+                emit_reasoning_chunk(&window, &request_id, &reasoning_content);
             }
 
             if !content.is_empty() {
-                let _ = window.emit("agent-stream-chunk", &content);
+                emit_stream_chunk(&window, &request_id, &content);
             }
 
             let tool_calls = body["choices"][0]["message"]["tool_calls"]
@@ -1384,7 +1481,7 @@ async fn start_agent_loop_inner(
 
             if tool_calls.is_empty() {
                 mcp_manager.shutdown().await;
-                let _ = window.emit("agent-complete", "success");
+                emit_agent_complete(&window, &request_id, "success");
                 return Ok(());
             }
 
@@ -1474,7 +1571,7 @@ async fn start_agent_loop_inner(
                                     ttft_ms = Some(request_start.elapsed().as_millis() as u64);
                                 }
                                 assistant_content.push_str(content);
-                                let _ = window.emit("agent-stream-chunk", content);
+                                emit_stream_chunk(&window, &request_id, content);
                             }
                         }
 
@@ -1530,7 +1627,7 @@ async fn start_agent_loop_inner(
                             if let Some(reasoning) = delta["reasoning_content"].as_str() {
                                 if !reasoning.is_empty() {
                                     assistant_reasoning.push_str(reasoning);
-                                    let _ = window.emit("agent-reasoning-chunk", reasoning);
+                                    emit_reasoning_chunk(&window, &request_id, reasoning);
                                 }
                             }
 
@@ -1540,7 +1637,7 @@ async fn start_agent_loop_inner(
                                     ttft_ms = Some(request_start.elapsed().as_millis() as u64);
                                 }
                                 assistant_content.push_str(content);
-                                let _ = window.emit("agent-stream-chunk", content);
+                                emit_stream_chunk(&window, &request_id, content);
                             }
 
                             if let Some(tool_calls) = delta["tool_calls"].as_array() {
@@ -1587,7 +1684,7 @@ async fn start_agent_loop_inner(
         total_prompt_tokens += stream_usage_prompt;
         total_completion_tokens += stream_usage_completion;
 
-        let _ = window.emit("agent-usage", json!({
+        emit_usage(&window, &request_id, json!({
             "prompt_tokens": stream_usage_prompt,
             "completion_tokens": stream_usage_completion,
             "total_prompt_tokens": total_prompt_tokens,
@@ -1600,7 +1697,7 @@ async fn start_agent_loop_inner(
         // No tool calls - conversation complete
         if !has_tool_calls {
             mcp_manager.shutdown().await;
-            let _ = window.emit("agent-complete", "success");
+            emit_agent_complete(&window, &request_id, "success");
             return Ok(());
         }
 

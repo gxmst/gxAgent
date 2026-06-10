@@ -15,6 +15,7 @@ export interface AppConfig {
   max_tokens: number | null;
   system_prompt: string;
   streaming: boolean;
+  thinking_level: "low" | "medium" | "high";
   context_limit: number;
   tools_enabled: string[];
   approval_policy: string;
@@ -29,6 +30,8 @@ export interface AppConfig {
   search_provider: string;
   search_api_key: string;
   font_size: number;
+  font_family: string;
+  show_advanced_reply_info: boolean;
   command_timeout: number;
   preview_sandbox: boolean;
 }
@@ -90,6 +93,9 @@ export interface Message {
   role: "user" | "assistant" | "system" | "context_divider";
   content: string;
   attachments?: Attachment[];
+  model?: string;
+  contextTokens?: number;
+  usage?: UsageStats;
   actions?: ToolAction[];
   reasoningContent?: string;
   variants?: string[];
@@ -103,6 +109,7 @@ export interface ChatSession {
   title: string;
   messages: Message[];
   sessionConfig: SessionConfig;
+  pinned?: boolean;
 }
 
 export interface SessionConfig {

@@ -21,6 +21,7 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 #[tauri::command]
 async fn start_agent_session(
     window: tauri::Window,
+    request_id: Option<String>,
     prompt: String,
     config: AppConfig,
     session_messages: Vec<Value>,
@@ -31,16 +32,33 @@ async fn start_agent_session(
     let mode = session_mode.unwrap_or_else(|| "chat".to_string());
     let smode = search_mode.unwrap_or_else(|| "auto".to_string());
     let images = image_attachments.unwrap_or_default();
-    let result = agent::start_agent_loop(window.clone(), prompt, config, session_messages, mode, smode, images).await;
+    let request_id = request_id.unwrap_or_else(|| {
+        format!(
+            "req-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        )
+    });
+    let result = agent::start_agent_loop(window.clone(), request_id.clone(), prompt, config, session_messages, mode, smode, images).await;
     if let Err(ref e) = result {
-        let _ = window.emit("agent-stream-chunk", format!("\n❌ Error: {}\n", e));
+        let _ = window.emit("agent-stream-chunk", json!({
+            "requestId": request_id,
+            "content": format!("\nError: {}\n", e),
+        }));
         let _ = window.emit("agent-stream-done", json!({
+            "requestId": request_id,
             "content": format!("Error: {}", e),
             "loopCount": 0,
             "ttftMs": 0,
             "responseTimeMs": 0,
         }));
-        let _ = window.emit("agent-complete", "error");
+        let _ = window.emit("agent-complete", json!({
+            "requestId": request_id,
+            "status": "error",
+        }));
+        return Ok(());
     }
     result
 }
