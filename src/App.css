@@ -1331,20 +1331,12 @@ select.input-text {
 
 /* Bubble hover actions */
 .bubble-actions {
-  position: absolute;
-  bottom: -16px;
-  right: 8px;
-  display: flex;
-  gap: 2px;
+  display: inline-flex;
+  gap: 4px;
   opacity: 0;
   transition: opacity 0.15s;
   pointer-events: none;
-  background: var(--bg-card);
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  padding: 2px;
-  box-shadow: var(--shadow-elevated);
-  z-index: 10;
+  margin-left: 8px;
 }
 
 .chat-bubble-container:hover .bubble-actions {
@@ -1353,13 +1345,12 @@ select.input-text {
 }
 
 .bubble-action-btn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  padding: 2px;
   border: none;
-  border-radius: 6px;
+  border-radius: 3px;
   background: transparent;
   color: var(--text-tertiary);
   cursor: pointer;
@@ -1367,7 +1358,7 @@ select.input-text {
 }
 
 .bubble-action-btn:hover {
-  background: var(--bg-card-hover);
+  background: var(--bg-surface-hover);
   color: var(--text-primary);
 }
 
@@ -2354,6 +2345,98 @@ select.input-text {
 
 .settings-modal {
   width: 620px;
+}
+
+.stats-modal {
+  width: 440px;
+}
+
+.stats-modal-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.stats-modal-body {
+  gap: 12px;
+}
+
+.stats-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.stats-summary strong {
+  color: var(--text-primary);
+  font-size: 0.82rem;
+}
+
+.stats-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stats-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.74rem;
+}
+
+.stats-tool-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  color: var(--text-primary);
+}
+
+.stats-tool-count {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.stats-meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg-subtle);
+}
+
+.stats-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.stats-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-tertiary);
+  border: 1px dashed var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-card);
+  font-size: 0.78rem;
 }
 
 .settings-tabs {

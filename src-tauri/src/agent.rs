@@ -2339,7 +2339,8 @@ async fn process_tool_calls(
         }
     }
 
-    // Execute auto-approved tools immediately
+    // Execute auto-approved tools through the same path as approved tools so MCP
+    // routing and pre-write checkpoints stay consistent.
     for tc in &auto_approved {
         let _ = window.emit(
             "agent-tool-executing",

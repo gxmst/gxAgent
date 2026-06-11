@@ -47,6 +47,7 @@ import {
   Download,
   Upload,
   Trash,
+  BarChart3,
   Search,
   Zap,
   Sparkles,
@@ -55,7 +56,6 @@ import {
   Timer,
   Type,
   Check,
-  Gauge,
   Brain,
 } from "lucide-react";
 import "./styles/modern.css";
@@ -67,6 +67,8 @@ import CaturtleLogo from "./assets/logo.png";
 import { ROLE_PRESETS, ROLE_CATEGORIES, RolePreset } from "./rolePresets";
 import { countTokens, parseCommand, sessionToMarkdown } from "./utils/helpers";
 import { CommandSuggestions, useGlobalHotkeys } from "./components/shared/CommandSuggestions";
+import { exportAllSessions, importSessions, getToolStats } from "./utils/sessionHelpers";
+import { ContextMenu, useContextMenu } from "./components/shared/ContextMenu";
 import { useSessionStorage } from "./hooks/useSessionStorage";
 
 // ==========================================
@@ -545,6 +547,19 @@ Object.assign(i18n.zh, {
   "usage.compress": "压缩上下文",
   "context.pin": "置顶会话",
   "context.unpin": "取消置顶",
+  "context.exportAll": "导出所有会话",
+  "context.importSessions": "导入会话",
+  "context.toolStats": "工具统计",
+  "session.untitled": "未命名会话",
+  "session.exportedAll": "会话已导出",
+  "session.importedCount": "已导入 {count} 个会话",
+  "session.importFailed": "导入失败",
+  "stats.title": "工具调用统计",
+  "stats.allSessions": "所有会话",
+  "stats.total": "总计 {count} 次",
+  "stats.empty": "暂无工具调用",
+  "stats.count": "{count} 次",
+  "status.error": "出错",
 });
 
 Object.assign(i18n.en, {
@@ -558,6 +573,19 @@ Object.assign(i18n.en, {
   "usage.compress": "Compress context",
   "context.pin": "Pin conversation",
   "context.unpin": "Unpin conversation",
+  "context.exportAll": "Export All Sessions",
+  "context.importSessions": "Import Sessions",
+  "context.toolStats": "Tool Stats",
+  "session.untitled": "Untitled Session",
+  "session.exportedAll": "Sessions exported",
+  "session.importedCount": "Imported {count} sessions",
+  "session.importFailed": "Import failed",
+  "stats.title": "Tool Call Stats",
+  "stats.allSessions": "All Sessions",
+  "stats.total": "{count} total",
+  "stats.empty": "No tool calls yet",
+  "stats.count": "{count} calls",
+  "status.error": "error",
 });
 
 function t(key: string, lang: string, vars?: Record<string, string>): string {
@@ -602,6 +630,11 @@ type AgentEventPayload<T extends Record<string, unknown> = Record<string, unknow
       content?: string;
       status?: string;
     });
+
+type ToolStatsDialog = {
+  title: string;
+  stats: Record<string, number>;
+};
 
 const DEFAULT_SESSION_CONFIG: SessionConfig = {
   mode: "chat",
@@ -964,11 +997,34 @@ function App() {
   useGlobalHotkeys(() => createNewSession());
 
   const [editingSessionTitle, setEditingSessionTitle] = useState(false);
+  const { menu, handleContextMenu, closeMenu } = useContextMenu();
+
+  const [prompt, setPrompt] = useState("");
+
+  // Auto-save draft
+  useEffect(() => {
+    localStorage.setItem('gx_draft', prompt);
+  }, [prompt]);
+
+  // Restore draft on mount
+  useEffect(() => {
+    const draft = localStorage.getItem('gx_draft');
+    if (draft) setPrompt(draft);
+  }, []);
+
+  // Listen for tray menu events
+  useEffect(() => {
+    const unlisten = listen<void>('open-settings', () => {
+      setSettingsOpen(true);
+    });
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  }, []);
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
 
-  const [prompt, setPrompt] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"model" | "chat" | "agent" | "search" | "data">("model");
@@ -1026,10 +1082,10 @@ function App() {
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [sessionSettingsOpen, setSessionSettingsOpen] = useState(false);
+  const [toolStatsDialog, setToolStatsDialog] = useState<ToolStatsDialog | null>(null);
   const [sidebarNav, setSidebarNav] = useState<"chat" | "code">("chat");
   const [editingMessageIdx, setEditingMessageIdx] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
-  const [contextUsageOpen, setContextUsageOpen] = useState(false);
 
   // Resize state
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -1062,7 +1118,7 @@ function App() {
     isStreamingRef.current = isStreaming;
   }, [isStreaming]);
 
-  const currentSession = sessions.find((s) => s.id === currentSessionId) || sessions[0];
+  const currentSession = sessions.find((s) => s.id === currentSessionId) || sessions[0] || createDefaultSession();
   const currentMode = currentSession.sessionConfig.mode || "chat";
   const lang = config.language || "zh";
   const currentLocale = LANGUAGE_OPTIONS.find((l) => l.code === lang)?.locale || "en-US";
@@ -1149,6 +1205,7 @@ function App() {
       }
       if (e.key === "Escape") {
         if (contextMenu) { setContextMenu(null); return; }
+        if (toolStatsDialog) { setToolStatsDialog(null); return; }
         if (rolePresetsOpen) { setRolePresetsOpen(false); setCustomPresetForm(false); setEditingCustomPreset(null); return; }
         if (modelPickerOpen) { setModelPickerOpen(false); return; }
         if (settingsOpen) { setSettingsOpen(false); return; }
@@ -1158,7 +1215,7 @@ function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contextMenu, rolePresetsOpen, modelPickerOpen, settingsOpen, sessionSettingsOpen]);
+  }, [contextMenu, toolStatsDialog, rolePresetsOpen, modelPickerOpen, settingsOpen, sessionSettingsOpen]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", config.theme || "light");
@@ -2648,7 +2705,7 @@ function App() {
       case "drafting": return t("status.parsing", lang);
       case "executing": return t("status.running", lang);
       case "done": return t("status.done", lang);
-      case "error": return lang === "zh" ? "出错" : "error";
+      case "error": return t("status.error", lang);
       case "blocked": return t("status.blocked", lang);
       case "pending_approval": return t("status.awaiting", lang);
       default: return status;
@@ -2666,7 +2723,6 @@ function App() {
     estimateTextTokens(prompt) +
     currentInputAttachmentTokens;
   const currentModelLimit = modelContextLimit(activeModelId);
-  const contextUsagePercent = Math.min(100, Math.round((currentContextTokens / currentModelLimit) * 100));
   const pendingApprovalHasInlineAction = !!pendingApprovals && currentSession.messages.some((msg) =>
     msg.actions?.some((action) => pendingApprovals.tool_calls.some((tc) => tc.id === action.id))
   );
@@ -2675,8 +2731,66 @@ function App() {
   // Render
   // ==========================================
 
+  const handleExportSessions = () => {
+    exportAllSessions(sessions);
+    notify(t("session.exportedAll", lang), "success");
+    closeMenu();
+  };
+
+  const handleImportSessions = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (file) {
+        try {
+          const imported = await importSessions(file);
+          const normalized = normalizeSessions(imported);
+          setSessions(normalized);
+          setCurrentSessionId((prev) =>
+            normalized.some((session) => session.id === prev) ? prev : normalized[0].id
+          );
+          notify(t("session.importedCount", lang, { count: String(normalized.length) }), "success");
+        } catch (err) {
+          notify(t("session.importFailed", lang), "error");
+        }
+      }
+    };
+    input.click();
+    closeMenu();
+  };
+
+  const handleClearAll = () => {
+    if (confirm(t("settings.clearSessionsConfirm", lang))) {
+      setSessions([createDefaultSession()]);
+      setCurrentSessionId('default');
+      notify(t("settings.cleared", lang), "success");
+    }
+    closeMenu();
+  };
+
+  const handleShowStats = () => {
+    setToolStatsDialog({
+      title: t("stats.allSessions", lang),
+      stats: getToolStats(sessions),
+    });
+    closeMenu();
+  };
+
+  const toolStatsEntries = toolStatsDialog
+    ? Object.entries(toolStatsDialog.stats).sort((a, b) => b[1] - a[1])
+    : [];
+  const toolStatsTotal = toolStatsEntries.reduce((sum, [, count]) => sum + count, 0);
+  const toolStatsMax = toolStatsEntries[0]?.[1] || 0;
+
   return (
-    <div className="app-container">
+    <div className="app-container" onContextMenu={(e) => {
+      // 只在空白区域显示全局菜单
+      if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains('chat-panel') || (e.target as HTMLElement).classList.contains('chat-messages')) {
+        handleContextMenu(e);
+      }
+    }}>
       <div className="toast-stack" aria-live="polite">
         {toasts.map((toast) => (
           <div key={toast.id} className={`toast-item ${toast.type === "cmd" ? "info" : toast.type}`}>
@@ -2859,6 +2973,18 @@ function App() {
                     <Download size={12} /> {t("context.export", lang)}
                   </button>
                   <button className="context-menu-item" onClick={() => {
+                    const s = sessions.find(s => s.id === contextMenu.sessionId);
+                    if (!s) return;
+                    setToolStatsDialog({
+                      title: s.title || t("session.untitled", lang),
+                      stats: getToolStats([s]),
+                    });
+                    setContextMenu(null);
+                  }}>
+                    <BarChart3 size={12} /> {t("context.toolStats", lang)}
+                  </button>
+                  <div className="context-menu-divider" />
+                  <button className="context-menu-item" onClick={() => {
                     const input = document.createElement("input");
                     input.type = "file";
                     input.accept = ".json,.md";
@@ -2874,7 +3000,7 @@ function App() {
                               id: newId,
                               title: imported.title || input.files![0].name,
                               messages: imported.messages,
-                              sessionConfig: imported.sessionConfig || { ...DEFAULT_SESSION_CONFIG },
+                              sessionConfig: { ...DEFAULT_SESSION_CONFIG, ...(imported.sessionConfig || {}) },
                             }]);
                             setCurrentSessionId(newId);
                           }
@@ -3047,29 +3173,6 @@ function App() {
                   {currentMode === "chat" ? <MessageSquare size={11} /> : <TerminalIcon size={11} />}
                   {currentMode === "chat" ? t("mode.chat", lang) : t("mode.code", lang)}
                 </span>
-                <div className="model-indicator">
-                  <span className="model-dot" />
-                  {getModelDisplayName(currentSession.sessionConfig.model || config.model)}
-                </div>
-                {usageStats && (
-                  <div className="usage-badge">
-                    <span className="usage-item" title={`${t("usage.prompt", lang)}: ${usageStats.promptTokens}`}>
-                      {t("usage.prompt", lang)} {usageStats.promptTokens}
-                    </span>
-                    <span className="usage-sep">/</span>
-                    <span className="usage-item" title={`${t("usage.completion", lang)}: ${usageStats.completionTokens}`}>
-                      {usageStats.completionTokens}
-                    </span>
-                    <span className="usage-sep">|</span>
-                    <span className="usage-item" title={t("usage.ttft", lang)}>
-                      {usageStats.ttftMs}ms
-                    </span>
-                    <span className="usage-sep">|</span>
-                    <span className="usage-item" title={t("usage.responseTime", lang)}>
-                      {usageStats.responseTimeMs >= 1000 ? `${(usageStats.responseTimeMs / 1000).toFixed(1)}s` : `${usageStats.responseTimeMs}ms`}
-                    </span>
-                  </div>
-                )}
               </div>
               <div className="panel-action-cluster">
                 <button
@@ -3656,16 +3759,6 @@ function App() {
                         )}
                         {/* Hover action buttons */}
                         <div className="bubble-actions">
-                          <button
-                            className="bubble-action-btn"
-                            title="复制"
-                            onClick={() => {
-                              navigator.clipboard.writeText(msg.content);
-                              notify("已复制", "success");
-                            }}
-                          >
-                            <Copy size={12} />
-                          </button>
                           {msg.role === "assistant" && (
                             <button
                               className="bubble-action-btn"
@@ -3716,9 +3809,9 @@ function App() {
                               <span className="bubble-meta-sep">·</span>
                               <span>{getModelDisplayName(msg.model || activeRequestModelRef.current || currentSession.sessionConfig.model || config.model)}</span>
                               <span className="bubble-meta-sep">·</span>
-                              <span>{t("usage.context", lang)} {formatTokenCount(msg.usage?.promptTokens || msg.contextTokens || 0)} tk</span>
+                              <span>输入 {formatTokenCount(msg.usage?.promptTokens || msg.contextTokens || 0)} / 输出 {formatTokenCount(msg.usage?.completionTokens || estimateTextTokens(msg.content))}</span>
                               <span className="bubble-meta-sep">·</span>
-                              <span>{t("usage.completion", lang)} {formatTokenCount(msg.usage?.completionTokens || estimateTextTokens(msg.content))} tk</span>
+                              <span>上下文 {formatTokenCount(currentContextTokens)} / {formatTokenCount(currentModelLimit)}</span>
                               <span className="bubble-meta-sep">·</span>
                               <span>{formatDuration(msg.usage?.responseTimeMs)}</span>
                             </>
@@ -3981,47 +4074,6 @@ function App() {
                       !
                     </span>
                   )}
-                  <div
-                    className="context-usage-widget"
-                    onMouseEnter={() => setContextUsageOpen(true)}
-                    onMouseLeave={() => setContextUsageOpen(false)}
-                  >
-                    <button
-                      type="button"
-                      className="context-usage-trigger"
-                      title={`${t("usage.context", lang)} ${currentContextTokens.toLocaleString(currentLocale)} / ${currentModelLimit.toLocaleString(currentLocale)}`}
-                    >
-                      <Gauge size={12} />
-                      <span>{formatTokenCount(currentContextTokens)}</span>
-                    </button>
-                    {contextUsageOpen && (
-                      <div className="context-usage-popover">
-                        <div className="context-usage-row">
-                          <span>{t("usage.context", lang)}</span>
-                          <strong>{currentContextTokens.toLocaleString(currentLocale)} tk</strong>
-                        </div>
-                        <div className="context-usage-row">
-                          <span>{t("usage.modelLimit", lang)}</span>
-                          <strong>{currentModelLimit.toLocaleString(currentLocale)} tk</strong>
-                        </div>
-                        <div className="context-usage-meter">
-                          <span style={{ width: `${contextUsagePercent}%` }} />
-                        </div>
-                        <button
-                          type="button"
-                          className="context-compress-btn"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void handleCompact();
-                          }}
-                          disabled={isStreaming || currentSession.messages.filter((m) => m.role !== "context_divider").length < 3}
-                        >
-                          <RefreshCw size={11} />
-                          {t("usage.compress", lang)}
-                        </button>
-                      </div>
-                    )}
-                  </div>
                   </div>
                 </div>
                 <div className="chat-input-toolbar-right">
@@ -4971,6 +5023,66 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+      {toolStatsDialog && (
+        <div className="modal-overlay" onMouseDown={(e) => {
+          if (e.target === e.currentTarget) {
+            setToolStatsDialog(null);
+          }
+        }}>
+          <div className="modal-content stats-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="stats-modal-title">
+                <BarChart3 size={15} /> {t("stats.title", lang)}
+              </h3>
+              <button className="btn" style={{ padding: "3px 8px", fontSize: "0.72rem" }} onClick={() => setToolStatsDialog(null)}>
+                {t("settings.close", lang)}
+              </button>
+            </div>
+            <div className="modal-body stats-modal-body">
+              <div className="stats-summary">
+                <span>{toolStatsDialog.title}</span>
+                <strong>{t("stats.total", lang, { count: String(toolStatsTotal) })}</strong>
+              </div>
+              {toolStatsEntries.length > 0 ? (
+                <div className="stats-list">
+                  {toolStatsEntries.map(([name, count]) => (
+                    <div className="stats-row" key={name}>
+                      <div className="stats-row-header">
+                        <span className="stats-tool-name">{name}</span>
+                        <span className="stats-tool-count">{t("stats.count", lang, { count: String(count) })}</span>
+                      </div>
+                      <div className="stats-meter">
+                        <span style={{ width: `${Math.max(4, Math.round((count / toolStatsMax) * 100))}%` }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="stats-empty">{t("stats.empty", lang)}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          labels={{
+            exportAll: t("context.exportAll", lang),
+            importSessions: t("context.importSessions", lang),
+            toolStats: t("context.toolStats", lang),
+            settings: t("settings.title", lang),
+            clearAll: t("settings.clearSessions", lang),
+          }}
+          onClose={closeMenu}
+          onExport={handleExportSessions}
+          onImport={handleImportSessions}
+          onClearAll={handleClearAll}
+          onShowStats={handleShowStats}
+          onSettings={() => { setSettingsOpen(true); closeMenu(); }}
+        />
       )}
     </div>
   );

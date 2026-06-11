@@ -69,7 +69,7 @@ fn default_thinking_level() -> String {
 }
 
 fn default_command_timeout() -> u64 {
-    30
+    300
 }
 
 fn default_preview_sandbox() -> bool {
@@ -252,7 +252,7 @@ impl Default for AppConfig {
             font_size: 14,
             font_family: "system".into(),
             show_advanced_reply_info: false,
-            command_timeout: 30,
+            command_timeout: 300,
             preview_sandbox: true,
         }
     }
