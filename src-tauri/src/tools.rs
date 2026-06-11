@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
 const FILE_SIZE_LIMIT: usize = 1024 * 1024; // 1MB
-const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300; // 5 minutes
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const BLOCKED_PATH_PREFIXES: &[&str] = &[
