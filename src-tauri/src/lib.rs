@@ -1,17 +1,19 @@
 mod agent;
+mod audit;
 mod config;
 mod crypto;
 mod mcp;
 mod policy;
+mod storage;
 mod tools;
 
-use config::{ApiProfile, AppConfig, ProviderPreset, TrustedPattern};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use config::{ApiProfile, AppConfig, ProviderPreset, TrustedPattern};
 use crypto::{decrypt, encrypt};
 use serde_json::{json, Value};
 use std::fs;
-use tauri_plugin_dialog::DialogExt;
 use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri_plugin_dialog::DialogExt;
 
 // ==========================================
 // Tauri Commands
@@ -41,23 +43,42 @@ async fn start_agent_session(
                 .as_millis()
         )
     });
-    let result = agent::start_agent_loop(window.clone(), request_id.clone(), prompt, config, session_messages, mode, smode, images).await;
+    let result = agent::start_agent_loop(
+        window.clone(),
+        request_id.clone(),
+        prompt,
+        config,
+        session_messages,
+        mode,
+        smode,
+        images,
+    )
+    .await;
     if let Err(ref e) = result {
-        let _ = window.emit("agent-stream-chunk", json!({
-            "requestId": request_id,
-            "content": format!("\nError: {}\n", e),
-        }));
-        let _ = window.emit("agent-stream-done", json!({
-            "requestId": request_id,
-            "content": format!("Error: {}", e),
-            "loopCount": 0,
-            "ttftMs": 0,
-            "responseTimeMs": 0,
-        }));
-        let _ = window.emit("agent-complete", json!({
-            "requestId": request_id,
-            "status": "error",
-        }));
+        let _ = window.emit(
+            "agent-stream-chunk",
+            json!({
+                "requestId": request_id,
+                "content": format!("\nError: {}\n", e),
+            }),
+        );
+        let _ = window.emit(
+            "agent-stream-done",
+            json!({
+                "requestId": request_id,
+                "content": format!("Error: {}", e),
+                "loopCount": 0,
+                "ttftMs": 0,
+                "responseTimeMs": 0,
+            }),
+        );
+        let _ = window.emit(
+            "agent-complete",
+            json!({
+                "requestId": request_id,
+                "status": "error",
+            }),
+        );
         return Ok(());
     }
     result
@@ -136,8 +157,17 @@ fn load_config() -> Result<AppConfig, String> {
 /// List directory contents (for workspace file browser)
 #[tauri::command]
 async fn list_directory(path: String) -> Result<String, String> {
-    let work_dir = load_config().map(|c| c.default_work_dir).unwrap_or_else(|_| ".".to_string());
-    let result = tools::execute_tool("list_dir", &serde_json::json!({"path": path}).to_string(), &work_dir, "duckduckgo", "").await;
+    let work_dir = load_config()
+        .map(|c| c.default_work_dir)
+        .unwrap_or_else(|_| ".".to_string());
+    let result = tools::execute_tool(
+        "list_dir",
+        &serde_json::json!({"path": path}).to_string(),
+        &work_dir,
+        "duckduckgo",
+        "",
+    )
+    .await;
     if result.starts_with("Error:") {
         Err(result)
     } else {
@@ -148,8 +178,17 @@ async fn list_directory(path: String) -> Result<String, String> {
 /// Read a file (for workspace file viewer)
 #[tauri::command]
 async fn read_file_content(path: String) -> Result<String, String> {
-    let work_dir = load_config().map(|c| c.default_work_dir).unwrap_or_else(|_| ".".to_string());
-    let result = tools::execute_tool("read_file", &serde_json::json!({"path": path}).to_string(), &work_dir, "duckduckgo", "").await;
+    let work_dir = load_config()
+        .map(|c| c.default_work_dir)
+        .unwrap_or_else(|_| ".".to_string());
+    let result = tools::execute_tool(
+        "read_file",
+        &serde_json::json!({"path": path}).to_string(),
+        &work_dir,
+        "duckduckgo",
+        "",
+    )
+    .await;
     if result.starts_with("Error:") {
         Err(result)
     } else {
@@ -159,23 +198,50 @@ async fn read_file_content(path: String) -> Result<String, String> {
 
 /// Save code block content to a local file (with native save dialog)
 #[tauri::command]
-async fn save_code_file(app: tauri::AppHandle, content: String, language: String) -> Result<String, String> {
+async fn save_code_file(
+    app: tauri::AppHandle,
+    content: String,
+    language: String,
+) -> Result<String, String> {
     let ext_map: std::collections::HashMap<&str, &str> = [
-        ("javascript", "js"), ("typescript", "ts"), ("python", "py"),
-        ("rust", "rs"), ("go", "go"), ("java", "java"), ("c", "c"),
-        ("cpp", "cpp"), ("csharp", "cs"), ("ruby", "rb"), ("php", "php"),
-        ("swift", "swift"), ("kotlin", "kt"), ("scala", "scala"),
-        ("html", "html"), ("css", "css"), ("json", "json"), ("yaml", "yaml"),
-        ("toml", "toml"), ("xml", "xml"), ("sql", "sql"), ("sh", "sh"),
-        ("bash", "sh"), ("powershell", "ps1"), ("dockerfile", "dockerfile"),
-        ("markdown", "md"), ("text", "txt"),
-    ].iter().cloned().collect();
+        ("javascript", "js"),
+        ("typescript", "ts"),
+        ("python", "py"),
+        ("rust", "rs"),
+        ("go", "go"),
+        ("java", "java"),
+        ("c", "c"),
+        ("cpp", "cpp"),
+        ("csharp", "cs"),
+        ("ruby", "rb"),
+        ("php", "php"),
+        ("swift", "swift"),
+        ("kotlin", "kt"),
+        ("scala", "scala"),
+        ("html", "html"),
+        ("css", "css"),
+        ("json", "json"),
+        ("yaml", "yaml"),
+        ("toml", "toml"),
+        ("xml", "xml"),
+        ("sql", "sql"),
+        ("sh", "sh"),
+        ("bash", "sh"),
+        ("powershell", "ps1"),
+        ("dockerfile", "dockerfile"),
+        ("markdown", "md"),
+        ("text", "txt"),
+    ]
+    .iter()
+    .cloned()
+    .collect();
 
     let ext = ext_map.get(language.as_str()).unwrap_or(&"txt");
 
     let dialog = app.dialog();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    dialog.file()
+    dialog
+        .file()
         .add_filter("Code File", &[ext])
         .set_file_name(&format!("untitled.{}", ext))
         .save_file(move |path| {
@@ -196,8 +262,8 @@ async fn save_code_file(app: tauri::AppHandle, content: String, language: String
 /// Parse a local file and return its text content (supports txt/csv/md/json)
 #[tauri::command]
 async fn parse_file_content(path: String) -> Result<String, String> {
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))?;
     let ext = std::path::Path::new(&path)
         .extension()
         .and_then(|e| e.to_str())
@@ -211,8 +277,8 @@ async fn parse_file_content(path: String) -> Result<String, String> {
         }
         "json" => {
             // Pretty-print JSON
-            let val: serde_json::Value = serde_json::from_str(&content)
-                .map_err(|e| format!("Invalid JSON: {}", e))?;
+            let val: serde_json::Value =
+                serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {}", e))?;
             Ok(serde_json::to_string_pretty(&val).unwrap_or(content))
         }
         _ => Ok(content),
@@ -222,8 +288,7 @@ async fn parse_file_content(path: String) -> Result<String, String> {
 /// Read a file as Base64 (for image attachments)
 #[tauri::command]
 async fn read_file_as_base64(path: String) -> Result<String, String> {
-    let bytes = std::fs::read(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
     Ok(BASE64.encode(&bytes))
 }
 
@@ -231,7 +296,9 @@ async fn read_file_as_base64(path: String) -> Result<String, String> {
 #[tauri::command]
 async fn toggle_always_on_top(window: tauri::Window) -> Result<bool, String> {
     let is_top = window.is_always_on_top().map_err(|e| e.to_string())?;
-    window.set_always_on_top(!is_top).map_err(|e| e.to_string())?;
+    window
+        .set_always_on_top(!is_top)
+        .map_err(|e| e.to_string())?;
     Ok(!is_top)
 }
 
@@ -243,9 +310,10 @@ fn add_trusted_patterns(
 ) -> Result<AppConfig, String> {
     let mut config = current_config;
     for p in patterns {
-        let is_dup = config.trusted_patterns.iter().any(|existing| {
-            existing.tool_name == p.tool_name && existing.pattern == p.pattern
-        });
+        let is_dup = config
+            .trusted_patterns
+            .iter()
+            .any(|existing| existing.tool_name == p.tool_name && existing.pattern == p.pattern);
         if !is_dup {
             config.trusted_patterns.push(p);
         }
@@ -262,7 +330,9 @@ fn remove_trusted_pattern(
     pattern: String,
 ) -> Result<AppConfig, String> {
     let mut config = current_config;
-    config.trusted_patterns.retain(|p| !(p.tool_name == tool_name && p.pattern == pattern));
+    config
+        .trusted_patterns
+        .retain(|p| !(p.tool_name == tool_name && p.pattern == pattern));
     persist_config(&config)?;
     Ok(config)
 }
@@ -275,10 +345,7 @@ async fn check_python_available() -> bool {
 
 /// Save or update an API profile
 #[tauri::command]
-fn save_profile(
-    current_config: AppConfig,
-    profile: ApiProfile,
-) -> Result<AppConfig, String> {
+fn save_profile(current_config: AppConfig, profile: ApiProfile) -> Result<AppConfig, String> {
     let mut config = current_config;
     let key = profile.name.clone();
     config.profiles.insert(key, profile);
@@ -288,10 +355,7 @@ fn save_profile(
 
 /// Delete an API profile by name
 #[tauri::command]
-fn delete_profile(
-    current_config: AppConfig,
-    name: String,
-) -> Result<AppConfig, String> {
+fn delete_profile(current_config: AppConfig, name: String) -> Result<AppConfig, String> {
     let mut config = current_config;
     config.profiles.remove(&name);
     if config.active_profile.as_deref() == Some(&name) {
@@ -303,12 +367,13 @@ fn delete_profile(
 
 /// Set the active profile and apply its settings to the main config
 #[tauri::command]
-fn set_active_profile(
-    current_config: AppConfig,
-    name: String,
-) -> Result<AppConfig, String> {
+fn set_active_profile(current_config: AppConfig, name: String) -> Result<AppConfig, String> {
     let mut config = current_config;
-    let profile = config.profiles.get(&name).cloned().ok_or_else(|| format!("Profile '{}' not found", name))?;
+    let profile = config
+        .profiles
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| format!("Profile '{}' not found", name))?;
     config.base_url = profile.base_url;
     config.api_key = profile.api_key;
     config.model = profile.default_model;
@@ -319,9 +384,7 @@ fn set_active_profile(
 
 /// Clear the active profile (revert to manual config)
 #[tauri::command]
-fn clear_active_profile(
-    current_config: AppConfig,
-) -> Result<AppConfig, String> {
+fn clear_active_profile(current_config: AppConfig) -> Result<AppConfig, String> {
     let mut config = current_config;
     config.active_profile = None;
     persist_config(&config)?;
@@ -335,9 +398,7 @@ fn persist_config(config: &AppConfig) -> Result<(), String> {
     for profile in encrypted_config.profiles.values_mut() {
         profile.api_key = encrypt(&profile.api_key);
     }
-    let config_dir = dirs::config_dir()
-        .unwrap_or_default()
-        .join("gxAgent");
+    let config_dir = dirs::config_dir().unwrap_or_default().join("gxAgent");
     fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let config_path = config_dir.join("config.json");
     let json = serde_json::to_string_pretty(&encrypted_config).map_err(|e| e.to_string())?;
@@ -354,11 +415,7 @@ fn save_mcp_server(
     env: std::collections::HashMap<String, String>,
 ) -> Result<AppConfig, String> {
     let mut config = current_config;
-    let server = config::McpServerConfig {
-        command,
-        args,
-        env,
-    };
+    let server = config::McpServerConfig { command, args, env };
     config.mcp_servers.insert(name, server);
     persist_config(&config)?;
     Ok(config)
@@ -366,10 +423,7 @@ fn save_mcp_server(
 
 /// Delete an MCP server configuration by name
 #[tauri::command]
-fn delete_mcp_server(
-    current_config: AppConfig,
-    name: String,
-) -> Result<AppConfig, String> {
+fn delete_mcp_server(current_config: AppConfig, name: String) -> Result<AppConfig, String> {
     let mut config = current_config;
     config.mcp_servers.remove(&name);
     persist_config(&config)?;
@@ -422,10 +476,7 @@ async fn compact_history(
         "stream": false,
     });
 
-    let url = format!(
-        "{}/chat/completions",
-        config.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
 
     let response = client
         .post(&url)
@@ -483,7 +534,12 @@ fn try_decrypt_key(key: &str) -> (String, bool) {
         return (key.to_string(), false);
     }
     let decrypted = crypto::decrypt(key);
-    if decrypted.starts_with("enc:v1:") || decrypted.starts_with("enc:v2:") || decrypted.starts_with("enc:") || !decrypted.is_ascii() || decrypted.contains('\0') {
+    if decrypted.starts_with("enc:v1:")
+        || decrypted.starts_with("enc:v2:")
+        || decrypted.starts_with("enc:")
+        || !decrypted.is_ascii()
+        || decrypted.contains('\0')
+    {
         (String::new(), true)
     } else {
         (decrypted, false)
@@ -493,18 +549,19 @@ fn try_decrypt_key(key: &str) -> (String, bool) {
 #[tauri::command]
 fn import_config(app: AppHandle, json: String) -> Result<AppConfig, String> {
     let export_data: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    let config_value = if export_data.get("config").is_some() && export_data.get("version").is_some() {
-        let _ = app.emit(
-            "config-import-warning",
-            "Detected wrapped config export. Importing the config payload in personal mode.",
-        );
-        export_data
-            .get("config")
-            .cloned()
-            .ok_or_else(|| "Missing config payload".to_string())?
-    } else {
-        export_data
-    };
+    let config_value =
+        if export_data.get("config").is_some() && export_data.get("version").is_some() {
+            let _ = app.emit(
+                "config-import-warning",
+                "Detected wrapped config export. Importing the config payload in personal mode.",
+            );
+            export_data
+                .get("config")
+                .cloned()
+                .ok_or_else(|| "Missing config payload".to_string())?
+        } else {
+            export_data
+        };
 
     let mut config: AppConfig = serde_json::from_value(config_value).map_err(|e| e.to_string())?;
     let mut needs_rekey = false;
@@ -522,7 +579,10 @@ fn import_config(app: AppHandle, json: String) -> Result<AppConfig, String> {
     }
     persist_config(&config)?;
     if needs_rekey {
-        let _ = app.emit("config-import-rekey", "Detected encrypted keys from another device. Please re-enter your API keys.");
+        let _ = app.emit(
+            "config-import-rekey",
+            "Detected encrypted keys from another device. Please re-enter your API keys.",
+        );
     }
     Ok(config)
 }
@@ -530,9 +590,9 @@ fn import_config(app: AppHandle, json: String) -> Result<AppConfig, String> {
 /// Clear all saved conversation sessions
 #[tauri::command]
 fn clear_all_sessions() -> Result<(), String> {
-    let data_dir = dirs::data_dir()
-        .unwrap_or_default()
-        .join("gxAgent");
+    storage::clear_sessions()?;
+
+    let data_dir = dirs::data_dir().unwrap_or_default().join("gxAgent");
     if data_dir.exists() {
         let entries = fs::read_dir(&data_dir).map_err(|e| e.to_string())?;
         for entry in entries {
@@ -581,13 +641,45 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            // System tray icon
-            let icon = app.default_window_icon().cloned().unwrap_or_else(|| {
-                tauri::image::Image::new_owned(vec![], 0, 0)
-            });
+            // System tray icon with menu
+            let icon = app
+                .default_window_icon()
+                .cloned()
+                .unwrap_or_else(|| tauri::image::Image::new_owned(vec![], 0, 0));
+
+            let show = tauri::menu::MenuItemBuilder::with_id("show", "显示窗口").build(app)?;
+            let settings = tauri::menu::MenuItemBuilder::with_id("settings", "设置").build(app)?;
+            let quit = tauri::menu::MenuItemBuilder::with_id("quit", "退出").build(app)?;
+            let menu = tauri::menu::MenuBuilder::new(app)
+                .item(&show)
+                .item(&settings)
+                .separator()
+                .item(&quit)
+                .build()?;
+
             let tray = tauri::tray::TrayIconBuilder::new()
                 .icon(icon)
                 .tooltip("gxAgent Studio")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "settings" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            let _ = window.emit("open-settings", ());
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click { .. } = event {
                         if let Some(window) = tray.app_handle().get_webview_window("main") {
@@ -637,6 +729,12 @@ pub fn run() {
             check_python_available,
             save_profile,
             delete_profile,
+            storage::save_session,
+            storage::save_sessions,
+            storage::load_session,
+            storage::load_sessions,
+            storage::list_sessions,
+            storage::delete_session,
             set_active_profile,
             clear_active_profile,
             compact_history,

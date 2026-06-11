@@ -124,11 +124,32 @@ pub fn get_enabled_tool_definitions(enabled: &[String]) -> Vec<Value> {
         .collect()
 }
 
-pub async fn execute_tool(name: &str, args_str: &str, work_dir: &str, search_provider: &str, search_api_key: &str) -> String {
-    execute_tool_with_timeout(name, args_str, work_dir, search_provider, search_api_key, DEFAULT_COMMAND_TIMEOUT_SECS).await
+pub async fn execute_tool(
+    name: &str,
+    args_str: &str,
+    work_dir: &str,
+    search_provider: &str,
+    search_api_key: &str,
+) -> String {
+    execute_tool_with_timeout(
+        name,
+        args_str,
+        work_dir,
+        search_provider,
+        search_api_key,
+        DEFAULT_COMMAND_TIMEOUT_SECS,
+    )
+    .await
 }
 
-pub async fn execute_tool_with_timeout(name: &str, args_str: &str, work_dir: &str, search_provider: &str, search_api_key: &str, timeout_secs: u64) -> String {
+pub async fn execute_tool_with_timeout(
+    name: &str,
+    args_str: &str,
+    work_dir: &str,
+    search_provider: &str,
+    search_api_key: &str,
+    timeout_secs: u64,
+) -> String {
     let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
     match name {
         "execute_command" => {
@@ -180,7 +201,11 @@ pub async fn execute_tool_with_timeout(name: &str, args_str: &str, work_dir: &st
     }
 }
 
-async fn run_execute_command(command: &str, work_dir: &str, timeout_secs: u64) -> Result<String, String> {
+async fn run_execute_command(
+    command: &str,
+    work_dir: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
     // Prepend UTF-8 encoding setup to avoid garbled Chinese output
     let full_command = format!(
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {}",
@@ -200,16 +225,17 @@ async fn run_execute_command(command: &str, work_dir: &str, timeout_secs: u64) -
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        cmd.creation_flags(CREATE_NO_WINDOW)
-            .output(),
+        cmd.creation_flags(CREATE_NO_WINDOW).output(),
     )
     .await
     .map_err(|_| format!("Command timed out after {}s", timeout_secs))?
     .map_err(|e| format!("Failed to execute command: {}", e))?;
 
     // Try UTF-8 decoding first, fallback to lossy conversion
-    let stdout = String::from_utf8(result.stdout).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
-    let stderr = String::from_utf8(result.stderr).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+    let stdout = String::from_utf8(result.stdout)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+    let stderr = String::from_utf8(result.stderr)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
 
     let exit_code = result
         .status
@@ -240,7 +266,10 @@ async fn run_execute_command(command: &str, work_dir: &str, timeout_secs: u64) -
     } else if stdout.is_empty() {
         Ok(format!("Exit code: 0\nStderr:\n{}", stderr))
     } else {
-        Ok(format!("Exit code: 0\nStdout:\n{}\nStderr:\n{}", stdout, stderr))
+        Ok(format!(
+            "Exit code: 0\nStdout:\n{}\nStderr:\n{}",
+            stdout, stderr
+        ))
     }
 }
 
@@ -259,7 +288,8 @@ async fn run_read_file(path: &str, work_dir: &str) -> Result<String, String> {
             .map_err(|e| format!("Failed to open file: {}", e))?;
         let mut reader = tokio::io::BufReader::new(file);
         let mut buffer = vec![0u8; FILE_SIZE_LIMIT];
-        let bytes_read = reader.read(&mut buffer)
+        let bytes_read = reader
+            .read(&mut buffer)
             .await
             .map_err(|e| format!("Failed to read file: {}", e))?;
         buffer.truncate(bytes_read);
@@ -291,7 +321,7 @@ async fn run_write_file(path: &str, content: &str, work_dir: &str) -> Result<(),
 
 async fn run_list_dir(path: &str, work_dir: &str) -> Result<String, String> {
     let full_path = resolve_path(path, work_dir)?;
-    
+
     let path_obj = Path::new(&full_path);
     if !path_obj.exists() {
         return Err(format!("Directory not found: {}", full_path));
@@ -304,11 +334,7 @@ async fn run_list_dir(path: &str, work_dir: &str) -> Result<String, String> {
     let mut result = Vec::new();
     while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
         let name = entry.file_name().to_string_lossy().to_string();
-        let is_dir = entry
-            .file_type()
-            .await
-            .map(|t| t.is_dir())
-            .unwrap_or(false);
+        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
             result.push(format!("{}/", name));
         } else {
@@ -332,7 +358,10 @@ async fn run_python(code: &str, work_dir: &str, timeout_secs: u64) -> Result<Str
         .await;
 
     if python_check.is_err() {
-        return Err("Python is not installed or not in PATH. Please install Python to use this feature.".to_string());
+        return Err(
+            "Python is not installed or not in PATH. Please install Python to use this feature."
+                .to_string(),
+        );
     }
 
     // Write code to temp file using tempfile crate pattern
@@ -355,12 +384,18 @@ async fn run_python(code: &str, work_dir: &str, timeout_secs: u64) -> Result<Str
 
     let execution_result = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        cmd.creation_flags(CREATE_NO_WINDOW)
-            .output(),
+        cmd.creation_flags(CREATE_NO_WINDOW).output(),
     )
     .await;
 
-    let _ = tokio::fs::remove_file(&file_path).await;
+    // Always cleanup temp file
+    let cleanup_result = tokio::fs::remove_file(&file_path).await;
+    if cleanup_result.is_err() {
+        eprintln!(
+            "[warning] Failed to cleanup temp Python file: {:?}",
+            file_path
+        );
+    }
 
     let result = execution_result
         .map_err(|_| format!("Python execution timed out after {}s", timeout_secs))?
@@ -376,7 +411,12 @@ async fn run_python(code: &str, work_dir: &str, timeout_secs: u64) -> Result<Str
             Ok(stdout)
         }
     } else {
-        Ok(format!("Exit code: {}\nStdout:\n{}\nStderr:\n{}", result.status.code().unwrap_or(-1), stdout, stderr))
+        Ok(format!(
+            "Exit code: {}\nStdout:\n{}\nStderr:\n{}",
+            result.status.code().unwrap_or(-1),
+            stdout,
+            stderr
+        ))
     }
 }
 
@@ -384,7 +424,9 @@ async fn run_web_search(query: &str, provider: &str, api_key: &str) -> Result<St
     match provider {
         "tavily" => {
             if api_key.is_empty() {
-                return Err("Tavily API Key is missing. Please configure it in settings.".to_string());
+                return Err(
+                    "Tavily API Key is missing. Please configure it in settings.".to_string(),
+                );
             }
             run_tavily_search(query, api_key).await
         }
@@ -417,6 +459,59 @@ async fn run_web_search(query: &str, provider: &str, api_key: &str) -> Result<St
     }
 }
 
+fn is_safe_url(url: &str) -> bool {
+    use std::net::IpAddr;
+
+    let parsed = match url.parse::<reqwest::Url>() {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.trim_matches(['[', ']']).to_lowercase();
+
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.chars().all(|c| c.is_ascii_digit())
+    {
+        return false;
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(ip) => {
+                if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+                {
+                    return false;
+                }
+            }
+            IpAddr::V6(ip) => {
+                if ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local()
+                    || ip.to_ipv4_mapped().is_some_and(|mapped| {
+                        mapped.is_private()
+                            || mapped.is_loopback()
+                            || mapped.is_link_local()
+                            || mapped.is_unspecified()
+                    })
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
+
 async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -435,7 +530,10 @@ async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String>
         .await
         .map_err(|e| format!("Tavily request failed: {}", e))?;
 
-    let val: Value = response.json().await.map_err(|e| format!("Tavily response parse error: {}", e))?;
+    let val: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Tavily response parse error: {}", e))?;
 
     // Reset failure counter on successful Tavily response
     CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
@@ -455,10 +553,17 @@ async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String>
                 let title = r["title"].as_str().unwrap_or("");
                 let url = r["url"].as_str().unwrap_or("");
                 let content = r["content"].as_str().unwrap_or("");
+                // SECURITY: Filter out internal URLs
+                if !is_safe_url(url) {
+                    return None;
+                }
                 if title.is_empty() && content.is_empty() {
                     None
                 } else {
-                    Some(format!("Title: {}\nLink: {}\nSnippet: {}", title, url, content))
+                    Some(format!(
+                        "Title: {}\nLink: {}\nSnippet: {}",
+                        title, url, content
+                    ))
                 }
             })
             .collect();
@@ -488,7 +593,10 @@ async fn run_searxng_search(query: &str) -> Result<String, String> {
     let encoded = urlencoding::encode(query);
 
     for instance in &instances {
-        let url = format!("{}/search?q={}&format=json&categories=general", instance, encoded);
+        let url = format!(
+            "{}/search?q={}&format=json&categories=general",
+            instance, encoded
+        );
         match client.get(&url).send().await {
             Ok(response) => {
                 if !response.status().is_success() {
@@ -504,10 +612,17 @@ async fn run_searxng_search(query: &str) -> Result<String, String> {
                                     let title = r["title"].as_str().unwrap_or("");
                                     let url = r["url"].as_str().unwrap_or("");
                                     let snippet = r["content"].as_str().unwrap_or("");
+                                    // SECURITY: Filter out internal URLs
+                                    if !is_safe_url(url) {
+                                        return None;
+                                    }
                                     if title.is_empty() && snippet.is_empty() {
                                         None
                                     } else {
-                                        Some(format!("Title: {}\nLink: {}\nSnippet: {}", title, url, snippet))
+                                        Some(format!(
+                                            "Title: {}\nLink: {}\nSnippet: {}",
+                                            title, url, snippet
+                                        ))
                                     }
                                 })
                                 .collect();
@@ -577,7 +692,10 @@ async fn run_duckduckgo_search(query: &str) -> Result<String, String> {
         if failures >= MAX_CONSECUTIVE_FAILURES {
             return Err("Search service is temporarily busy. Please proceed with current context or try again later. Consider using Tavily API for reliable search.".to_string());
         }
-        return Err(format!("Search service returned {} (attempt {}/{}). Please try again or use Tavily API.", status, failures, MAX_CONSECUTIVE_FAILURES));
+        return Err(format!(
+            "Search service returned {} (attempt {}/{}). Please try again or use Tavily API.",
+            status, failures, MAX_CONSECUTIVE_FAILURES
+        ));
     }
 
     if !status.is_success() {
@@ -599,15 +717,12 @@ fn parse_duckduckgo_results(html: &str) -> Result<String, String> {
 
     let document = Html::parse_document(html);
 
-    let result_selector = Selector::parse(".result").unwrap_or_else(|_| {
-        Selector::parse("div").unwrap()
-    });
-    let title_selector = Selector::parse(".result__a").unwrap_or_else(|_| {
-        Selector::parse("a").unwrap()
-    });
-    let snippet_selector = Selector::parse(".result__snippet").unwrap_or_else(|_| {
-        Selector::parse("span").unwrap()
-    });
+    let result_selector =
+        Selector::parse(".result").unwrap_or_else(|_| Selector::parse("div").unwrap());
+    let title_selector =
+        Selector::parse(".result__a").unwrap_or_else(|_| Selector::parse("a").unwrap());
+    let snippet_selector =
+        Selector::parse(".result__snippet").unwrap_or_else(|_| Selector::parse("span").unwrap());
 
     let mut results = Vec::new();
 
@@ -639,9 +754,14 @@ fn parse_duckduckgo_results(html: &str) -> Result<String, String> {
                 .and_then(|s| urlencoding::decode(s).ok())
                 .map(|s| s.to_string())
                 .unwrap_or(raw_link.clone())
-        } else if raw_link.contains("duckduckgo.com/y.js") || raw_link.contains("duckduckgo.com/d.js") || raw_link.contains("duckduckgo.com/l/") {
+        } else if raw_link.contains("duckduckgo.com/y.js")
+            || raw_link.contains("duckduckgo.com/d.js")
+            || raw_link.contains("duckduckgo.com/l/")
+        {
             String::new()
-        } else if raw_link.starts_with("/") || (raw_link.contains("duckduckgo.com") && !raw_link.starts_with("http")) {
+        } else if raw_link.starts_with("/")
+            || (raw_link.contains("duckduckgo.com") && !raw_link.starts_with("http"))
+        {
             String::new()
         } else {
             raw_link.clone()
@@ -655,8 +775,16 @@ fn parse_duckduckgo_results(html: &str) -> Result<String, String> {
             .trim()
             .to_string();
 
+        // SECURITY: Filter out internal URLs
+        if !link.is_empty() && !is_safe_url(&link) {
+            continue;
+        }
+
         if !title.is_empty() && !link.is_empty() {
-            results.push(format!("Title: {}\nLink: {}\nSnippet: {}", title, link, snippet));
+            results.push(format!(
+                "Title: {}\nLink: {}\nSnippet: {}",
+                title, link, snippet
+            ));
         } else if !title.is_empty() || !snippet.is_empty() {
             results.push(format!("Title: {}\nSnippet: {}", title, snippet));
         }
@@ -803,4 +931,37 @@ pub async fn check_python_available() -> bool {
         .await
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_url;
+
+    #[test]
+    fn safe_url_allows_public_http_urls() {
+        assert!(is_safe_url("https://example.com/search?q=gxagent"));
+        assert!(is_safe_url("http://example.org/path"));
+    }
+
+    #[test]
+    fn safe_url_rejects_non_http_and_invalid_urls() {
+        assert!(!is_safe_url("javascript:alert(1)"));
+        assert!(!is_safe_url(
+            "file:///C:/Windows/System32/drivers/etc/hosts"
+        ));
+        assert!(!is_safe_url("not a url"));
+    }
+
+    #[test]
+    fn safe_url_rejects_local_and_private_hosts() {
+        assert!(!is_safe_url("http://localhost:3000"));
+        assert!(!is_safe_url("http://127.0.0.1"));
+        assert!(!is_safe_url("http://0.0.0.0"));
+        assert!(!is_safe_url("http://10.0.0.1"));
+        assert!(!is_safe_url("http://172.31.0.1"));
+        assert!(!is_safe_url("http://192.168.1.1"));
+        assert!(!is_safe_url("http://169.254.1.1"));
+        assert!(!is_safe_url("http://[::1]"));
+        assert!(!is_safe_url("http://[fd00::1]"));
+    }
 }

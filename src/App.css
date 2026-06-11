@@ -1132,7 +1132,7 @@ select.input-text {
   background: var(--bg-card);
   color: var(--text-secondary);
   box-shadow: var(--shadow-elevated);
-  z-index: 40;
+  z-index: 500;
 }
 
 .context-usage-popover::after {

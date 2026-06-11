@@ -432,6 +432,14 @@ fn is_trusted(tool_name: &str, args_str: &str, patterns: &[TrustedPattern]) -> b
 
                         // Environment variable reads use PowerShell's $env:NAME syntax.
                         if pattern_lower.ends_with(':') && cmd_lower.starts_with(&pattern_lower) {
+                            let remainder = &cmd_lower[pattern_lower.len()..];
+                            // SECURITY: Ensure no compound syntax after env var
+                            if remainder.contains(';')
+                                || remainder.contains('|')
+                                || remainder.contains('&')
+                            {
+                                continue;
+                            }
                             return true;
                         }
 

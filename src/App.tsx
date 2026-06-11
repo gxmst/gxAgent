@@ -10,6 +10,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import * as Diff from "diff";
 import mermaid from "mermaid";
+import DOMPurify from "dompurify";
 import {
   Send,
   Settings,
@@ -57,9 +58,16 @@ import {
   Gauge,
   Brain,
 } from "lucide-react";
+import "./styles/modern.css";
+import "./styles/components.css";
+import "./styles/layout.css";
+import "./styles/enhancements.css";
 import "./App.css";
 import CaturtleLogo from "./assets/logo.png";
 import { ROLE_PRESETS, ROLE_CATEGORIES, RolePreset } from "./rolePresets";
+import { countTokens, parseCommand, sessionToMarkdown } from "./utils/helpers";
+import { CommandSuggestions, useGlobalHotkeys } from "./components/shared/CommandSuggestions";
+import { useSessionStorage } from "./hooks/useSessionStorage";
 
 // ==========================================
 // i18n
@@ -651,6 +659,41 @@ const DEFAULT_CONFIG: AppConfig = {
   preview_sandbox: true,
 };
 
+function createDefaultSession(): ChatSession {
+  return {
+    id: "default",
+    title: "",
+    messages: [],
+    sessionConfig: { ...DEFAULT_SESSION_CONFIG },
+  };
+}
+
+function normalizeSessions(raw: unknown): ChatSession[] {
+  if (!Array.isArray(raw)) return [];
+
+  const normalized = raw
+    .filter((item): item is Partial<ChatSession> & { id: string } => (
+      !!item && typeof item === "object" && typeof (item as Partial<ChatSession>).id === "string"
+    ))
+    .map((item) => ({
+      ...item,
+      id: item.id,
+      title: typeof item.title === "string" ? item.title : "",
+      messages: Array.isArray(item.messages) ? item.messages : [],
+      sessionConfig: { ...DEFAULT_SESSION_CONFIG, ...(item.sessionConfig || {}) },
+    }));
+
+  return normalized.length > 0 ? normalized : [createDefaultSession()];
+}
+
+function readLocalSessions(): ChatSession[] {
+  try {
+    const saved = localStorage.getItem("gx_sessions");
+    if (saved) return normalizeSessions(JSON.parse(saved));
+  } catch { /* ignore corrupt data */ }
+  return [createDefaultSession()];
+}
+
 const TOOL_NAMES: { key: string; label: string; shortLabel: string; description: string; risk: "low" | "medium" | "high" }[] = [
   { key: "execute_command", label: "PowerShell", shortLabel: "Shell", description: "Run local Windows PowerShell commands.", risk: "high" },
   { key: "read_file", label: "Read File", shortLabel: "Read", description: "Inspect local text files and logs.", risk: "low" },
@@ -802,15 +845,6 @@ function CustomPresetForm({ lang, onSave, t, editingPreset }: { lang: string; on
   );
 }
 
-function sanitizeSvg(svg: string): string {
-  return svg
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/\son\w+\s*=\s*["'][^"']*["']/gi, "")
-    .replace(/\son\w+\s*=\s*[^\s>]*/gi, "")
-    .replace(/href\s*=\s*["']javascript:[^"']*["']/gi, "")
-    .replace(/xlink:href\s*=\s*["']javascript:[^"']*["']/gi, "");
-}
-
 function MermaidDiagram({ chart }: { chart: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const [svg, setSvg] = useState<string>("");
@@ -818,7 +852,12 @@ function MermaidDiagram({ chart }: { chart: string }) {
   useEffect(() => {
     const id = `mermaid-${++mermaidIdCounter}`;
     mermaid.render(id, chart).then((result) => {
-      setSvg(sanitizeSvg(result.svg));
+      // Use DOMPurify for robust XSS protection
+      const sanitized = DOMPurify.sanitize(result.svg, {
+        USE_PROFILES: { svg: true, svgFilters: true },
+        ADD_TAGS: ['foreignObject'],
+      });
+      setSvg(sanitized);
     }).catch((err) => {
       setSvg(`<pre style="color:var(--error);font-size:0.75rem">Mermaid error: ${err.message || err}</pre>`);
     });
@@ -920,6 +959,11 @@ function App() {
   // ==========================================
 
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
+
+  // Global hotkeys
+  useGlobalHotkeys(() => createNewSession());
+
+  const [editingSessionTitle, setEditingSessionTitle] = useState(false);
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -966,17 +1010,14 @@ function App() {
     { text: string; type: "log" | "error" | "warn" | "info" }[]
   >([]);
   const [toasts, setToasts] = useState<ToastNotice[]>([]);
+  const {
+    saveSessions,
+    loadSessions,
+    deleteSession: deleteStoredSession,
+  } = useSessionStorage();
 
-  const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    try {
-      const saved = localStorage.getItem("gx_sessions");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch { /* ignore corrupt data */ }
-    return [{ id: "default", title: "", messages: [], sessionConfig: { ...DEFAULT_SESSION_CONFIG } }];
-  });
+  const [sessions, setSessions] = useState<ChatSession[]>(readLocalSessions);
+  const [sessionStorageReady, setSessionStorageReady] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState(
     () => localStorage.getItem("gx_current_session") || "default"
   );
@@ -1010,6 +1051,7 @@ function App() {
   const activeRequestSessionIdRef = useRef("");
   const activeRequestModelRef = useRef("");
   const activeRequestContextTokensRef = useRef(0);
+  const lastPersistedSessionsRef = useRef("");
 
   // Keep the ref in sync with the reactive state
   useEffect(() => {
@@ -1248,8 +1290,36 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const storedSessions = normalizeSessions(await loadSessions());
+      if (cancelled) return;
+
+      const hasPersistedSessions = storedSessions.some(
+        (session) => session.id !== "default" || session.messages.length > 0 || session.title,
+      );
+
+      if (hasPersistedSessions) {
+        lastPersistedSessionsRef.current = JSON.stringify(storedSessions);
+        setSessions(storedSessions);
+        setCurrentSessionId((prev) =>
+          storedSessions.some((session) => session.id === prev) ? prev : storedSessions[0].id
+        );
+      }
+
+      setSessionStorageReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSessions]);
+
+  useEffect(() => {
+    const data = JSON.stringify(sessions);
+
     try {
-      const data = JSON.stringify(sessions);
       if (data.length > 4 * 1024 * 1024) {
         const trimmed = sessions.map((s: ChatSession) => ({
           ...s,
@@ -1271,7 +1341,12 @@ function App() {
     } catch {
       try { localStorage.removeItem("gx_sessions"); } catch { /* quota exceeded, nothing to do */ }
     }
-  }, [sessions]);
+
+    if (!sessionStorageReady || lastPersistedSessionsRef.current === data) return;
+
+    lastPersistedSessionsRef.current = data;
+    void saveSessions(sessions);
+  }, [saveSessions, sessionStorageReady, sessions]);
 
   useEffect(() => {
     try {
@@ -2048,6 +2123,46 @@ function App() {
   const handleSendMessage = async () => {
     if ((!prompt.trim() && attachments.length === 0) || isStreamingRef.current) return;
 
+    // Quick commands using helper
+    const { isCommand, command } = parseCommand(prompt.trim());
+    if (isCommand && attachments.length === 0) {
+      setPrompt("");
+
+      if (command === "clear") {
+        setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+          ...s,
+          messages: [...s.messages, { role: "context_divider" as const, content: "" }]
+        } : s));
+        return;
+      }
+
+      if (command === "compact") {
+        await handleCompact();
+        return;
+      }
+
+      if (command === "export") {
+        const session = sessions.find(s => s.id === currentSessionId);
+        if (session) {
+          const md = sessionToMarkdown(session.title, session.messages);
+          const blob = new Blob([md], { type: 'text/markdown' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${session.title}.md`;
+          a.click();
+          URL.revokeObjectURL(url);
+          notify("已导出为 Markdown", "success");
+        }
+        return;
+      }
+
+      if (command === "help") {
+        notify("快捷命令：/clear /compact /export /help", "info");
+        return;
+      }
+    }
+
     // Slash command: /compact — compress conversation history
     if (attachments.length === 0 && prompt.trim().toLowerCase() === "/compact") {
       setPrompt("");
@@ -2431,6 +2546,7 @@ function App() {
     if (!window.confirm(lang === "zh" ? `确定删除会话"${target?.title || "未命名"}"吗？` : `Delete session "${target?.title || "Untitled"}"?`)) return;
     const remaining = sessions.filter((s) => s.id !== id);
     setSessions(remaining);
+    void deleteStoredSession(id);
     if (currentSessionId === id) {
       setCurrentSessionId(remaining[0].id);
     }
@@ -2477,6 +2593,11 @@ function App() {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setPrompt("");
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (isStreamingRef.current && currentMode === "code") {
@@ -2892,9 +3013,30 @@ function App() {
         <section className="chat-panel">
           <header className="panel-header">
             <div>
-              <span className="panel-title" style={{ fontSize: "0.82rem" }}>
-                {currentSession.title || t("session.new", lang)}
-              </span>
+              {editingSessionTitle ? (
+                <input
+                  className="session-title-editable"
+                  value={currentSession.title}
+                  onChange={(e) => {
+                    setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, title: e.target.value } : s));
+                  }}
+                  onBlur={() => setEditingSessionTitle(false)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') setEditingSessionTitle(false);
+                    if (e.key === 'Escape') setEditingSessionTitle(false);
+                  }}
+                  autoFocus
+                />
+              ) : (
+                <span
+                  className="panel-title"
+                  style={{ fontSize: "0.82rem", cursor: "pointer" }}
+                  onDoubleClick={() => setEditingSessionTitle(true)}
+                  title="双击编辑标题"
+                >
+                  {currentSession.title || t("session.new", lang)}
+                </span>
+              )}
               {config.default_work_dir && (
                 <div className="panel-subtitle">{config.default_work_dir}</div>
               )}
@@ -3514,6 +3656,16 @@ function App() {
                         )}
                         {/* Hover action buttons */}
                         <div className="bubble-actions">
+                          <button
+                            className="bubble-action-btn"
+                            title="复制"
+                            onClick={() => {
+                              navigator.clipboard.writeText(msg.content);
+                              notify("已复制", "success");
+                            }}
+                          >
+                            <Copy size={12} />
+                          </button>
                           {msg.role === "assistant" && (
                             <button
                               className="bubble-action-btn"
@@ -3632,7 +3784,11 @@ function App() {
                 ))}
               </div>
             )}
-            <div className={`chat-input-container${isStreaming && currentMode === "code" ? " steering-active" : ""}`}>
+            <div className={`chat-input-container${isStreaming && currentMode === "code" ? " steering-active" : ""}`} style={{ position: 'relative' }}>
+              <CommandSuggestions
+                input={prompt}
+                onSelect={(cmd) => setPrompt(cmd)}
+              />
               <textarea
                 ref={chatTextareaRef}
                 className="chat-textarea"
@@ -3650,6 +3806,9 @@ function App() {
               />
               <div className="chat-input-toolbar">
                 <div className="chat-input-toolbar-left">
+                  <span className="token-counter" style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginRight: '8px' }}>
+                    {countTokens(prompt)} tokens
+                  </span>
                   <div className="input-tool-group">
                   <button
                     className="btn btn-icon input-attach-btn"
@@ -4782,7 +4941,7 @@ function App() {
                       if (!window.confirm(t("settings.clearSessionsConfirm", lang))) return;
                       try {
                         await invoke("clear_all_sessions");
-                        setSessions([{ id: "default", title: "", messages: [], sessionConfig: { ...DEFAULT_SESSION_CONFIG } }]);
+                        setSessions([createDefaultSession()]);
                         setCurrentSessionId("default");
                         addLog(t("settings.cleared", lang), "success", true);
                       } catch (e) {
