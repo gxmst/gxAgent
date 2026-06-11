@@ -2339,38 +2339,75 @@ async fn process_tool_calls(
         }
     }
 
-    // Execute auto-approved tools through the same path as approved tools so MCP
-    // routing and pre-write checkpoints stay consistent.
-    for tc in &auto_approved {
-        let _ = window.emit(
-            "agent-tool-executing",
-            json!({
-                "id": tc.id,
-                "name": tc.name,
-                "arguments": sanitize_args_for_log(&tc.arguments)
-            }),
-        );
+    // Execute auto-approved tools in parallel
+    if !auto_approved.is_empty() {
+        let mut handles = Vec::new();
 
-        let output = await_with_cancel(
-            cancel_rx,
-            execute_tool_with_mcp(&tc.name, &tc.arguments, &config, &mut *mcp_manager),
-        )
-        .await?;
+        for tc in auto_approved {
+            let window = window.clone();
+            let config = config.clone();
+            let cancel_rx = cancel_rx.clone();
+            let default_work_dir = config.default_work_dir.clone();
+            let search_provider = config.search_provider.clone();
+            let search_api_key = config.search_api_key.clone();
+            let timeout = config.command_timeout;
 
-        let _ = window.emit(
-            "agent-tool-output",
-            json!({
-                "id": tc.id,
-                "name": tc.name,
-                "output": output
-            }),
-        );
+            let _ = window.emit(
+                "agent-tool-executing",
+                json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": sanitize_args_for_log(&tc.arguments)
+                }),
+            );
 
-        messages.push(json!({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "content": output
-        }));
+            let handle = tokio::spawn(async move {
+                use crate::tools::execute_tool_with_timeout;
+
+                let output = await_with_cancel(
+                    &cancel_rx,
+                    execute_tool_with_timeout(&tc.name, &tc.arguments, &default_work_dir, &search_provider, &search_api_key, timeout),
+                )
+                .await;
+
+                let _ = window.emit(
+                    "agent-tool-output",
+                    json!({
+                        "id": tc.id,
+                        "name": tc.name,
+                        "output": output.as_ref().unwrap_or(&"Error".to_string())
+                    }),
+                );
+
+                (tc.id, tc.name, output)
+            });
+
+            handles.push(handle);
+        }
+
+        let results = futures::future::join_all(handles).await;
+
+        for result in results {
+            match result {
+                Ok((id, _name, Ok(output))) => {
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": output
+                    }));
+                }
+                Ok((id, name, Err(e))) => {
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": format!("Error executing {}: {}", name, e)
+                    }));
+                }
+                Err(e) => {
+                    return Err(format!("Tool execution task failed: {}", e));
+                }
+            }
+        }
     }
 
     // If there are tools needing confirmation, emit approval request and wait
