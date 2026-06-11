@@ -1,3 +1,4 @@
+use crate::audit::AuditLogger;
 use crate::config::AppConfig;
 use crate::mcp::McpManager;
 use crate::policy::{check_approval, ApprovalLevel};
@@ -6,17 +7,53 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 use tauri::{Emitter, Window};
+
+/// Sanitize arguments for logging - redact sensitive information
+fn sanitize_args_for_log(args: &str) -> String {
+    let lower = args.to_lowercase();
+    if lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("password")
+        || lower.contains("passwd")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("credential")
+        || lower.contains("authorization")
+        || lower.contains("bearer")
+    {
+        return "[REDACTED - contains sensitive data]".to_string();
+    }
+    if args.chars().count() > 200 {
+        let truncated: String = args.chars().take(200).collect();
+        format!("{}... [truncated]", truncated)
+    } else {
+        args.to_string()
+    }
+}
 
 /// Parse search result text into structured sources for frontend display
 fn parse_search_sources(tool_output: &str) -> Vec<Value> {
     tool_output
         .split("\n---\n")
         .filter_map(|block| {
-            let title = block.lines().find(|l| l.starts_with("Title:")).map(|l| l.trim_start_matches("Title:").trim().to_string()).unwrap_or_default();
-            let link = block.lines().find(|l| l.starts_with("Link:")).map(|l| l.trim_start_matches("Link:").trim().to_string()).unwrap_or_default();
-            let snippet = block.lines().find(|l| l.starts_with("Snippet:")).map(|l| l.trim_start_matches("Snippet:").trim().to_string()).unwrap_or_default();
+            let title = block
+                .lines()
+                .find(|l| l.starts_with("Title:"))
+                .map(|l| l.trim_start_matches("Title:").trim().to_string())
+                .unwrap_or_default();
+            let link = block
+                .lines()
+                .find(|l| l.starts_with("Link:"))
+                .map(|l| l.trim_start_matches("Link:").trim().to_string())
+                .unwrap_or_default();
+            let snippet = block
+                .lines()
+                .find(|l| l.starts_with("Snippet:"))
+                .map(|l| l.trim_start_matches("Snippet:").trim().to_string())
+                .unwrap_or_default();
             if title.is_empty() && snippet.is_empty() {
                 None
             } else {
@@ -104,8 +141,11 @@ where
 /// Check if search followup instruction already exists in recent messages
 fn has_search_instruction(messages: &[Value]) -> bool {
     messages.iter().rev().take(3).any(|msg| {
-        msg["role"] == "system" &&
-        msg["content"].as_str().unwrap_or("").contains("MUST base your answer on these search results")
+        msg["role"] == "system"
+            && msg["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("MUST base your answer on these search results")
     })
 }
 
@@ -125,17 +165,23 @@ fn append_general_assistant_instruction(system_prompt: &mut String) {
 }
 
 fn emit_stream_chunk(window: &Window, request_id: &str, content: impl Into<String>) {
-    let _ = window.emit("agent-stream-chunk", json!({
-        "requestId": request_id,
-        "content": content.into(),
-    }));
+    let _ = window.emit(
+        "agent-stream-chunk",
+        json!({
+            "requestId": request_id,
+            "content": content.into(),
+        }),
+    );
 }
 
 fn emit_reasoning_chunk(window: &Window, request_id: &str, content: impl Into<String>) {
-    let _ = window.emit("agent-reasoning-chunk", json!({
-        "requestId": request_id,
-        "content": content.into(),
-    }));
+    let _ = window.emit(
+        "agent-reasoning-chunk",
+        json!({
+            "requestId": request_id,
+            "content": content.into(),
+        }),
+    );
 }
 
 fn emit_stream_done(window: &Window, request_id: &str, mut payload: Value) {
@@ -146,10 +192,13 @@ fn emit_stream_done(window: &Window, request_id: &str, mut payload: Value) {
 }
 
 fn emit_agent_complete(window: &Window, request_id: &str, status: &str) {
-    let _ = window.emit("agent-complete", json!({
-        "requestId": request_id,
-        "status": status,
-    }));
+    let _ = window.emit(
+        "agent-complete",
+        json!({
+            "requestId": request_id,
+            "status": status,
+        }),
+    );
 }
 
 fn emit_usage(window: &Window, request_id: &str, mut payload: Value) {
@@ -186,12 +235,11 @@ fn supports_reasoning_effort(config: &AppConfig) -> bool {
     let base_url = config.base_url.to_ascii_lowercase();
     let model = config.model.to_ascii_lowercase();
     let is_openai = base_url.contains("api.openai.com") || base_url.contains("openai.azure.com");
-    is_openai && (
-        model.starts_with("o1")
+    is_openai
+        && (model.starts_with("o1")
             || model.starts_with("o3")
             || model.starts_with("o4")
-            || model.starts_with("gpt-5")
-    )
+            || model.starts_with("gpt-5"))
 }
 
 fn apply_reasoning_effort(request_body: &mut Value, config: &AppConfig, is_ollama: bool) {
@@ -319,7 +367,10 @@ pub struct ImageAttachment {
 }
 
 fn attachment_mime_type(att: &ImageAttachment) -> &str {
-    att.mime_type.as_deref().filter(|s| !s.is_empty()).unwrap_or("image/png")
+    att.mime_type
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("image/png")
 }
 
 fn attachment_data_url(att: &ImageAttachment) -> String {
@@ -340,7 +391,11 @@ fn attachment_base64(att: &ImageAttachment) -> String {
     }
 }
 
-fn build_user_message(content: String, image_attachments: &[ImageAttachment], is_ollama: bool) -> Value {
+fn build_user_message(
+    content: String,
+    image_attachments: &[ImageAttachment],
+    is_ollama: bool,
+) -> Value {
     if image_attachments.is_empty() {
         return json!({
             "role": "user",
@@ -395,7 +450,11 @@ fn normalize_session_messages(messages: Vec<Value>, is_ollama: bool) -> Vec<Valu
             let images = image_attachments_from_message(&msg);
             let is_user = msg.get("role").and_then(|v| v.as_str()) == Some("user");
             if is_user && !images.is_empty() {
-                let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let content = msg
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 return build_user_message(content, &images, is_ollama);
             }
 
@@ -426,25 +485,42 @@ pub async fn start_agent_loop(
     let cancel_rx = register_cancellation(&request_id).await;
 
     let result = if session_mode == "chat" {
-        run_chat_mode(window.clone(), request_id.clone(), client, user_prompt, config, session_messages, search_mode, image_attachments, cancel_rx.clone()).await
+        run_chat_mode(
+            window.clone(),
+            request_id.clone(),
+            client,
+            user_prompt,
+            config,
+            session_messages,
+            search_mode,
+            image_attachments,
+            cancel_rx.clone(),
+        )
+        .await
     } else {
         let mut mcp_manager = McpManager::new();
         let mcp_tool_defs = if !config.mcp_servers.is_empty() {
             match mcp_manager.start_all(&config.mcp_servers).await {
                 Ok(tools) => {
                     let count = tools.len();
-                    let _ = window.emit("agent-mcp-status", json!({
-                        "status": "started",
-                        "servers": config.mcp_servers.len(),
-                        "tools": count,
-                    }));
+                    let _ = window.emit(
+                        "agent-mcp-status",
+                        json!({
+                            "status": "started",
+                            "servers": config.mcp_servers.len(),
+                            "tools": count,
+                        }),
+                    );
                     tools
                 }
                 Err(e) => {
-                    let _ = window.emit("agent-mcp-status", json!({
-                        "status": "error",
-                        "error": e,
-                    }));
+                    let _ = window.emit(
+                        "agent-mcp-status",
+                        json!({
+                            "status": "error",
+                            "error": e,
+                        }),
+                    );
                     Vec::new()
                 }
             }
@@ -452,7 +528,19 @@ pub async fn start_agent_loop(
             Vec::new()
         };
 
-        let result = start_agent_loop_inner(window.clone(), request_id.clone(), client, user_prompt, config, session_messages, image_attachments, &mut mcp_manager, mcp_tool_defs, cancel_rx.clone()).await;
+        let result = start_agent_loop_inner(
+            window.clone(),
+            request_id.clone(),
+            client,
+            user_prompt,
+            config,
+            session_messages,
+            image_attachments,
+            &mut mcp_manager,
+            mcp_tool_defs,
+            cancel_rx.clone(),
+        )
+        .await;
         mcp_manager.shutdown().await;
         result
     };
@@ -461,13 +549,17 @@ pub async fn start_agent_loop(
 
     if let Err(err) = &result {
         if is_agent_cancelled_error(err) {
-            emit_stream_done(&window, &request_id, json!({
-                "content": "",
-                "status": "cancelled",
-                "loopCount": 0,
-                "ttftMs": 0,
-                "responseTimeMs": 0,
-            }));
+            emit_stream_done(
+                &window,
+                &request_id,
+                json!({
+                    "content": "",
+                    "status": "cancelled",
+                    "loopCount": 0,
+                    "ttftMs": 0,
+                    "responseTimeMs": 0,
+                }),
+            );
             emit_agent_complete(&window, &request_id, "cancelled");
             return Ok(());
         }
@@ -487,7 +579,9 @@ async fn run_chat_mode(
     cancel_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     ensure_not_cancelled(&cancel_rx)?;
-    let mut chat_system_prompt = if config.system_prompt.contains("PowerShell") || config.system_prompt.contains("Windows PowerShell") {
+    let mut chat_system_prompt = if config.system_prompt.contains("PowerShell")
+        || config.system_prompt.contains("Windows PowerShell")
+    {
         "You are a helpful AI assistant. Be careful, honest, and practical. Answer in the user's language when practical. If you are unsure or lack enough information, say so instead of guessing. When using web search, ground the answer in the search results and cite relevant sources.".to_string()
     } else {
         config.system_prompt.clone()
@@ -504,58 +598,91 @@ async fn run_chat_mode(
 
     let limit = config.context_limit as usize;
     let limited_messages: Vec<Value> = if session_messages.len() > limit {
-        session_messages.into_iter().rev().take(limit).rev().collect()
+        session_messages
+            .into_iter()
+            .rev()
+            .take(limit)
+            .rev()
+            .collect()
     } else {
         session_messages
     };
     messages.extend(normalize_session_messages(limited_messages, is_ollama));
-    messages.push(build_user_message(user_prompt.clone(), &image_attachments, is_ollama));
+    messages.push(build_user_message(
+        user_prompt.clone(),
+        &image_attachments,
+        is_ollama,
+    ));
 
     // Force search mode: execute search before sending to model
     if search_mode == "force" && has_web_search && !is_ollama {
         ensure_not_cancelled(&cancel_rx)?;
         let search_query = user_prompt.clone();
-        let _ = window.emit("agent-search-status", json!({
-            "type": "searching",
-            "query": search_query,
-        }));
+        let _ = window.emit(
+            "agent-search-status",
+            json!({
+                "type": "searching",
+                "query": search_query,
+            }),
+        );
         let search_start = std::time::Instant::now();
         let search_args = json!({"query": search_query}).to_string();
-        let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
-            "web_search",
-            &search_args,
-            &config.default_work_dir,
-            &config.search_provider,
-            &config.search_api_key,
-            config.command_timeout,
-        )).await?;
+        let tool_output = await_with_cancel(
+            &cancel_rx,
+            execute_tool_with_timeout(
+                "web_search",
+                &search_args,
+                &config.default_work_dir,
+                &config.search_provider,
+                &config.search_api_key,
+                config.command_timeout,
+            ),
+        )
+        .await?;
         let search_elapsed = search_start.elapsed().as_secs_f64();
 
         if tool_output.starts_with("Error:") {
-            let _ = window.emit("agent-search-status", json!({
-                "type": "error",
-                "query": search_query,
-                "message": &tool_output,
-                "duration": search_elapsed,
-                "provider": config.search_provider,
-            }));
-            emit_stream_chunk(&window, &request_id, format!("\nSearch failed: {}\n", tool_output));
+            let _ = window.emit(
+                "agent-search-status",
+                json!({
+                    "type": "error",
+                    "query": search_query,
+                    "message": &tool_output,
+                    "duration": search_elapsed,
+                    "provider": config.search_provider,
+                }),
+            );
+            emit_stream_chunk(
+                &window,
+                &request_id,
+                format!("\nSearch failed: {}\n", tool_output),
+            );
             emit_stream_done(&window, &request_id, json!({ "success": false }));
             return Err(format!("Force search failed: {}", tool_output));
         } else {
-            let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
-            let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+            let result_count = tool_output
+                .lines()
+                .filter(|l| l.starts_with("Title:"))
+                .count();
+            let preview = if tool_output.len() > 500 {
+                &tool_output[..500]
+            } else {
+                &tool_output.clone()
+            };
             let sources = parse_search_sources(&tool_output);
 
-            let _ = window.emit("agent-search-status", json!({
-                "type": "results",
-                "query": search_query,
-                "results": preview,
-                "duration": search_elapsed,
-                "resultCount": result_count,
-                "provider": config.search_provider,
-                "sources": sources,
-            }));
+            let _ = window.emit(
+                "agent-search-status",
+                json!({
+                    "type": "results",
+                    "query": search_query,
+                    "results": preview,
+                    "duration": search_elapsed,
+                    "resultCount": result_count,
+                    "provider": config.search_provider,
+                    "sources": sources,
+                }),
+            );
 
             // Inject search results as context and instruct model to use them
             messages.push(json!({
@@ -633,21 +760,15 @@ async fn run_chat_mode(
         format!("{}/chat/completions", config.base_url.trim_end_matches('/'))
     };
 
-    let mut request_builder = client
-        .post(&url)
-        .header("Content-Type", "application/json");
+    let mut request_builder = client.post(&url).header("Content-Type", "application/json");
 
     if !is_ollama && !config.api_key.is_empty() {
-        request_builder = request_builder.header(
-            "Authorization",
-            format!("Bearer {}", config.api_key),
-        );
+        request_builder =
+            request_builder.header("Authorization", format!("Bearer {}", config.api_key));
     }
 
     ensure_not_cancelled(&cancel_rx)?;
-    let response = await_with_cancel(&cancel_rx, request_builder
-        .json(&request_body)
-        .send())
+    let response = await_with_cancel(&cancel_rx, request_builder.json(&request_body).send())
         .await?
         .map_err(|e| format!("Request failed: {}", e))?;
 
@@ -663,9 +784,15 @@ async fn run_chat_mode(
             .await?
             .map_err(|e| format!("Parse error: {}", e))?;
         let content = if is_ollama {
-            body["message"]["content"].as_str().unwrap_or("").to_string()
+            body["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
         } else {
-            body["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string()
+            body["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
         };
 
         if has_web_search && !is_ollama {
@@ -673,51 +800,78 @@ async fn run_chat_mode(
                 if !tool_calls.is_empty() {
                     let tool_call = &tool_calls[0];
                     let tool_call_id = tool_call["id"].as_str().unwrap_or("").to_string();
-                    let tool_name = tool_call["function"]["name"].as_str().unwrap_or("").to_string();
-                    let tool_args = tool_call["function"]["arguments"].as_str().unwrap_or("{}").to_string();
+                    let tool_name = tool_call["function"]["name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    let tool_args = tool_call["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("{}")
+                        .to_string();
 
-                    let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tool_args) {
+                    let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tool_args)
+                    {
                         args["query"].as_str().unwrap_or(&tool_name).to_string()
                     } else {
                         tool_name.clone()
                     };
-                    let _ = window.emit("agent-search-status", json!({
-                        "type": "searching",
-                        "query": query_display,
-                    }));
+                    let _ = window.emit(
+                        "agent-search-status",
+                        json!({
+                            "type": "searching",
+                            "query": query_display,
+                        }),
+                    );
                     let search_start = std::time::Instant::now();
 
-                    let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
-                        &tool_name,
-                        &tool_args,
-                        &config.default_work_dir,
-                        &config.search_provider,
-                        &config.search_api_key,
-                        config.command_timeout,
-                    )).await?;
+                    let tool_output = await_with_cancel(
+                        &cancel_rx,
+                        execute_tool_with_timeout(
+                            &tool_name,
+                            &tool_args,
+                            &config.default_work_dir,
+                            &config.search_provider,
+                            &config.search_api_key,
+                            config.command_timeout,
+                        ),
+                    )
+                    .await?;
 
                     let search_elapsed = search_start.elapsed().as_secs_f64();
                     if tool_output.starts_with("Error:") {
-                        let _ = window.emit("agent-search-status", json!({
-                            "type": "error",
-                            "query": query_display,
-                            "message": tool_output,
-                            "duration": search_elapsed,
-                            "provider": config.search_provider,
-                        }));
+                        let _ = window.emit(
+                            "agent-search-status",
+                            json!({
+                                "type": "error",
+                                "query": query_display,
+                                "message": tool_output,
+                                "duration": search_elapsed,
+                                "provider": config.search_provider,
+                            }),
+                        );
                     } else {
-                        let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
-                        let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                        let result_count = tool_output
+                            .lines()
+                            .filter(|l| l.starts_with("Title:"))
+                            .count();
+                        let preview = if tool_output.len() > 500 {
+                            &tool_output[..500]
+                        } else {
+                            &tool_output.clone()
+                        };
                         let sources = parse_search_sources(&tool_output);
-                        let _ = window.emit("agent-search-status", json!({
-                            "type": "results",
-                            "query": query_display,
-                            "results": preview,
-                            "duration": search_elapsed,
-                            "resultCount": result_count,
-                            "provider": config.search_provider,
-                            "sources": sources,
-                        }));
+                        let _ = window.emit(
+                            "agent-search-status",
+                            json!({
+                                "type": "results",
+                                "query": query_display,
+                                "results": preview,
+                                "duration": search_elapsed,
+                                "resultCount": result_count,
+                                "provider": config.search_provider,
+                                "sources": sources,
+                            }),
+                        );
                     }
 
                     messages.push(json!({
@@ -744,34 +898,49 @@ async fn run_chat_mode(
                     followup_body["top_p"] = json!(config.top_p);
                     apply_reasoning_effort(&mut followup_body, &config, false);
 
-                    let followup_response = await_with_cancel(&cancel_rx, client
-                        .post(&url)
-                        .header("Content-Type", "application/json")
-                        .header("Authorization", format!("Bearer {}", config.api_key))
-                        .json(&followup_body)
-                        .send())
-                        .await?
-                        .map_err(|e| format!("Follow-up request failed: {}", e))?;
+                    let followup_response = await_with_cancel(
+                        &cancel_rx,
+                        client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .header("Authorization", format!("Bearer {}", config.api_key))
+                            .json(&followup_body)
+                            .send(),
+                    )
+                    .await?
+                    .map_err(|e| format!("Follow-up request failed: {}", e))?;
 
                     if followup_response.status().is_success() {
-                        let followup_body: Value = await_with_cancel(&cancel_rx, followup_response.json())
-                            .await?
-                            .map_err(|e| format!("Parse error: {}", e))?;
-                        let final_content = followup_body["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+                        let followup_body: Value =
+                            await_with_cancel(&cancel_rx, followup_response.json())
+                                .await?
+                                .map_err(|e| format!("Parse error: {}", e))?;
+                        let final_content = followup_body["choices"][0]["message"]["content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
                         emit_stream_chunk(&window, &request_id, &final_content);
-                        emit_stream_done(&window, &request_id, json!({
-                            "content": final_content,
-                            "loopCount": 2,
-                            "ttftMs": request_start.elapsed().as_millis() as u64,
-                            "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                        }));
+                        emit_stream_done(
+                            &window,
+                            &request_id,
+                            json!({
+                                "content": final_content,
+                                "loopCount": 2,
+                                "ttftMs": request_start.elapsed().as_millis() as u64,
+                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                            }),
+                        );
                     } else {
-                        emit_stream_done(&window, &request_id, json!({
-                            "content": content,
-                            "loopCount": 1,
-                            "ttftMs": request_start.elapsed().as_millis() as u64,
-                            "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                        }));
+                        emit_stream_done(
+                            &window,
+                            &request_id,
+                            json!({
+                                "content": content,
+                                "loopCount": 1,
+                                "ttftMs": request_start.elapsed().as_millis() as u64,
+                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                            }),
+                        );
                     }
                     emit_agent_complete(&window, &request_id, "success");
                     return Ok(());
@@ -782,66 +951,90 @@ async fn run_chat_mode(
             if content.contains("DSML") {
                 let dsml_calls = parse_dsml_tool_calls(&content);
                 if !dsml_calls.is_empty() {
-                    eprintln!("[agent] Non-streaming: detected {} DSML tool call(s)", dsml_calls.len());
+                    eprintln!(
+                        "[agent] Non-streaming: detected {} DSML tool call(s)",
+                        dsml_calls.len()
+                    );
                     let clean_content = strip_dsml_tags(&content);
 
                     for tc in &dsml_calls {
-                        let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
-                            args["query"].as_str().unwrap_or(&tc.name).to_string()
-                        } else {
-                            tc.name.clone()
-                        };
-                        let _ = window.emit("agent-search-status", json!({
-                            "type": "searching",
-                            "query": query_display,
-                        }));
+                        let query_display =
+                            if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
+                                args["query"].as_str().unwrap_or(&tc.name).to_string()
+                            } else {
+                                tc.name.clone()
+                            };
+                        let _ = window.emit(
+                            "agent-search-status",
+                            json!({
+                                "type": "searching",
+                                "query": query_display,
+                            }),
+                        );
                         let search_start = std::time::Instant::now();
 
-                        let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
-                            &tc.name,
-                            &tc.arguments,
-                            &config.default_work_dir,
-                            &config.search_provider,
-                            &config.search_api_key,
-                            config.command_timeout,
-                        )).await?;
+                        let tool_output = await_with_cancel(
+                            &cancel_rx,
+                            execute_tool_with_timeout(
+                                &tc.name,
+                                &tc.arguments,
+                                &config.default_work_dir,
+                                &config.search_provider,
+                                &config.search_api_key,
+                                config.command_timeout,
+                            ),
+                        )
+                        .await?;
 
                         let search_elapsed = search_start.elapsed().as_secs_f64();
                         if tool_output.starts_with("Error:") {
-                            let _ = window.emit("agent-search-status", json!({
-                                "type": "error",
-                                "query": query_display,
-                                "message": tool_output.clone(),
-                                "duration": search_elapsed,
-                                "provider": config.search_provider,
-                            }));
+                            let _ = window.emit(
+                                "agent-search-status",
+                                json!({
+                                    "type": "error",
+                                    "query": query_display,
+                                    "message": tool_output.clone(),
+                                    "duration": search_elapsed,
+                                    "provider": config.search_provider,
+                                }),
+                            );
                         } else {
-                        let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
-                        let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
-                        let sources = parse_search_sources(&tool_output);
-                        let _ = window.emit("agent-search-status", json!({
-                            "type": "results",
-                            "query": query_display,
-                            "results": preview,
-                            "duration": search_elapsed,
-                            "resultCount": result_count,
-                            "provider": config.search_provider,
-                            "sources": sources,
-                        }));
-                    }
+                            let result_count = tool_output
+                                .lines()
+                                .filter(|l| l.starts_with("Title:"))
+                                .count();
+                            let preview = if tool_output.len() > 500 {
+                                &tool_output[..500]
+                            } else {
+                                &tool_output.clone()
+                            };
+                            let sources = parse_search_sources(&tool_output);
+                            let _ = window.emit(
+                                "agent-search-status",
+                                json!({
+                                    "type": "results",
+                                    "query": query_display,
+                                    "results": preview,
+                                    "duration": search_elapsed,
+                                    "resultCount": result_count,
+                                    "provider": config.search_provider,
+                                    "sources": sources,
+                                }),
+                            );
+                        }
 
-                    messages.push(json!({
+                        messages.push(json!({
                         "role": "assistant",
                         "content": if clean_content.is_empty() { Value::Null } else { json!(clean_content) },
                         "tool_calls": [{ "id": tc.id, "type": "function", "function": { "name": tc.name, "arguments": tc.arguments } }]
                     }));
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_output
-                    }));
-                }
-                add_search_instruction(&mut messages);
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": tool_output
+                        }));
+                    }
+                    add_search_instruction(&mut messages);
 
                     let mut followup_body = json!({
                         "model": config.model,
@@ -855,34 +1048,48 @@ async fn run_chat_mode(
                     followup_body["top_p"] = json!(config.top_p);
                     apply_reasoning_effort(&mut followup_body, &config, false);
 
-                    let followup_response = await_with_cancel(&cancel_rx, client
-                        .post(&url)
-                        .header("Content-Type", "application/json")
-                        .header("Authorization", format!("Bearer {}", config.api_key))
-                        .json(&followup_body)
-                        .send())
-                        .await?
-                        .map_err(|e| format!("Follow-up request failed: {}", e))?;
+                    let followup_response = await_with_cancel(
+                        &cancel_rx,
+                        client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .header("Authorization", format!("Bearer {}", config.api_key))
+                            .json(&followup_body)
+                            .send(),
+                    )
+                    .await?
+                    .map_err(|e| format!("Follow-up request failed: {}", e))?;
 
                     if followup_response.status().is_success() {
                         let fb: Value = await_with_cancel(&cancel_rx, followup_response.json())
                             .await?
                             .map_err(|e| format!("Parse error: {}", e))?;
-                        let final_content = fb["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+                        let final_content = fb["choices"][0]["message"]["content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
                         emit_stream_chunk(&window, &request_id, &final_content);
-                        emit_stream_done(&window, &request_id, json!({
-                            "content": final_content,
-                            "loopCount": 2,
-                            "ttftMs": request_start.elapsed().as_millis() as u64,
-                            "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                        }));
+                        emit_stream_done(
+                            &window,
+                            &request_id,
+                            json!({
+                                "content": final_content,
+                                "loopCount": 2,
+                                "ttftMs": request_start.elapsed().as_millis() as u64,
+                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                            }),
+                        );
                     } else {
-                        emit_stream_done(&window, &request_id, json!({
-                            "content": clean_content,
-                            "loopCount": 1,
-                            "ttftMs": request_start.elapsed().as_millis() as u64,
-                            "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                        }));
+                        emit_stream_done(
+                            &window,
+                            &request_id,
+                            json!({
+                                "content": clean_content,
+                                "loopCount": 1,
+                                "ttftMs": request_start.elapsed().as_millis() as u64,
+                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                            }),
+                        );
                     }
                     emit_agent_complete(&window, &request_id, "success");
                     return Ok(());
@@ -890,12 +1097,16 @@ async fn run_chat_mode(
             }
         }
 
-        emit_stream_done(&window, &request_id, json!({
-            "content": content,
-            "loopCount": 1,
-            "ttftMs": request_start.elapsed().as_millis() as u64,
-            "responseTimeMs": request_start.elapsed().as_millis() as u64,
-        }));
+        emit_stream_done(
+            &window,
+            &request_id,
+            json!({
+                "content": content,
+                "loopCount": 1,
+                "ttftMs": request_start.elapsed().as_millis() as u64,
+                "responseTimeMs": request_start.elapsed().as_millis() as u64,
+            }),
+        );
         emit_agent_complete(&window, &request_id, "success");
         return Ok(());
     }
@@ -915,7 +1126,9 @@ async fn run_chat_mode(
         if is_ollama {
             for line in text.lines() {
                 let line = line.trim();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 let json_val: Value = match serde_json::from_str(line) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -928,7 +1141,10 @@ async fn run_chat_mode(
                         }
                         assistant_content.push_str(content);
                         if content.contains("DSML") || dsml_buffering {
-                            eprintln!("[agent] DSML buffering: chunk contains DSML={}", content.contains("DSML"));
+                            eprintln!(
+                                "[agent] DSML buffering: chunk contains DSML={}",
+                                content.contains("DSML")
+                            );
                             dsml_buffering = true;
                             dsml_buffer.push_str(content);
                         } else {
@@ -942,8 +1158,12 @@ async fn run_chat_mode(
                             if !tool_calls.is_empty() {
                                 for tc in tool_calls {
                                     let tc_id = tc["id"].as_str().unwrap_or("").to_string();
-                                    let tc_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
-                                    let tc_args = tc["function"]["arguments"].as_str().unwrap_or("{}").to_string();
+                                    let tc_name =
+                                        tc["function"]["name"].as_str().unwrap_or("").to_string();
+                                    let tc_args = tc["function"]["arguments"]
+                                        .as_str()
+                                        .unwrap_or("{}")
+                                        .to_string();
                                     accumulated_tool_calls.push(AccumulatedToolCall {
                                         id: tc_id,
                                         name: tc_name,
@@ -959,7 +1179,9 @@ async fn run_chat_mode(
         } else {
             for line in text.lines() {
                 let line = line.trim();
-                if !line.starts_with("data: ") { continue; }
+                if !line.starts_with("data: ") {
+                    continue;
+                }
                 let data = &line[6..];
                 if data == "[DONE]" {
                     break;
@@ -984,7 +1206,9 @@ async fn run_chat_mode(
                     }
                 }
                 if has_web_search {
-                    if let Some(delta_tool_calls) = json_val["choices"][0]["delta"]["tool_calls"].as_array() {
+                    if let Some(delta_tool_calls) =
+                        json_val["choices"][0]["delta"]["tool_calls"].as_array()
+                    {
                         for dtc in delta_tool_calls {
                             let idx = dtc["index"].as_u64().unwrap_or(0) as usize;
                             while accumulated_tool_calls.len() <= idx {
@@ -1012,7 +1236,10 @@ async fn run_chat_mode(
 
     // Detect DSML-format tool calls (DeepSeek models)
     if accumulated_tool_calls.is_empty() && dsml_buffering {
-        eprintln!("[agent] DSML buffering ended, parsing tool calls from {} bytes", assistant_content.len());
+        eprintln!(
+            "[agent] DSML buffering ended, parsing tool calls from {} bytes",
+            assistant_content.len()
+        );
         let dsml_calls = parse_dsml_tool_calls(&assistant_content);
         if !dsml_calls.is_empty() {
             eprintln!("[agent] Detected {} DSML tool call(s)", dsml_calls.len());
@@ -1052,41 +1279,66 @@ async fn run_chat_mode(
             } else {
                 tc.name.clone()
             };
-            let _ = window.emit("agent-search-status", json!({
-                "type": "searching",
-                "query": query_display,
-            }));
+            let _ = window.emit(
+                "agent-search-status",
+                json!({
+                    "type": "searching",
+                    "query": query_display,
+                }),
+            );
             let search_start = std::time::Instant::now();
-            let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
-                &tc.name,
-                &tc.arguments,
-                &config.default_work_dir,
-                &config.search_provider,
-                &config.search_api_key,
-                config.command_timeout,
-            )).await?;
+            let tool_output = await_with_cancel(
+                &cancel_rx,
+                execute_tool_with_timeout(
+                    &tc.name,
+                    &tc.arguments,
+                    &config.default_work_dir,
+                    &config.search_provider,
+                    &config.search_api_key,
+                    config.command_timeout,
+                ),
+            )
+            .await?;
             let search_elapsed = search_start.elapsed();
-            eprintln!("[agent] Search '{}' completed in {:.1}s, result length: {}", query_display, search_elapsed.as_secs_f64(), tool_output.len());
+            eprintln!(
+                "[agent] Search '{}' completed in {:.1}s, result length: {}",
+                query_display,
+                search_elapsed.as_secs_f64(),
+                tool_output.len()
+            );
             if tool_output.starts_with("Error:") {
-                let _ = window.emit("agent-search-status", json!({
-                    "type": "error",
-                    "query": query_display,
-                    "message": tool_output,
-                    "duration": search_elapsed.as_secs_f64(),
-                }));
+                let _ = window.emit(
+                    "agent-search-status",
+                    json!({
+                        "type": "error",
+                        "query": query_display,
+                        "message": tool_output,
+                        "duration": search_elapsed.as_secs_f64(),
+                    }),
+                );
             } else {
-                let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
-                let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                let result_count = tool_output
+                    .lines()
+                    .filter(|l| l.starts_with("Title:"))
+                    .count();
+                let preview = if tool_output.len() > 500 {
+                    &tool_output[..500]
+                } else {
+                    &tool_output.clone()
+                };
                 let sources = parse_search_sources(&tool_output);
-                let _ = window.emit("agent-search-status", json!({
-                    "type": "results",
-                    "query": query_display,
-                    "results": preview,
-                    "duration": search_elapsed.as_secs_f64(),
-                    "resultCount": result_count,
-                    "provider": config.search_provider,
-                    "sources": sources,
-                }));
+                let _ = window.emit(
+                    "agent-search-status",
+                    json!({
+                        "type": "results",
+                        "query": query_display,
+                        "results": preview,
+                        "duration": search_elapsed.as_secs_f64(),
+                        "resultCount": result_count,
+                        "provider": config.search_provider,
+                        "sources": sources,
+                    }),
+                );
             }
             tool_results.push(json!({
                 "role": "tool",
@@ -1129,23 +1381,34 @@ async fn run_chat_mode(
         followup_body["top_p"] = json!(config.top_p);
         apply_reasoning_effort(&mut followup_body, &config, false);
 
-        let followup_response = match await_with_cancel(&cancel_rx, client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", config.api_key))
-            .json(&followup_body)
-            .send())
-            .await?
+        let followup_response = match await_with_cancel(
+            &cancel_rx,
+            client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", config.api_key))
+                .json(&followup_body)
+                .send(),
+        )
+        .await?
         {
             Ok(resp) => resp,
             Err(e) => {
-                emit_stream_chunk(&window, &request_id, format!("\nFollow-up request failed: {}\n", e));
-                emit_stream_done(&window, &request_id, json!({
-                    "content": format!("🔍 Search completed but follow-up failed: {}", e),
-                    "loopCount": 1,
-                    "ttftMs": ttft_ms.unwrap_or(0),
-                    "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                }));
+                emit_stream_chunk(
+                    &window,
+                    &request_id,
+                    format!("\nFollow-up request failed: {}\n", e),
+                );
+                emit_stream_done(
+                    &window,
+                    &request_id,
+                    json!({
+                        "content": format!("🔍 Search completed but follow-up failed: {}", e),
+                        "loopCount": 1,
+                        "ttftMs": ttft_ms.unwrap_or(0),
+                        "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                    }),
+                );
                 emit_agent_complete(&window, &request_id, "success");
                 return Ok(());
             }
@@ -1156,13 +1419,25 @@ async fn run_chat_mode(
             let error_text = await_with_cancel(&cancel_rx, followup_response.text())
                 .await?
                 .unwrap_or_default();
-            emit_stream_chunk(&window, &request_id, format!("\nFollow-up API error ({}): {}\n", status, &error_text[..error_text.len().min(300)]));
-            emit_stream_done(&window, &request_id, json!({
-                "content": format!("🔍 Search completed but follow-up failed ({}): {}", status, error_text),
-                "loopCount": 1,
-                "ttftMs": ttft_ms.unwrap_or(0),
-                "responseTimeMs": request_start.elapsed().as_millis() as u64,
-            }));
+            emit_stream_chunk(
+                &window,
+                &request_id,
+                format!(
+                    "\nFollow-up API error ({}): {}\n",
+                    status,
+                    &error_text[..error_text.len().min(300)]
+                ),
+            );
+            emit_stream_done(
+                &window,
+                &request_id,
+                json!({
+                    "content": format!("🔍 Search completed but follow-up failed ({}): {}", status, error_text),
+                    "loopCount": 1,
+                    "ttftMs": ttft_ms.unwrap_or(0),
+                    "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                }),
+            );
             emit_agent_complete(&window, &request_id, "success");
             return Ok(());
         }
@@ -1183,9 +1458,13 @@ async fn run_chat_mode(
             let text = String::from_utf8_lossy(&chunk);
             for line in text.lines() {
                 let line = line.trim();
-                if !line.starts_with("data: ") { continue; }
+                if !line.starts_with("data: ") {
+                    continue;
+                }
                 let data = &line[6..];
-                if data == "[DONE]" { break; }
+                if data == "[DONE]" {
+                    break;
+                }
                 let json_val: Value = match serde_json::from_str(data) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -1215,7 +1494,10 @@ async fn run_chat_mode(
             followup_content = clean_content;
 
             if !dsml_calls.is_empty() && has_web_search {
-                eprintln!("[agent] Follow-up: detected {} DSML tool call(s)", dsml_calls.len());
+                eprintln!(
+                    "[agent] Follow-up: detected {} DSML tool call(s)",
+                    dsml_calls.len()
+                );
                 let mut tool_results: Vec<Value> = Vec::new();
                 for tc in &dsml_calls {
                     if tc.name != "web_search" {
@@ -1227,46 +1509,67 @@ async fn run_chat_mode(
                         }));
                         continue;
                     }
-                    let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
-                        args["query"].as_str().unwrap_or(&tc.name).to_string()
-                    } else {
-                        tc.name.clone()
-                    };
-                    let _ = window.emit("agent-search-status", json!({
-                        "type": "searching",
-                        "query": query_display,
-                    }));
+                    let query_display =
+                        if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
+                            args["query"].as_str().unwrap_or(&tc.name).to_string()
+                        } else {
+                            tc.name.clone()
+                        };
+                    let _ = window.emit(
+                        "agent-search-status",
+                        json!({
+                            "type": "searching",
+                            "query": query_display,
+                        }),
+                    );
                     let search_start = std::time::Instant::now();
-                    let tool_output = await_with_cancel(&cancel_rx, execute_tool_with_timeout(
-                        &tc.name,
-                        &tc.arguments,
-                        &config.default_work_dir,
-                        &config.search_provider,
-                        &config.search_api_key,
-                        config.command_timeout,
-                    )).await?;
+                    let tool_output = await_with_cancel(
+                        &cancel_rx,
+                        execute_tool_with_timeout(
+                            &tc.name,
+                            &tc.arguments,
+                            &config.default_work_dir,
+                            &config.search_provider,
+                            &config.search_api_key,
+                            config.command_timeout,
+                        ),
+                    )
+                    .await?;
                     let search_elapsed = search_start.elapsed().as_secs_f64();
                     if tool_output.starts_with("Error:") {
-                        let _ = window.emit("agent-search-status", json!({
-                            "type": "error",
-                            "query": query_display,
-                            "message": tool_output.clone(),
-                            "duration": search_elapsed,
-                            "provider": config.search_provider,
-                        }));
+                        let _ = window.emit(
+                            "agent-search-status",
+                            json!({
+                                "type": "error",
+                                "query": query_display,
+                                "message": tool_output.clone(),
+                                "duration": search_elapsed,
+                                "provider": config.search_provider,
+                            }),
+                        );
                     } else {
-                        let result_count = tool_output.lines().filter(|l| l.starts_with("Title:")).count();
-                        let preview = if tool_output.len() > 500 { &tool_output[..500] } else { &tool_output.clone() };
+                        let result_count = tool_output
+                            .lines()
+                            .filter(|l| l.starts_with("Title:"))
+                            .count();
+                        let preview = if tool_output.len() > 500 {
+                            &tool_output[..500]
+                        } else {
+                            &tool_output.clone()
+                        };
                         let sources = parse_search_sources(&tool_output);
-                        let _ = window.emit("agent-search-status", json!({
-                            "type": "results",
-                            "query": query_display,
-                            "results": preview,
-                            "duration": search_elapsed,
-                            "resultCount": result_count,
-                            "provider": config.search_provider,
-                            "sources": sources,
-                        }));
+                        let _ = window.emit(
+                            "agent-search-status",
+                            json!({
+                                "type": "results",
+                                "query": query_display,
+                                "results": preview,
+                                "duration": search_elapsed,
+                                "resultCount": result_count,
+                                "provider": config.search_provider,
+                                "sources": sources,
+                            }),
+                        );
                     }
                     tool_results.push(json!({
                         "role": "tool",
@@ -1307,14 +1610,17 @@ async fn run_chat_mode(
                     second_followup_body["top_p"] = json!(config.top_p);
                     apply_reasoning_effort(&mut second_followup_body, &config, false);
 
-                    let second_followup_response = await_with_cancel(&cancel_rx, client
-                        .post(&url)
-                        .header("Content-Type", "application/json")
-                        .header("Authorization", format!("Bearer {}", config.api_key))
-                        .json(&second_followup_body)
-                        .send())
-                        .await?
-                        .map_err(|e| format!("Second follow-up request failed: {}", e))?;
+                    let second_followup_response = await_with_cancel(
+                        &cancel_rx,
+                        client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .header("Authorization", format!("Bearer {}", config.api_key))
+                            .json(&second_followup_body)
+                            .send(),
+                    )
+                    .await?
+                    .map_err(|e| format!("Second follow-up request failed: {}", e))?;
 
                     if second_followup_response.status().is_success() {
                         let mut second_stream = second_followup_response.bytes_stream();
@@ -1322,7 +1628,9 @@ async fn run_chat_mode(
                         let mut second_dsml_buffering = false;
                         let mut second_dsml_buffer = String::new();
 
-                        while let Some(chunk) = await_with_cancel(&cancel_rx, second_stream.next()).await? {
+                        while let Some(chunk) =
+                            await_with_cancel(&cancel_rx, second_stream.next()).await?
+                        {
                             let chunk = match chunk {
                                 Ok(c) => c,
                                 Err(_) => break,
@@ -1330,14 +1638,20 @@ async fn run_chat_mode(
                             let text = String::from_utf8_lossy(&chunk);
                             for line in text.lines() {
                                 let line = line.trim();
-                                if !line.starts_with("data: ") { continue; }
+                                if !line.starts_with("data: ") {
+                                    continue;
+                                }
                                 let data = &line[6..];
-                                if data == "[DONE]" { break; }
+                                if data == "[DONE]" {
+                                    break;
+                                }
                                 let json_val: Value = match serde_json::from_str(data) {
                                     Ok(v) => v,
                                     Err(_) => continue,
                                 };
-                                if let Some(content) = json_val["choices"][0]["delta"]["content"].as_str() {
+                                if let Some(content) =
+                                    json_val["choices"][0]["delta"]["content"].as_str()
+                                {
                                     if !content.is_empty() {
                                         second_content.push_str(content);
                                         if content.contains("DSML") || second_dsml_buffering {
@@ -1358,12 +1672,16 @@ async fn run_chat_mode(
                             }
                         }
 
-                        emit_stream_done(&window, &request_id, json!({
-                            "content": second_content,
-                            "loopCount": 3,
-                            "ttftMs": ttft_ms.unwrap_or(0),
-                            "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                        }));
+                        emit_stream_done(
+                            &window,
+                            &request_id,
+                            json!({
+                                "content": second_content,
+                                "loopCount": 3,
+                                "ttftMs": ttft_ms.unwrap_or(0),
+                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                            }),
+                        );
                         emit_agent_complete(&window, &request_id, "success");
                         return Ok(());
                     }
@@ -1371,22 +1689,30 @@ async fn run_chat_mode(
             }
         }
 
-        emit_stream_done(&window, &request_id, json!({
-            "content": followup_content,
-            "loopCount": 2,
-            "ttftMs": ttft_ms.unwrap_or(0),
-            "responseTimeMs": request_start.elapsed().as_millis() as u64,
-        }));
+        emit_stream_done(
+            &window,
+            &request_id,
+            json!({
+                "content": followup_content,
+                "loopCount": 2,
+                "ttftMs": ttft_ms.unwrap_or(0),
+                "responseTimeMs": request_start.elapsed().as_millis() as u64,
+            }),
+        );
         emit_agent_complete(&window, &request_id, "success");
         return Ok(());
     }
 
-    emit_stream_done(&window, &request_id, json!({
-        "content": assistant_content,
-        "loopCount": 1,
-        "ttftMs": ttft_ms.unwrap_or(0),
-        "responseTimeMs": request_start.elapsed().as_millis() as u64,
-    }));
+    emit_stream_done(
+        &window,
+        &request_id,
+        json!({
+            "content": assistant_content,
+            "loopCount": 1,
+            "ttftMs": ttft_ms.unwrap_or(0),
+            "responseTimeMs": request_start.elapsed().as_millis() as u64,
+        }),
+    );
     emit_agent_complete(&window, &request_id, "success");
     Ok(())
 }
@@ -1412,10 +1738,13 @@ async fn start_agent_loop_inner(
             "\n\n===========================================\n📌 [Workspace Rules (from {})]:\n{}\n===========================================\n",
             filename, rules
         ));
-        let _ = window.emit("agent-workspace-rules", json!({
-            "file": filename,
-            "length": rules.len(),
-        }));
+        let _ = window.emit(
+            "agent-workspace-rules",
+            json!({
+                "file": filename,
+                "length": rules.len(),
+            }),
+        );
     }
 
     append_general_assistant_instruction(&mut system_prompt);
@@ -1428,12 +1757,21 @@ async fn start_agent_loop_inner(
 
     let limit = config.context_limit as usize;
     let limited_messages: Vec<Value> = if session_messages.len() > limit {
-        session_messages.into_iter().rev().take(limit).rev().collect()
+        session_messages
+            .into_iter()
+            .rev()
+            .take(limit)
+            .rev()
+            .collect()
     } else {
         session_messages
     };
     messages.extend(normalize_session_messages(limited_messages, is_ollama));
-    messages.push(build_user_message(user_prompt, &image_attachments, is_ollama));
+    messages.push(build_user_message(
+        user_prompt,
+        &image_attachments,
+        is_ollama,
+    ));
 
     let mut loop_count = 0;
     let mut total_prompt_tokens: u64 = 0;
@@ -1509,20 +1847,14 @@ async fn start_agent_loop_inner(
             format!("{}/chat/completions", config.base_url.trim_end_matches('/'))
         };
 
-        let mut request_builder = client
-            .post(&url)
-            .header("Content-Type", "application/json");
+        let mut request_builder = client.post(&url).header("Content-Type", "application/json");
 
         if !is_ollama && !config.api_key.is_empty() {
-            request_builder = request_builder.header(
-                "Authorization",
-                format!("Bearer {}", config.api_key),
-            );
+            request_builder =
+                request_builder.header("Authorization", format!("Bearer {}", config.api_key));
         }
 
-        let response = await_with_cancel(&cancel_rx, request_builder
-            .json(&request_body)
-            .send())
+        let response = await_with_cancel(&cancel_rx, request_builder.json(&request_body).send())
             .await?
             .map_err(|e| format!("API request failed: {}", e))?;
 
@@ -1546,15 +1878,19 @@ async fn start_agent_loop_inner(
             total_prompt_tokens += prompt_tokens;
             total_completion_tokens += completion_tokens;
 
-            emit_usage(&window, &request_id, json!({
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_prompt_tokens": total_prompt_tokens,
-                "total_completion_tokens": total_completion_tokens,
-                "ttft_ms": response_time_ms,
-                "response_time_ms": response_time_ms,
-                "loop_count": loop_count,
-            }));
+            emit_usage(
+                &window,
+                &request_id,
+                json!({
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_prompt_tokens": total_prompt_tokens,
+                    "total_completion_tokens": total_completion_tokens,
+                    "ttft_ms": response_time_ms,
+                    "response_time_ms": response_time_ms,
+                    "loop_count": loop_count,
+                }),
+            );
 
             let content = body["choices"][0]["message"]["content"]
                 .as_str()
@@ -1590,10 +1926,7 @@ async fn start_agent_loop_inner(
                 .iter()
                 .map(|tc| AccumulatedToolCall {
                     id: tc["id"].as_str().unwrap_or("").to_string(),
-                    name: tc["function"]["name"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
+                    name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
                     arguments: tc["function"]["arguments"]
                         .as_str()
                         .unwrap_or("")
@@ -1659,7 +1992,8 @@ async fn start_agent_loop_inner(
                             if let Some(eval_count) = json_val["eval_count"].as_u64() {
                                 stream_usage_completion = eval_count;
                             }
-                            if let Some(prompt_eval_count) = json_val["prompt_eval_count"].as_u64() {
+                            if let Some(prompt_eval_count) = json_val["prompt_eval_count"].as_u64()
+                            {
                                 stream_usage_prompt = prompt_eval_count;
                             }
                             break;
@@ -1680,14 +2014,21 @@ async fn start_agent_loop_inner(
                             has_tool_calls = true;
                             for (idx, tc) in tool_calls.iter().enumerate() {
                                 if idx >= accumulated_tool_calls.len() {
-                                    let id = tc["id"].as_str()
+                                    let id = tc["id"]
+                                        .as_str()
                                         .filter(|s| !s.is_empty())
                                         .map(|s| s.to_string())
                                         .unwrap_or_else(|| format!("call_{}", idx));
                                     accumulated_tool_calls.push(AccumulatedToolCall {
                                         id,
-                                        name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                                        arguments: tc["function"]["arguments"].as_str().unwrap_or("").to_string(),
+                                        name: tc["function"]["name"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        arguments: tc["function"]["arguments"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string(),
                                     });
                                 } else {
                                     let existing = &mut accumulated_tool_calls[idx];
@@ -1695,7 +2036,9 @@ async fn start_agent_loop_inner(
                                         existing.arguments.push_str(args_chunk);
                                     }
                                     if existing.id.is_empty() {
-                                        if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
+                                        if let Some(id) =
+                                            tc["id"].as_str().filter(|s| !s.is_empty())
+                                        {
                                             existing.id = id.to_string();
                                         }
                                     }
@@ -1715,8 +2058,12 @@ async fn start_agent_loop_inner(
 
                     if let Ok(json_val) = serde_json::from_str::<Value>(data) {
                         if let Some(usage) = json_val.get("usage") {
-                            stream_usage_prompt = usage["prompt_tokens"].as_u64().unwrap_or(stream_usage_prompt);
-                            stream_usage_completion = usage["completion_tokens"].as_u64().unwrap_or(stream_usage_completion);
+                            stream_usage_prompt = usage["prompt_tokens"]
+                                .as_u64()
+                                .unwrap_or(stream_usage_prompt);
+                            stream_usage_completion = usage["completion_tokens"]
+                                .as_u64()
+                                .unwrap_or(stream_usage_completion);
                         }
 
                         if let Some(choices) = json_val["choices"].as_array() {
@@ -1749,7 +2096,10 @@ async fn start_agent_loop_inner(
                                     if idx >= accumulated_tool_calls.len() {
                                         accumulated_tool_calls.push(AccumulatedToolCall {
                                             id: tc["id"].as_str().unwrap_or("").to_string(),
-                                            name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                                            name: tc["function"]["name"]
+                                                .as_str()
+                                                .unwrap_or("")
+                                                .to_string(),
                                             arguments: String::new(),
                                         });
                                     }
@@ -1785,15 +2135,19 @@ async fn start_agent_loop_inner(
         total_prompt_tokens += stream_usage_prompt;
         total_completion_tokens += stream_usage_completion;
 
-        emit_usage(&window, &request_id, json!({
-            "prompt_tokens": stream_usage_prompt,
-            "completion_tokens": stream_usage_completion,
-            "total_prompt_tokens": total_prompt_tokens,
-            "total_completion_tokens": total_completion_tokens,
-            "ttft_ms": ttft_ms.unwrap_or(response_time_ms),
-            "response_time_ms": response_time_ms,
-            "loop_count": loop_count,
-        }));
+        emit_usage(
+            &window,
+            &request_id,
+            json!({
+                "prompt_tokens": stream_usage_prompt,
+                "completion_tokens": stream_usage_completion,
+                "total_prompt_tokens": total_prompt_tokens,
+                "total_completion_tokens": total_completion_tokens,
+                "ttft_ms": ttft_ms.unwrap_or(response_time_ms),
+                "response_time_ms": response_time_ms,
+                "loop_count": loop_count,
+            }),
+        );
 
         // No tool calls - conversation complete
         if !has_tool_calls {
@@ -1829,9 +2183,15 @@ async fn start_agent_loop_inner(
         messages.push(assistant_msg);
 
         // Process tool calls with approval
-        let result =
-            process_tool_calls(&window, &accumulated_tool_calls, &config, &mut messages, mcp_manager, &cancel_rx)
-                .await?;
+        let result = process_tool_calls(
+            &window,
+            &accumulated_tool_calls,
+            &config,
+            &mut messages,
+            mcp_manager,
+            &cancel_rx,
+        )
+        .await?;
         if result {
             return Ok(());
         }
@@ -1865,7 +2225,13 @@ async fn git_checkpoint(work_dir: &str) {
         .await;
 
     let _ = tokio::process::Command::new("git")
-        .args(["commit", "-m", "gxagent-auto-checkpoint", "--no-verify", "--allow-empty"])
+        .args([
+            "commit",
+            "-m",
+            "gxagent-auto-checkpoint",
+            "--no-verify",
+            "--allow-empty",
+        ])
         .current_dir(work_dir)
         .creation_flags(0x08000000)
         .output()
@@ -1883,9 +2249,24 @@ async fn execute_tool_with_mcp(
         git_checkpoint(&config.default_work_dir).await;
     }
 
-    let builtin_tools = ["execute_command", "read_file", "write_file", "list_dir", "run_python", "web_search"];
+    let builtin_tools = [
+        "execute_command",
+        "read_file",
+        "write_file",
+        "list_dir",
+        "run_python",
+        "web_search",
+    ];
     if builtin_tools.contains(&name) {
-        execute_tool_with_timeout(name, args_str, &config.default_work_dir, &config.search_provider, &config.search_api_key, config.command_timeout).await
+        execute_tool_with_timeout(
+            name,
+            args_str,
+            &config.default_work_dir,
+            &config.search_provider,
+            &config.search_api_key,
+            config.command_timeout,
+        )
+        .await
     } else {
         let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
         match mcp_manager.route_tool_call(name, args).await {
@@ -1907,6 +2288,10 @@ async fn process_tool_calls(
     cancel_rx: &watch::Receiver<bool>,
 ) -> Result<bool, String> {
     ensure_not_cancelled(cancel_rx)?;
+
+    let audit = Arc::new(AuditLogger::new());
+    let username = whoami::username();
+
     let mut needs_confirmation = Vec::new();
     let mut auto_approved = Vec::new();
 
@@ -1921,6 +2306,9 @@ async fn process_tool_calls(
 
         match level {
             ApprovalLevel::AutoApprove => {
+                audit
+                    .log_command(&tc.name, &tc.arguments, true, &username)
+                    .await;
                 auto_approved.push(tc.clone());
             }
             ApprovalLevel::NeedsConfirmation => {
@@ -1958,7 +2346,7 @@ async fn process_tool_calls(
             json!({
                 "id": tc.id,
                 "name": tc.name,
-                "arguments": tc.arguments
+                "arguments": sanitize_args_for_log(&tc.arguments)
             }),
         );
 
@@ -2003,12 +2391,16 @@ async fn process_tool_calls(
             if approved {
                 // Find the tool call
                 if let Some(tc) = tool_calls.iter().find(|t| t.id == tc_id) {
+                    audit
+                        .log_command(&tc.name, &tc.arguments, true, &username)
+                        .await;
+
                     let _ = window.emit(
                         "agent-tool-executing",
                         json!({
                             "id": tc.id,
                             "name": tc.name,
-                            "arguments": tc.arguments
+                            "arguments": sanitize_args_for_log(&tc.arguments)
                         }),
                     );
 
@@ -2035,7 +2427,10 @@ async fn process_tool_calls(
                 }
             } else {
                 // User rejected
-                if let Some(_tc) = tool_calls.iter().find(|t| t.id == tc_id) {
+                if let Some(tc) = tool_calls.iter().find(|t| t.id == tc_id) {
+                    audit
+                        .log_command(&tc.name, &tc.arguments, false, &username)
+                        .await;
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": tc_id,
@@ -2046,19 +2441,17 @@ async fn process_tool_calls(
         }
     }
 
+    audit.shutdown().await;
     Ok(false)
 }
 
-use std::sync::Arc;
 use tokio::sync::watch;
 
 /// Global pending approvals store: request_id -> watch::Sender channel
 type ApprovalMap = std::collections::HashMap<String, watch::Sender<Option<Vec<(String, bool)>>>>;
 
 static PENDING_APPROVALS: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<ApprovalMap>>> =
-    once_cell::sync::Lazy::new(|| {
-        Arc::new(tokio::sync::Mutex::new(ApprovalMap::new()))
-    });
+    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(ApprovalMap::new())));
 
 /// Wait for frontend to resolve a tool approval request.
 /// Includes a 5-minute timeout to prevent orphaned approvals from leaking memory.
@@ -2117,10 +2510,14 @@ pub async fn resolve_approval(
 ) -> Result<(), String> {
     let mut pending = PENDING_APPROVALS.lock().await;
     if let Some(tx) = pending.remove(request_id) {
-        tx.send(Some(results)).map_err(|_| "Failed to send approval result".to_string())?;
+        tx.send(Some(results))
+            .map_err(|_| "Failed to send approval result".to_string())?;
         Ok(())
     } else {
-        Err(format!("No pending approval found for request: {}", request_id))
+        Err(format!(
+            "No pending approval found for request: {}",
+            request_id
+        ))
     }
 }
 
@@ -2133,9 +2530,7 @@ pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, S
         .map_err(|e| format!("HTTP client error: {}", e))?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
 
-    let mut request = client
-        .get(&url)
-        .header("Content-Type", "application/json");
+    let mut request = client.get(&url).header("Content-Type", "application/json");
 
     if !api_key.is_empty() {
         request = request.header("Authorization", format!("Bearer {}", api_key));
