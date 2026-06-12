@@ -137,7 +137,7 @@ fn derive_key_v2() -> [u8; 32] {
 
 /// Encrypt plaintext using AES-256-GCM with Argon2-derived key
 pub fn encrypt(plaintext: &str) -> String {
-    if plaintext.is_empty() || plaintext.starts_with(V3_PREFIX) {
+    if plaintext.is_empty() || plaintext.starts_with("enc:") {
         return plaintext.to_string();
     }
 

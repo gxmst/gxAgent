@@ -48,11 +48,32 @@ fn validate_mcp_command(command: &str) -> Result<(), String> {
 
 /// Validate environment variables to prevent malicious injection
 fn validate_env_vars(env: &std::collections::HashMap<String, String>) -> Result<(), String> {
-    // Block dangerous environment variables that could be used for code injection
-    let dangerous_vars = ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"];
+    // Block environment variables that commonly inject code/config into child
+    // runtimes. PATH and proxy variables are intentionally not blocked because
+    // many legitimate MCP setups rely on them; this is a hard denylist for
+    // high-risk injection hooks, not a full sandbox.
+    let dangerous_vars = [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "NODE_OPTIONS",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "RUBYOPT",
+        "PERL5OPT",
+        "BASH_ENV",
+        "ENV",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+    ];
 
-    for var in dangerous_vars {
-        if env.contains_key(var) {
+    for var in env.keys() {
+        let upper = var.to_ascii_uppercase();
+        let blocked = dangerous_vars.iter().any(|dangerous| upper == *dangerous)
+            || upper.starts_with("GIT_CONFIG_");
+        if blocked {
             return Err(format!(
                 "Environment variable '{}' is not allowed for security reasons",
                 var

@@ -3,10 +3,13 @@ export interface ApiProfile {
   base_url: string;
   api_key: string;
   default_model: string;
+  wire_format: string;
+  provider: string;
 }
 
 export interface AppConfig {
   provider: string;
+  wire_format: string;
   base_url: string;
   api_key: string;
   model: string;
@@ -33,6 +36,8 @@ export interface AppConfig {
   font_family: string;
   show_advanced_reply_info: boolean;
   command_timeout: number;
+  max_agent_loops: number;
+  max_tool_calls_per_request: number;
   preview_sandbox: boolean;
 }
 
@@ -48,6 +53,7 @@ export interface ProviderPreset {
   base_url: string;
   default_model: string;
   needs_api_key: boolean;
+  wire_format: string;
 }
 
 export interface ModelInfo {

@@ -1,135 +1,138 @@
 # gxAgent Studio
 
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-red)](./README.zh-CN.md)
+[简体中文](./README.zh-CN.md)
 
-A powerful, cross-platform AI Agent desktop application built with **Tauri v2, React 19, TypeScript, and Rust**. Designed to support seamless daily conversations, advanced agentic coding workflows, multi-session management, and custom tools.
+gxAgent Studio is a cross-platform desktop AI agent built with Tauri v2, React 19, TypeScript, and Rust. It combines everyday chat, agentic coding workflows, local tools, web search, multi-session management, and MCP extension support in one local-first app.
 
----
+## Features
 
-## ✨ Features
+### Agent Workflows
 
-### 🤖 Intelligent Core
-* **Dual Modes**:
-  * **Chat Mode**: Tailored for daily conversations, brainstorming, and prompt assistance.
-  * **Code Mode (Agent)**: An autonomous coding agent that executes tasks directly in your workspace.
-* **Steerable Runtime Queue**: Intervene or redirect the agent's behavior at any time while it is running in Code Mode.
-* **Workspace Rules Autoloading**: Automatically scans your target directory for rules files like `.gxagent.md`, `AGENTS.md`, or `CLAUDE.md` to customize system behavior dynamically.
-* **Git Auto-Checkpoint**: Safely saves Git checkpoints before running modifying commands or file writes, ensuring zero code loss.
+- Chat Mode for daily conversations, brainstorming, writing, and prompt assistance.
+- Code Mode for agentic workspace tasks with file access, command execution, Python execution, web search, and MCP tools.
+- Runtime steering lets you redirect a running Code Mode task without restarting the session.
+- Workspace rules are loaded from files such as `.gxagent.md`, `AGENTS.md`, and `CLAUDE.md`.
+- Git auto-checkpoints run before modifying file writes or command execution in Git workspaces.
 
-### 💬 Experience & Interface
-* **Markdown & Mermaid Support**: Full GitHub Flavored Markdown (GFM) rendering with syntax highlighting, math formulas (KaTeX), and interactive Mermaid diagrams.
-* **Context Divider**: Isolate chat context above a certain point to drastically reduce token consumption.
-* **Stream Response**: Smooth, real-time typing animation for instant feedback.
-* **Rich UI Features**: Resizable split panels (persisted layout), smart auto-scrolling, dark/light themes, and full keyboard shortcut support.
+### Model Providers
 
-### ⚙️ Power & Security
-* **Multi-LLM Provider Integration**: Native presets and configuration for DeepSeek, OpenAI, Gemini, Ollama, and any OpenAI-compatible API.
-* **API Profile Manager**: Save, switch, and customize multiple API configurations (base URL, keys, system prompts, models, parameters).
-* **Model Picker**: Quickly swap active session models directly from the chat input bar.
-* **Encrypted at Rest**: All API profiles and keys are securely encrypted with AES-256-GCM before being written to disk.
-* **MCP Integration**: Full Model Context Protocol (MCP) server support to extend your agent with custom tools.
+- Built-in presets for DeepSeek, OpenAI, Anthropic Claude, Google Gemini, Ollama, and OpenAI-compatible endpoints.
+- Decoupled wire format setting: choose OpenAI, Anthropic, Gemini, or Ollama protocol independently of the provider preset.
+- Streaming responses, tool calls, and tool results are normalized internally across supported wire formats.
+- API profiles store provider, base URL, model, API key, and wire format for quick switching.
+- Model picker and model list fetching are available from the settings flow.
 
----
+### Safety And Cost Controls
 
-## 🎹 Keyboard Shortcuts
+- API keys are encrypted at rest with AES-256-GCM using a machine-local Argon2-derived v3 key.
+- Legacy `enc:v1` and `enc:v2` keys are migrated automatically to v3 after they are successfully decrypted.
+- Imported encrypted keys that cannot be decrypted on the current device are cleared and the user is asked to re-enter them.
+- MCP server environment variables block common injection hooks such as `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONHOME`, `RUBYOPT`, `PERL5OPT`, `BASH_ENV`, `ENV`, and `GIT_CONFIG_*`.
+- `PATH` and proxy variables are allowed so enterprise and local MCP setups keep working.
+- Agent resource budgets are configurable:
+  - `max_agent_loops`, default `10`, hard-capped at `20`.
+  - `max_tool_calls_per_request`, default `30`, hard-capped at `100`.
+- Tool failures, search failures, and budget-limit observations are returned to the model so it can decide whether to recover, summarize, or ask the user to continue.
+- User cancellation, approval rejection, policy blocks, and API protocol errors remain explicit stop conditions.
+
+### Interface
+
+- GitHub Flavored Markdown, syntax highlighting, KaTeX math, and Mermaid diagrams.
+- Streaming output with separate reasoning display when available.
+- Context divider and history compaction to reduce context size.
+- Multiple color themes: light, dark, Yuzu Study, Ember Terminal, Midnight Grape, and Twilight Amber.
+- Resizable layout, smart scrolling, session search, role presets, and keyboard shortcuts.
+- Secret fields are masked by default with a reveal toggle.
+
+## Keyboard Shortcuts
 
 | Shortcut | Action |
 | :--- | :--- |
 | `Ctrl + N` | Create a new session |
 | `Ctrl + Shift + N` | Toggle Chat / Code mode |
-| `Ctrl + ,` | Open Settings panel |
+| `Ctrl + ,` | Open Settings |
 | `Enter` | Send message |
-| `Shift + Enter` | Insert new line in input |
+| `Shift + Enter` | Insert a new line |
 | `Esc` | Close modals and active panels |
 
----
-
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Layer | Technologies |
 | :--- | :--- |
-| **Frontend** | React 19, TypeScript, Vite |
-| **Desktop Shell** | Tauri v2 (Rust, Tokio) |
-| **Markdown** | react-markdown, remark-gfm, remark-math, rehype-katex |
-| **Visualizations** | Mermaid, react-syntax-highlighter, Lucide Icons |
-| **Communication** | Reqwest (Rust), Tauri IPC |
-| **Security** | AES-256-GCM |
+| Frontend | React 19, TypeScript, Vite |
+| Desktop shell | Tauri v2, Rust, Tokio |
+| LLM transport | Reqwest, provider adapters for OpenAI / Anthropic / Gemini / Ollama |
+| Rendering | react-markdown, remark-gfm, remark-math, rehype-katex, Mermaid |
+| Security | AES-256-GCM, Argon2, policy approvals, MCP environment validation |
 
----
+## Project Structure
 
-## 📂 Project Structure
-
-```
+```text
 gxAgent/
-├── src/                          # Frontend React + TypeScript
-│   ├── App.tsx                   # Main layout and view state
-│   ├── App.css                   # Global styles & theme tokens
-│   ├── types.ts                  # Shared TypeScript declarations
-│   ├── rolePresets.ts            # Custom system prompt definitions
-│   └── main.tsx                  # Frontend entry point
-├── src-tauri/                    # Backend Rust & Tauri Shell
-│   ├── src/
-│   │   ├── lib.rs                # App startup & Tauri command handlers
-│   │   ├── agent.rs              # LLM client & streaming agent orchestrator
-│   │   ├── config.rs             # Application profiles & storage manager
-│   │   ├── crypto.rs             # Hardware-accelerated AES key encryption
-│   │   ├── tools.rs              # Core agent tools (file access, commands)
-│   │   ├── policy.rs             # Command execution approval engine
-│   │   └── mcp.rs                # MCP client coordinator
-│   ├── Cargo.toml                # Rust dependencies
-│   └── tauri.conf.json           # Tauri bundle & capability config
-└── package.json                  # Frontend dependencies
+|-- src/                         # Frontend React + TypeScript
+|   |-- App.tsx                  # Main app shell and view state
+|   |-- App.css                  # Global styles and theme tokens
+|   |-- types.ts                 # Shared TypeScript declarations
+|   |-- rolePresets.ts           # Built-in role presets
+|   `-- main.tsx                 # Frontend entry point
+|-- src-tauri/                   # Rust backend and Tauri shell
+|   |-- src/
+|   |   |-- lib.rs               # Tauri commands and app startup
+|   |   |-- agent.rs             # Agent loop, tools, streaming orchestration
+|   |   |-- provider.rs          # Wire-format adapters
+|   |   |-- config.rs            # App config and defaults
+|   |   |-- crypto.rs            # API key encryption and migration
+|   |   |-- tools.rs             # Built-in tool implementations
+|   |   |-- policy.rs            # Approval and command policy engine
+|   |   `-- mcp.rs               # MCP server manager
+|   |-- Cargo.toml
+|   `-- tauri.conf.json
+|-- package.json
+`-- README.md
 ```
 
----
-
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
-Ensure you have the following installed on your machine:
-* [Node.js](https://nodejs.org/) (v18 or higher)
-* [Rust & Cargo](https://www.rust-lang.org/tools/install) (stable release)
-* Platform-specific Tauri prerequisites (see the [Tauri Setup Guide](https://v2.tauri.app/start/prerequisites/))
+- Node.js 18 or newer
+- Rust and Cargo stable
+- Platform-specific Tauri prerequisites from the [Tauri setup guide](https://v2.tauri.app/start/prerequisites/)
 
-### Installation & Run
+### Development
 
-1. Clone the repository and navigate to the project root.
-2. Install frontend dependencies:
-   ```bash
-   npm install
-   ```
-3. Run the application in development mode:
-   ```bash
-   npm run tauri dev
-   ```
+```bash
+npm install
+npm run tauri dev
+```
+
+### Validation
+
+```bash
+npm run build
+cd src-tauri
+cargo check
+cargo test
+```
 
 ### Production Build
 
-To compile a highly optimized standalone executable:
 ```bash
 npm run tauri build
 ```
 
-The compiled binaries will be output to:
-* **Standalone Executable**: `src-tauri/target/release/gxAgent.exe`
-* **MSI Installer**: `src-tauri/target/release/bundle/msi/...`
-* **NSIS Installer**: `src-tauri/target/release/bundle/nsis/...`
+Build outputs are written under `src-tauri/target/release/` and `src-tauri/target/release/bundle/`.
 
----
+## Configuration And Security
 
-## 🔒 Configuration & Security
+Configuration and API profiles are stored in the standard app config directory:
 
-Configuration, API profiles, and session histories are securely stored in the standard app data directory of your operating system:
-* **Windows**: `%APPDATA%\gxAgent\config.json`
-* **macOS**: `~/Library/Application Support/gxAgent/config.json`
-* **Linux**: `~/.config/gxAgent/config.json`
+- Windows: `%APPDATA%\gxAgent\config.json`
+- macOS: `~/Library/Application Support/gxAgent/config.json`
+- Linux: `~/.config/gxAgent/config.json`
 
-> [!WARNING]
-> Your API keys are encrypted using a local hardware-linked AES-256-GCM key before being persisted. Do not share your `config.json` file if it contains active credentials.
+API keys are encrypted before being written to disk. Do not share `config.json` if it contains active credentials, even though the keys are encrypted for the local machine.
 
----
-
-## 📄 License
+## License
 
 Private project. All rights reserved.

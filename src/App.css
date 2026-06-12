@@ -120,6 +120,262 @@
   background-color: var(--bg-main);
 }
 
+/* ========================================================
+   柚木书房 / Yuzu Study — warm cream light theme
+   ======================================================== */
+
+[data-theme="yuzu"] {
+  --bg-main: #fcf7ed;
+  --bg-sidebar: #f3e8d6;
+  --bg-card: #fffaf0;
+  --bg-card-hover: #f6ecda;
+  --bg-input: #fffaf0;
+  --bg-code: #f0e4cf;
+  --bg-overlay: rgba(52, 37, 25, 0.35);
+  --bg-user-bubble: #f0e4cf;
+  --bg-assistant-bubble: transparent;
+
+  --bg-app: #fcf7ed;
+  --bg-surface: #fffaf0;
+  --bg-surface-hover: #f6ecda;
+  --bg-elevated: #fffaf0;
+
+  --border-default: #ddcaa8;
+  --border-focus: #c9ad7e;
+  --border-light: #ece0c8;
+  --border-medium: #ddcaa8;
+  --border-strong: #cbb487;
+
+  --text-primary: #342519;
+  --text-secondary: #6b5640;
+  --text-tertiary: #93795c;
+  --text-inverse: #fffaf0;
+  --text-code: #4a3826;
+
+  --accent: #a9743f;
+  --accent-hover: #8c5d30;
+  --accent-light: rgba(169, 116, 63, 0.12);
+  --accent-subtle: rgba(169, 116, 63, 0.12);
+  --accent-border: rgba(169, 116, 63, 0.28);
+
+  --success: #5f8a3f;
+  --success-subtle: rgba(95, 138, 63, 0.14);
+  --success-light: rgba(95, 138, 63, 0.14);
+  --success-border: rgba(95, 138, 63, 0.3);
+
+  --warning: #c2870c;
+  --warning-subtle: rgba(194, 135, 12, 0.14);
+  --warning-light: rgba(194, 135, 12, 0.14);
+  --warning-border: rgba(194, 135, 12, 0.3);
+
+  --error: #c0492f;
+  --error-subtle: rgba(192, 73, 47, 0.12);
+  --error-light: rgba(192, 73, 47, 0.12);
+  --error-border: rgba(192, 73, 47, 0.28);
+
+  --shadow-soft: 0 4px 6px -1px rgba(82, 58, 35, 0.08), 0 2px 4px -1px rgba(82, 58, 35, 0.05);
+  --shadow-card: 0 1px 3px 0 rgba(82, 58, 35, 0.12), 0 1px 2px 0 rgba(82, 58, 35, 0.08);
+  --shadow-elevated: 0 10px 15px -3px rgba(82, 58, 35, 0.15), 0 4px 6px -2px rgba(82, 58, 35, 0.1);
+
+  --scrollbar-thumb: rgba(82, 58, 35, 0.2);
+  --scrollbar-thumb-hover: rgba(82, 58, 35, 0.32);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+/* ========================================================
+   炭火终端 / Ember Terminal — charcoal + green dark theme
+   ======================================================== */
+
+[data-theme="ember"] {
+  --bg-main: #111210;
+  --bg-sidebar: #0c0d0b;
+  --bg-card: #1b1d19;
+  --bg-card-hover: #282b24;
+  --bg-input: #1b1d19;
+  --bg-code: #000000;
+  --bg-overlay: rgba(0, 0, 0, 0.72);
+  --bg-user-bubble: #1b1d19;
+  --bg-assistant-bubble: transparent;
+
+  --bg-app: #111210;
+  --bg-surface: #1b1d19;
+  --bg-surface-hover: #282b24;
+  --bg-elevated: #22251e;
+
+  --border-default: #3a3f33;
+  --border-focus: #4f5544;
+  --border-light: #282b24;
+  --border-medium: #3a3f33;
+  --border-strong: #4f5544;
+
+  --text-primary: #ecf6df;
+  --text-secondary: #aab89a;
+  --text-tertiary: #7c886e;
+  --text-inverse: #111210;
+  --text-code: #ecf6df;
+
+  --accent: #9bcf5f;
+  --accent-hover: #b2dd80;
+  --accent-light: rgba(155, 207, 95, 0.16);
+  --accent-subtle: rgba(155, 207, 95, 0.16);
+  --accent-border: rgba(155, 207, 95, 0.32);
+
+  --success: #9bcf5f;
+  --success-subtle: rgba(155, 207, 95, 0.16);
+  --success-light: rgba(155, 207, 95, 0.16);
+  --success-border: rgba(155, 207, 95, 0.32);
+
+  --warning: #e0b341;
+  --warning-subtle: rgba(224, 179, 65, 0.16);
+  --warning-light: rgba(224, 179, 65, 0.16);
+  --warning-border: rgba(224, 179, 65, 0.3);
+
+  --error: #e57158;
+  --error-subtle: rgba(229, 113, 88, 0.16);
+  --error-light: rgba(229, 113, 88, 0.16);
+  --error-border: rgba(229, 113, 88, 0.32);
+
+  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+
+  --scrollbar-thumb: rgba(236, 246, 223, 0.18);
+  --scrollbar-thumb-hover: rgba(236, 246, 223, 0.3);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+/* ========================================================
+   午夜葡萄 / Midnight Grape — deep purple dark theme
+   ======================================================== */
+
+[data-theme="grape"] {
+  --bg-main: #160e20;
+  --bg-sidebar: #100a18;
+  --bg-card: #221631;
+  --bg-card-hover: #311f45;
+  --bg-input: #221631;
+  --bg-code: #0d0814;
+  --bg-overlay: rgba(0, 0, 0, 0.72);
+  --bg-user-bubble: #221631;
+  --bg-assistant-bubble: transparent;
+
+  --bg-app: #160e20;
+  --bg-surface: #221631;
+  --bg-surface-hover: #311f45;
+  --bg-elevated: #2a1c3c;
+
+  --border-default: #3e2a52;
+  --border-focus: #543a6c;
+  --border-light: #2e1f40;
+  --border-medium: #3e2a52;
+  --border-strong: #543a6c;
+
+  --text-primary: #faeeff;
+  --text-secondary: #c4b0d6;
+  --text-tertiary: #94809f;
+  --text-inverse: #160e20;
+  --text-code: #faeeff;
+
+  --accent: #c084fc;
+  --accent-hover: #d0a0ff;
+  --accent-light: rgba(192, 132, 252, 0.16);
+  --accent-subtle: rgba(192, 132, 252, 0.16);
+  --accent-border: rgba(192, 132, 252, 0.32);
+
+  --success: #6fd49b;
+  --success-subtle: rgba(111, 212, 155, 0.16);
+  --success-light: rgba(111, 212, 155, 0.16);
+  --success-border: rgba(111, 212, 155, 0.3);
+
+  --warning: #e6b455;
+  --warning-subtle: rgba(230, 180, 85, 0.16);
+  --warning-light: rgba(230, 180, 85, 0.16);
+  --warning-border: rgba(230, 180, 85, 0.3);
+
+  --error: #f06a8a;
+  --error-subtle: rgba(240, 106, 138, 0.16);
+  --error-light: rgba(240, 106, 138, 0.16);
+  --error-border: rgba(240, 106, 138, 0.32);
+
+  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+
+  --scrollbar-thumb: rgba(250, 238, 255, 0.18);
+  --scrollbar-thumb-hover: rgba(250, 238, 255, 0.3);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+/* ========================================================
+   暮光琥珀 / Twilight Amber — warm amber dark theme
+   ======================================================== */
+
+[data-theme="amber"] {
+  --bg-main: #18120e;
+  --bg-sidebar: #120d09;
+  --bg-card: #221a14;
+  --bg-card-hover: #2e231b;
+  --bg-input: #221a14;
+  --bg-code: #0e0a07;
+  --bg-overlay: rgba(0, 0, 0, 0.72);
+  --bg-user-bubble: #221a14;
+  --bg-assistant-bubble: transparent;
+
+  --bg-app: #18120e;
+  --bg-surface: #221a14;
+  --bg-surface-hover: #2e231b;
+  --bg-elevated: #2a2018;
+
+  --border-default: #46352b;
+  --border-focus: #5c473a;
+  --border-light: #342820;
+  --border-medium: #46352b;
+  --border-strong: #5c473a;
+
+  --text-primary: #fff4e6;
+  --text-secondary: #d3bca5;
+  --text-tertiary: #9f8771;
+  --text-inverse: #18120e;
+  --text-code: #fff4e6;
+
+  --accent: #f0a868;
+  --accent-hover: #ffbd82;
+  --accent-light: rgba(240, 168, 104, 0.16);
+  --accent-subtle: rgba(240, 168, 104, 0.16);
+  --accent-border: rgba(240, 168, 104, 0.32);
+
+  --success: #9ec96b;
+  --success-subtle: rgba(158, 201, 107, 0.16);
+  --success-light: rgba(158, 201, 107, 0.16);
+  --success-border: rgba(158, 201, 107, 0.3);
+
+  --warning: #e6b455;
+  --warning-subtle: rgba(230, 180, 85, 0.16);
+  --warning-light: rgba(230, 180, 85, 0.16);
+  --warning-border: rgba(230, 180, 85, 0.3);
+
+  --error: #e8745a;
+  --error-subtle: rgba(232, 116, 90, 0.16);
+  --error-light: rgba(232, 116, 90, 0.16);
+  --error-border: rgba(232, 116, 90, 0.32);
+
+  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+
+  --scrollbar-thumb: rgba(255, 244, 230, 0.18);
+  --scrollbar-thumb-hover: rgba(255, 244, 230, 0.3);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 button,
@@ -427,6 +683,48 @@ button.btn-reject:hover {
   box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 
+/* Masked secret fields: tighten the spacing between the password dots, which
+   the browser renders too far apart by default. Negative tracking pulls them
+   closer. Only applied while hidden so revealed plain text keeps normal spacing. */
+.input-text.is-masked {
+  letter-spacing: -0.15em;
+}
+
+/* Secret input with a reveal (eye) toggle on the right. */
+.secret-input {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.secret-input .input-text {
+  padding-right: 36px;
+}
+
+.secret-input-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.secret-input-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
 select.input-text {
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e6e6c' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
@@ -435,7 +733,7 @@ select.input-text {
   padding-right: 30px;
 }
 
-[data-theme="dark"] select.input-text option {
+[data-mode="dark"] select.input-text option {
   background: #1a1a2e;
   color: #fff;
 }
@@ -483,7 +781,7 @@ select.input-text {
   background: rgba(255, 255, 255, 0.3);
 }
 
-[data-theme="dark"] .sidebar-pill:hover:not(.active) {
+[data-mode="dark"] .sidebar-pill:hover:not(.active) {
   background: rgba(255, 255, 255, 0.06);
 }
 
@@ -1438,7 +1736,7 @@ select.input-text {
   resize: none;
   height: auto;
   min-height: 24px;
-  max-height: 240px;
+  max-height: 160px;
   outline: none;
   font-family: inherit;
   font-size: var(--dynamic-font-size, 14px);
@@ -1878,11 +2176,11 @@ select.input-text {
   box-shadow: var(--shadow-card);
 }
 
-[data-theme="dark"] .reasoning-chain {
+[data-mode="dark"] .reasoning-chain {
   background: rgba(255, 255, 255, 0.03);
 }
 
-[data-theme="dark"] .reasoning-chain-top {
+[data-mode="dark"] .reasoning-chain-top {
   background: var(--bg-card);
 }
 
@@ -2777,6 +3075,64 @@ select.input-text {
    Language Toggle
    ======================================================== */
 
+.theme-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.theme-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 78px;
+  padding: 8px 8px 7px;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s, color 0.14s, box-shadow 0.14s;
+}
+
+.theme-chip:hover {
+  border-color: var(--border-focus);
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.theme-chip.active {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.theme-chip-swatch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 34px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+}
+
+.theme-chip-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+}
+
+.theme-chip-label {
+  font-size: 0.7rem;
+  font-weight: 500;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+
 .lang-toggle {
   display: flex;
   gap: 2px;
@@ -3326,29 +3682,46 @@ select.input-text {
   z-index: 9999;
   background: var(--bg-card);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
-  box-shadow: var(--shadow-card);
-  padding: 4px;
-  min-width: 160px;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
+  padding: 5px;
+  min-width: 168px;
+  animation: context-menu-in 0.12s ease-out;
+  transform-origin: top left;
+}
+
+@keyframes context-menu-in {
+  from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
 .context-menu-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   width: 100%;
-  padding: 6px 10px;
+  padding: 7px 10px;
   border: none;
   background: transparent;
   color: var(--text-primary);
   font-size: 0.75rem;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: 7px;
   text-align: left;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.context-menu-item svg {
+  flex-shrink: 0;
+  opacity: 0.7;
 }
 
 .context-menu-item:hover {
   background: var(--bg-hover);
+}
+
+.context-menu-item:hover svg {
+  opacity: 1;
 }
 
 .context-menu-item-danger {
@@ -3778,37 +4151,37 @@ select.input-text {
   background: var(--error-subtle);
 }
 
-[data-theme="dark"] .history-mode-tag {
+[data-mode="dark"] .history-mode-tag {
   opacity: 0.7;
 }
 
-[data-theme="dark"] .bubble-timestamp {
+[data-mode="dark"] .bubble-timestamp {
   opacity: 0.5;
 }
 
-[data-theme="dark"] .mode-indicator {
+[data-mode="dark"] .mode-indicator {
   border-color: rgba(255, 255, 255, 0.15);
 }
 
-[data-theme="dark"] .mode-indicator.chat {
+[data-mode="dark"] .mode-indicator.chat {
   border-color: rgba(59, 130, 246, 0.3);
 }
 
-[data-theme="dark"] .mode-indicator.code {
+[data-mode="dark"] .mode-indicator.code {
   border-color: rgba(16, 185, 129, 0.3);
   background: rgba(16, 185, 129, 0.1);
 }
 
-[data-theme="dark"] .context-menu {
+[data-mode="dark"] .context-menu {
   border-color: rgba(255, 255, 255, 0.12);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
-[data-theme="dark"] .session-search-box {
+[data-mode="dark"] .session-search-box {
   border-color: rgba(255, 255, 255, 0.12);
 }
 
-[data-theme="dark"] .role-preset-action-btn {
+[data-mode="dark"] .role-preset-action-btn {
   background: var(--bg-subtle);
 }
 
