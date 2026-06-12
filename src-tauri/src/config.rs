@@ -7,11 +7,17 @@ pub struct ApiProfile {
     pub base_url: String,
     pub api_key: String,
     pub default_model: String,
+    #[serde(default = "default_wire_format")]
+    pub wire_format: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub provider: String,
+    #[serde(default = "default_wire_format")]
+    pub wire_format: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -48,12 +54,24 @@ pub struct AppConfig {
     pub show_advanced_reply_info: bool,
     #[serde(default = "default_command_timeout")]
     pub command_timeout: u64,
+    #[serde(default = "default_max_agent_loops")]
+    pub max_agent_loops: u32,
+    #[serde(default = "default_max_tool_calls_per_request")]
+    pub max_tool_calls_per_request: u32,
     #[serde(default = "default_preview_sandbox")]
     pub preview_sandbox: bool,
 }
 
 fn default_search_provider() -> String {
     "duckduckgo".to_string()
+}
+
+fn default_wire_format() -> String {
+    "openai".to_string()
+}
+
+fn default_provider() -> String {
+    "openai".to_string()
 }
 
 fn default_font_size() -> u32 {
@@ -70,6 +88,14 @@ fn default_thinking_level() -> String {
 
 fn default_command_timeout() -> u64 {
     300
+}
+
+fn default_max_agent_loops() -> u32 {
+    10
+}
+
+fn default_max_tool_calls_per_request() -> u32 {
+    30
 }
 
 fn default_preview_sandbox() -> bool {
@@ -99,6 +125,9 @@ pub struct ProviderPreset {
     pub base_url: String,
     pub default_model: String,
     pub needs_api_key: bool,
+    /// Wire protocol to use for requests: "openai" | "ollama" | "anthropic" | "gemini".
+    #[serde(default = "default_wire_format")]
+    pub wire_format: String,
 }
 
 pub fn get_presets() -> Vec<ProviderPreset> {
@@ -109,6 +138,7 @@ pub fn get_presets() -> Vec<ProviderPreset> {
             base_url: "https://api.deepseek.com/v1".into(),
             default_model: "deepseek-chat".into(),
             needs_api_key: true,
+            wire_format: "openai".into(),
         },
         ProviderPreset {
             name: "OpenAI".into(),
@@ -116,6 +146,23 @@ pub fn get_presets() -> Vec<ProviderPreset> {
             base_url: "https://api.openai.com/v1".into(),
             default_model: "gpt-4o".into(),
             needs_api_key: true,
+            wire_format: "openai".into(),
+        },
+        ProviderPreset {
+            name: "Anthropic (Claude)".into(),
+            provider: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            default_model: "claude-sonnet-4-20250514".into(),
+            needs_api_key: true,
+            wire_format: "anthropic".into(),
+        },
+        ProviderPreset {
+            name: "Gemini".into(),
+            provider: "gemini".into(),
+            base_url: "https://generativelanguage.googleapis.com".into(),
+            default_model: "gemini-2.0-flash".into(),
+            needs_api_key: true,
+            wire_format: "gemini".into(),
         },
         ProviderPreset {
             name: "Ollama Local".into(),
@@ -123,6 +170,7 @@ pub fn get_presets() -> Vec<ProviderPreset> {
             base_url: "http://localhost:11434".into(),
             default_model: String::new(),
             needs_api_key: false,
+            wire_format: "ollama".into(),
         },
     ]
 }
@@ -218,13 +266,14 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             provider: "openai".into(),
+            wire_format: "openai".into(),
             base_url: "https://api.deepseek.com/v1".into(),
             api_key: String::new(),
             model: "deepseek-chat".into(),
             temperature: 0.7,
             top_p: 1.0,
             max_tokens: None,
-            system_prompt: "You are a helpful AI assistant with access to local tools running on Windows. Help the user accomplish tasks by using the available tools when needed. Be careful, honest, and direct. If you are unsure or lack enough information, say so instead of guessing. Do not invent facts, files, command results, or tool output.\n\nIMPORTANT: The shell is Windows PowerShell. Do NOT use Unix/bash syntax (no ||, no &&, no /dev/null, no cat/grep/ls). Use PowerShell equivalents: use ; to chain commands, use Select-String instead of grep, use Get-ChildItem instead of ls, use Get-Content instead of cat. Redirect errors with 2>$null. Always use PowerShell-compatible commands.".into(),
+            system_prompt: "You are a capable AI assistant with access to local tools (running commands, reading and writing files, searching the web). Help the user accomplish their task by using the available tools when they are needed, and answering directly when they are not. Be careful, honest, and direct. Prefer concrete actions over lengthy explanations. If you are unsure or lack enough information, say so instead of guessing, and do not invent facts, files, command results, or tool output. When a task could be destructive or hard to undo, confirm with the user before proceeding.".into(),
             streaming: true,
             thinking_level: "medium".into(),
             context_limit: 50,
@@ -253,6 +302,8 @@ impl Default for AppConfig {
             font_family: "system".into(),
             show_advanced_reply_info: false,
             command_timeout: 300,
+            max_agent_loops: 10,
+            max_tool_calls_per_request: 30,
             preview_sandbox: true,
         }
     }

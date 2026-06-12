@@ -4,6 +4,7 @@ mod config;
 mod crypto;
 mod mcp;
 mod policy;
+mod provider;
 mod storage;
 mod tools;
 
@@ -107,10 +108,15 @@ async fn cancel_agent_session(request_id: String) -> Result<(), String> {
     agent::cancel_agent_request(&request_id).await
 }
 
-/// Fetch available models from an OpenAI-compatible API
+/// Fetch available models for the given wire format (OpenAI/Anthropic/Gemini).
 #[tauri::command]
-async fn fetch_models(base_url: String, api_key: String) -> Result<Vec<Value>, String> {
-    agent::fetch_models(&base_url, &api_key).await
+async fn fetch_models(
+    base_url: String,
+    api_key: String,
+    wire_format: Option<String>,
+) -> Result<Vec<Value>, String> {
+    let wire = provider::Wire::from_str(&wire_format.unwrap_or_default());
+    agent::fetch_models(wire, &base_url, &api_key).await
 }
 
 /// Get provider presets
@@ -132,6 +138,23 @@ fn save_config(config: AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn is_legacy_encrypted_key(key: &str) -> bool {
+    key.starts_with("enc:v1:") || key.starts_with("enc:v2:")
+}
+
+fn decrypt_key_for_load(key: &mut String) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+
+    let was_legacy = is_legacy_encrypted_key(key);
+    let before = key.clone();
+    let decrypted = decrypt(&before);
+    let migrated = was_legacy && decrypted != before && !decrypted.starts_with("enc:");
+    *key = decrypted;
+    migrated
+}
+
 /// Load config from local file, returns default if not found (decrypts API keys)
 #[tauri::command]
 fn load_config() -> Result<AppConfig, String> {
@@ -146,10 +169,14 @@ fn load_config() -> Result<AppConfig, String> {
 
     let json = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
     let mut config: AppConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    config.api_key = decrypt(&config.api_key);
-    config.search_api_key = decrypt(&config.search_api_key);
+    let mut needs_rekey = false;
+    needs_rekey = decrypt_key_for_load(&mut config.api_key) || needs_rekey;
+    needs_rekey = decrypt_key_for_load(&mut config.search_api_key) || needs_rekey;
     for profile in config.profiles.values_mut() {
-        profile.api_key = decrypt(&profile.api_key);
+        needs_rekey = decrypt_key_for_load(&mut profile.api_key) || needs_rekey;
+    }
+    if needs_rekey {
+        persist_config(&config)?;
     }
     Ok(config)
 }
@@ -377,6 +404,8 @@ fn set_active_profile(current_config: AppConfig, name: String) -> Result<AppConf
     config.base_url = profile.base_url;
     config.api_key = profile.api_key;
     config.model = profile.default_model;
+    config.wire_format = profile.wire_format;
+    config.provider = profile.provider;
     config.active_profile = Some(name);
     persist_config(&config)?;
     Ok(config)
@@ -449,7 +478,13 @@ async fn compact_history(
     current_config: AppConfig,
     messages: Vec<Value>,
 ) -> Result<String, String> {
-    let config = current_config;
+    // Run the summarizer through the provider adapter so /compact works on every
+    // wire format (OpenAI/Anthropic/Gemini/Ollama), not just OpenAI. Clone the
+    // config and override only the sampling knobs the summary needs.
+    let mut config = current_config;
+    config.temperature = 0.3;
+    config.max_tokens = Some(2048);
+    let wire = provider::Wire::from_config(&config);
     let client = reqwest::Client::new();
 
     let compact_prompt = "Please read the conversation history above and compress it into a comprehensive summary. Preserve all core achievements, file locations, pending tasks, code changes, and user configurations. Keep the output strictly as a structured summary that can serve as context for continuing the conversation. Do NOT add any commentary — just the summary.";
@@ -468,21 +503,12 @@ async fn compact_history(
         "content": compact_prompt
     }));
 
-    let request_body = json!({
-        "model": config.model,
-        "messages": compact_messages,
-        "temperature": 0.3,
-        "max_tokens": 2048,
-        "stream": false,
-    });
+    let url = provider::build_url(wire, &config.base_url, &config.model, false);
+    let body = provider::build_body(wire, &config.model, &compact_messages, &[], &config, false);
+    let builder = provider::apply_auth(wire, client.post(&url), &config.api_key);
 
-    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
-
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json")
-        .json(&request_body)
+    let response = builder
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("API request failed: {}", e))?;
@@ -493,15 +519,17 @@ async fn compact_history(
         return Err(format!("LLM API error ({}): {}", status, error_text));
     }
 
-    let body: Value = response
+    let resp_body: Value = response
         .json()
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
-    let summary = body["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("Failed to generate summary.")
-        .to_string();
+    let (summary, _reasoning, _calls, _pt, _ct) = provider::parse_full_response(wire, &resp_body);
+    let summary = if summary.trim().is_empty() {
+        "Failed to generate summary.".to_string()
+    } else {
+        summary
+    };
 
     Ok(summary)
 }
@@ -682,7 +710,11 @@ pub fn run() {
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        ..
+                    } = event
+                    {
                         if let Some(window) = tray.app_handle().get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.set_focus();

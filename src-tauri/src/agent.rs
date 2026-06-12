@@ -2,6 +2,7 @@ use crate::audit::AuditLogger;
 use crate::config::AppConfig;
 use crate::mcp::McpManager;
 use crate::policy::{check_approval, ApprovalLevel};
+use crate::provider;
 use crate::tools::{execute_tool_with_timeout, get_enabled_tool_definitions};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -65,9 +66,37 @@ fn parse_search_sources(tool_output: &str) -> Vec<Value> {
 }
 
 const MAX_LOOPS: u32 = 20;
+const ABSOLUTE_MAX_TOOL_CALLS_PER_REQUEST: u32 = 100;
 
 const SEARCH_FOLLOWUP_INSTRUCTION: &str = "You have just received web search results. You MUST base your answer on these search results. Cite the sources by mentioning the title and link when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing and what you could find. Do not make up information not present in the search results.";
 const GENERAL_ASSISTANT_INSTRUCTION: &str = "Assistant behavior: Be helpful, careful, and honest. Answer in the user's language when practical. If information is uncertain, outdated, or unavailable, say so clearly. Do not invent facts, citations, files, command results, or tool output. Ask for clarification when the user's goal is ambiguous and a wrong assumption would be risky.";
+
+fn configured_max_agent_loops(config: &AppConfig) -> u32 {
+    config.max_agent_loops.clamp(1, MAX_LOOPS)
+}
+
+fn configured_max_tool_calls(config: &AppConfig) -> u32 {
+    config
+        .max_tool_calls_per_request
+        .clamp(1, ABSOLUTE_MAX_TOOL_CALLS_PER_REQUEST)
+}
+
+/// OS-specific shell guidance, appended in code mode so the model uses the
+/// correct command syntax for the machine the app is actually running on.
+fn shell_guidance() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Shell environment: the execute_command tool runs in Windows PowerShell. Use PowerShell syntax, not Unix/bash. Chain commands with ; (not && or ||). Use cmdlets: Get-ChildItem (not ls), Get-Content (not cat), Select-String (not grep), Remove-Item (not rm). Redirect errors with 2>$null. Use Windows-style paths with backslashes."
+    } else if cfg!(target_os = "macos") {
+        "Shell environment: the execute_command tool runs in a POSIX shell (sh/bash/zsh) on macOS. Use standard Unix syntax: chain commands with && or ;, and use ls, cat, grep, rm, find. Use forward-slash paths."
+    } else {
+        "Shell environment: the execute_command tool runs in a POSIX shell (sh/bash) on Linux. Use standard Unix syntax: chain commands with && or ;, and use ls, cat, grep, rm, find. Use forward-slash paths."
+    }
+}
+
+fn append_shell_guidance(system_prompt: &mut String) {
+    system_prompt.push_str("\n\n");
+    system_prompt.push_str(shell_guidance());
+}
 
 static STEERING_QUEUE: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<Vec<String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(Vec::new())));
@@ -567,6 +596,461 @@ pub async fn start_agent_loop(
     result
 }
 
+/// Result of fully consuming one streaming model response.
+struct StreamOutcome {
+    content: String,
+    #[allow(dead_code)]
+    reasoning: String,
+    tool_calls: Vec<AccumulatedToolCall>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    ttft_ms: Option<u64>,
+    /// True if DSML markers were seen in the content (DeepSeek text-format tool
+    /// calls). When set, the raw (un-emitted) DSML text is in `dsml_buffer` and
+    /// the caller is responsible for parsing/stripping it.
+    dsml_buffering: bool,
+    dsml_buffer: String,
+}
+
+/// Consume a streaming HTTP response through the provider adapter, emitting
+/// content/reasoning chunks to the frontend and accumulating tool calls.
+///
+/// This is provider-agnostic: it splits the byte stream into lines (SSE or
+/// JSONL depending on `wire`), feeds each line to `provider::parse_stream_line`,
+/// and folds the normalized [`provider::StreamDelta`]s into an OpenAI-shaped
+/// outcome that the rest of the agent already understands.
+///
+/// `emit_drafting` controls whether `agent-tool-drafting` events are emitted as
+/// tool arguments stream in (used by the agent loop, not the chat-mode search).
+#[allow(clippy::too_many_arguments)]
+async fn consume_stream(
+    window: &Window,
+    request_id: &str,
+    wire: provider::Wire,
+    response: reqwest::Response,
+    request_start: Instant,
+    cancel_rx: &watch::Receiver<bool>,
+    emit_drafting: bool,
+    dsml_aware: bool,
+) -> Result<StreamOutcome, String> {
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut state = provider::StreamState::default();
+
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls: Vec<AccumulatedToolCall> = Vec::new();
+    let mut prompt_tokens: u64 = 0;
+    let mut completion_tokens: u64 = 0;
+    let mut ttft_ms: Option<u64> = None;
+    let mut first_content = false;
+    let mut done = false;
+    let mut dsml_buffering = false;
+    let mut dsml_buffer = String::new();
+
+    // Emit visible content, except: when DSML markers appear (DeepSeek text-format
+    // tool calls) we buffer the raw text instead of streaming it, so the caller can
+    // parse + strip the markers before showing anything.
+    let emit_content =
+        |text: &str, content: &mut String, dsml_buffering: &mut bool, dsml_buffer: &mut String| {
+            content.push_str(text);
+            if dsml_aware && (text.contains("DSML") || *dsml_buffering) {
+                *dsml_buffering = true;
+                dsml_buffer.push_str(text);
+            } else {
+                emit_stream_chunk(window, request_id, text);
+            }
+        };
+
+    while !done {
+        let chunk = match await_with_cancel(cancel_rx, stream.next()).await? {
+            Some(c) => c.map_err(|e| format!("Stream error: {}", e))?,
+            None => break,
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer[..pos].trim().to_string();
+            buffer = buffer[pos + 1..].to_string();
+            if line.is_empty() {
+                continue;
+            }
+
+            for delta in provider::parse_stream_line(wire, &line, &mut state) {
+                if let Some(text) = delta.content {
+                    if !first_content {
+                        first_content = true;
+                        ttft_ms = Some(request_start.elapsed().as_millis() as u64);
+                    }
+                    emit_content(&text, &mut content, &mut dsml_buffering, &mut dsml_buffer);
+                }
+                if let Some(think) = delta.reasoning {
+                    reasoning.push_str(&think);
+                    emit_reasoning_chunk(window, request_id, &think);
+                }
+                for tc in delta.tool_calls {
+                    apply_tool_call_delta(&mut tool_calls, tc, window, emit_drafting);
+                }
+                if let Some(pt) = delta.prompt_tokens {
+                    prompt_tokens = pt;
+                }
+                if let Some(ct) = delta.completion_tokens {
+                    completion_tokens = ct;
+                }
+                if delta.done {
+                    done = true;
+                }
+            }
+        }
+    }
+
+    // Flush any trailing buffered line (some servers omit a final newline).
+    let tail = buffer.trim();
+    if !tail.is_empty() {
+        for delta in provider::parse_stream_line(wire, tail, &mut state) {
+            if let Some(text) = delta.content {
+                emit_content(&text, &mut content, &mut dsml_buffering, &mut dsml_buffer);
+            }
+            if let Some(think) = delta.reasoning {
+                reasoning.push_str(&think);
+                emit_reasoning_chunk(window, request_id, &think);
+            }
+            for tc in delta.tool_calls {
+                apply_tool_call_delta(&mut tool_calls, tc, window, emit_drafting);
+            }
+            if let Some(pt) = delta.prompt_tokens {
+                prompt_tokens = pt;
+            }
+            if let Some(ct) = delta.completion_tokens {
+                completion_tokens = ct;
+            }
+        }
+    }
+
+    Ok(StreamOutcome {
+        content,
+        reasoning,
+        tool_calls,
+        prompt_tokens,
+        completion_tokens,
+        ttft_ms,
+        dsml_buffering,
+        dsml_buffer,
+    })
+}
+
+/// Build a canonical (OpenAI-shaped) assistant message carrying tool calls.
+/// Used to record the model's turn in history regardless of the wire format the
+/// response actually arrived in, so the next request can be re-encoded for any
+/// provider.
+fn assistant_message_with_tool_calls(content: &str, calls: &[AccumulatedToolCall]) -> Value {
+    let tool_calls_json: Vec<Value> = calls
+        .iter()
+        .map(|tc| {
+            json!({
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                }
+            })
+        })
+        .collect();
+    json!({
+        "role": "assistant",
+        "content": if content.is_empty() { Value::Null } else { json!(content) },
+        "tool_calls": tool_calls_json,
+    })
+}
+
+/// Fold a normalized tool-call delta into the accumulator. Streaming fragments
+/// arrive by `index`; id/name appear once, `arguments` is appended.
+fn apply_tool_call_delta(
+    acc: &mut Vec<AccumulatedToolCall>,
+    delta: provider::ToolCallDelta,
+    window: &Window,
+    emit_drafting: bool,
+) {
+    let idx = delta.index;
+    while acc.len() <= idx {
+        acc.push(AccumulatedToolCall {
+            id: String::new(),
+            name: String::new(),
+            arguments: String::new(),
+        });
+    }
+    if let Some(id) = delta.id {
+        if !id.is_empty() {
+            acc[idx].id = id;
+        }
+    }
+    if let Some(name) = delta.name {
+        if !name.is_empty() {
+            acc[idx].name = name;
+        }
+    }
+    if let Some(args) = delta.arguments {
+        acc[idx].arguments.push_str(&args);
+    }
+    if acc[idx].id.is_empty() {
+        acc[idx].id = format!("call_{}", idx);
+    }
+    if emit_drafting {
+        let _ = window.emit(
+            "agent-tool-drafting",
+            json!({
+                "index": idx,
+                "id": acc[idx].id,
+                "name": acc[idx].name,
+                "arguments": acc[idx].arguments,
+            }),
+        );
+    }
+}
+
+/// Run one model turn for chat mode: build the request via the provider adapter,
+/// stream the response through `consume_stream`, and (when DSML markers were
+/// seen) re-parse the buffered text into tool calls. Returns the stream outcome,
+/// with `tool_calls` already populated from either native tool calls or DSML.
+#[allow(clippy::too_many_arguments)]
+async fn chat_turn(
+    window: &Window,
+    request_id: &str,
+    client: &reqwest::Client,
+    wire: provider::Wire,
+    config: &AppConfig,
+    messages: &[Value],
+    tools: &[Value],
+    request_start: Instant,
+    cancel_rx: &watch::Receiver<bool>,
+) -> Result<StreamOutcome, String> {
+    let url = provider::build_url(wire, &config.base_url, &config.model, config.streaming);
+    let body = provider::build_body(
+        wire,
+        &config.model,
+        messages,
+        tools,
+        config,
+        config.streaming,
+    );
+    let mut builder = client.post(&url);
+    builder = provider::apply_auth(wire, builder, &config.api_key);
+
+    ensure_not_cancelled(cancel_rx)?;
+    let response = await_with_cancel(cancel_rx, builder.json(&body).send())
+        .await?
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        let _ = window.emit("agent-error", &error_text);
+        return Err(format!("API error ({}): {}", status, error_text));
+    }
+
+    // DSML is a DeepSeek text-format tool-call convention only relevant on the
+    // OpenAI wire; other providers express tool calls natively.
+    let dsml_aware = matches!(wire, provider::Wire::OpenAI);
+
+    if config.streaming {
+        let mut outcome = consume_stream(
+            window,
+            request_id,
+            wire,
+            response,
+            request_start,
+            cancel_rx,
+            false,
+            dsml_aware,
+        )
+        .await?;
+
+        // If the model emitted DSML text tool calls instead of native ones,
+        // parse them out of the buffered content now.
+        if outcome.tool_calls.is_empty() && outcome.dsml_buffering {
+            let dsml_calls = parse_dsml_tool_calls(&outcome.content);
+            if !dsml_calls.is_empty() {
+                let clean = strip_dsml_tags(&outcome.content);
+                let buffer_clean = strip_dsml_tags(&outcome.dsml_buffer);
+                if !buffer_clean.trim().is_empty() {
+                    emit_stream_chunk(window, request_id, &buffer_clean);
+                }
+                outcome.tool_calls = dsml_calls;
+                outcome.content = clean;
+            } else {
+                let clean = strip_dsml_tags(&outcome.content);
+                if !clean.trim().is_empty() {
+                    emit_stream_chunk(window, request_id, &clean);
+                }
+                outcome.content = clean;
+            }
+        }
+        Ok(outcome)
+    } else {
+        let body: Value = await_with_cancel(cancel_rx, response.json())
+            .await?
+            .map_err(|e| format!("Parse error: {}", e))?;
+        let (mut content, reasoning, mut tool_calls, prompt_tokens, completion_tokens) =
+            provider::parse_full_response(wire, &body);
+
+        // DSML in non-streaming OpenAI content.
+        if dsml_aware && tool_calls.is_empty() && content.contains("DSML") {
+            let dsml_calls = parse_dsml_tool_calls(&content);
+            if !dsml_calls.is_empty() {
+                content = strip_dsml_tags(&content);
+                tool_calls = dsml_calls;
+            }
+        }
+
+        if !reasoning.is_empty() {
+            emit_reasoning_chunk(window, request_id, &reasoning);
+        }
+        // Only emit content immediately when there are no tool calls to run;
+        // otherwise the caller runs the search and emits the follow-up answer.
+        if tool_calls.is_empty() && !content.is_empty() {
+            emit_stream_chunk(window, request_id, &content);
+        }
+
+        Ok(StreamOutcome {
+            content,
+            reasoning,
+            tool_calls,
+            prompt_tokens,
+            completion_tokens,
+            ttft_ms: Some(request_start.elapsed().as_millis() as u64),
+            dsml_buffering: false,
+            dsml_buffer: String::new(),
+        })
+    }
+}
+
+/// Execute web-search tool calls produced by a chat turn, emitting search-status
+/// events, and append the assistant + tool-result messages to `messages` so the
+/// next turn can answer from the observations. Returns false only if nothing was
+/// appended for the model to inspect.
+async fn run_chat_search_tools(
+    window: &Window,
+    config: &AppConfig,
+    messages: &mut Vec<Value>,
+    assistant_content: &str,
+    tool_calls: &[AccumulatedToolCall],
+    tool_call_count: &mut u32,
+    cancel_rx: &watch::Receiver<bool>,
+) -> Result<bool, String> {
+    let mut tool_results: Vec<Value> = Vec::new();
+    let mut ran_search = false;
+    let max_tool_calls = configured_max_tool_calls(config);
+
+    for tc in tool_calls {
+        if *tool_call_count >= max_tool_calls {
+            let message = format!(
+                "Error: Per-request tool call limit reached ({}). Ask the user before continuing.",
+                max_tool_calls
+            );
+            let _ = window.emit(
+                "agent-tool-blocked",
+                json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                    "reason": message,
+                }),
+            );
+            tool_results.push(json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": message,
+            }));
+            continue;
+        }
+        *tool_call_count += 1;
+
+        if tc.name != "web_search" {
+            tool_results.push(json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": format!("Error: Tool '{}' is not available. Only web_search is supported. Please answer based on the information you already have.", tc.name)
+            }));
+            continue;
+        }
+        ran_search = true;
+        let query_display = serde_json::from_str::<Value>(&tc.arguments)
+            .ok()
+            .and_then(|a| a["query"].as_str().map(String::from))
+            .unwrap_or_else(|| tc.name.clone());
+        let _ = window.emit(
+            "agent-search-status",
+            json!({ "type": "searching", "query": query_display }),
+        );
+        let search_start = std::time::Instant::now();
+        let tool_output = await_with_cancel(
+            cancel_rx,
+            execute_tool_with_timeout(
+                &tc.name,
+                &tc.arguments,
+                &config.default_work_dir,
+                &config.search_provider,
+                &config.search_api_key,
+                config.command_timeout,
+            ),
+        )
+        .await?;
+        let elapsed = search_start.elapsed().as_secs_f64();
+        if tool_output.starts_with("Error:") {
+            let _ = window.emit(
+                "agent-search-status",
+                json!({
+                    "type": "error",
+                    "query": query_display,
+                    "message": tool_output.clone(),
+                    "duration": elapsed,
+                    "provider": config.search_provider,
+                }),
+            );
+        } else {
+            let result_count = tool_output
+                .lines()
+                .filter(|l| l.starts_with("Title:"))
+                .count();
+            let preview = if tool_output.len() > 500 {
+                &tool_output[..500]
+            } else {
+                &tool_output
+            };
+            let sources = parse_search_sources(&tool_output);
+            let _ = window.emit(
+                "agent-search-status",
+                json!({
+                    "type": "results",
+                    "query": query_display,
+                    "results": preview,
+                    "duration": elapsed,
+                    "resultCount": result_count,
+                    "provider": config.search_provider,
+                    "sources": sources,
+                }),
+            );
+        }
+        tool_results.push(json!({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": tool_output
+        }));
+    }
+
+    messages.push(assistant_message_with_tool_calls(
+        assistant_content,
+        tool_calls,
+    ));
+    let has_observations = !tool_results.is_empty();
+    for tr in tool_results {
+        messages.push(tr);
+    }
+    add_search_instruction(messages);
+    Ok(ran_search || has_observations)
+}
+
 async fn run_chat_mode(
     window: Window,
     request_id: String,
@@ -579,8 +1063,13 @@ async fn run_chat_mode(
     cancel_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     ensure_not_cancelled(&cancel_rx)?;
+    // Chat mode has no command/file tools, so any shell- or local-tool-specific
+    // instructions in the configured prompt (including legacy defaults that
+    // hardcoded PowerShell) are irrelevant here and can mislead the model.
+    // Fall back to a clean general prompt in that case.
     let mut chat_system_prompt = if config.system_prompt.contains("PowerShell")
-        || config.system_prompt.contains("Windows PowerShell")
+        || config.system_prompt.contains("execute_command")
+        || config.system_prompt.contains("local tools")
     {
         "You are a helpful AI assistant. Be careful, honest, and practical. Answer in the user's language when practical. If you are unsure or lack enough information, say so instead of guessing. When using web search, ground the answer in the search results and cite relevant sources.".to_string()
     } else {
@@ -589,7 +1078,8 @@ async fn run_chat_mode(
     append_general_assistant_instruction(&mut chat_system_prompt);
     append_thinking_instruction(&mut chat_system_prompt, &config.thinking_level);
     let has_web_search = config.tools_enabled.contains(&"web_search".to_string());
-    let is_ollama = config.provider == "ollama";
+    let wire = provider::Wire::from_config(&config);
+    let is_ollama = wire.is_ollama();
 
     let mut messages: Vec<Value> = vec![json!({
         "role": "system",
@@ -613,6 +1103,9 @@ async fn run_chat_mode(
         &image_attachments,
         is_ollama,
     ));
+
+    let max_chat_turns = configured_max_agent_loops(&config).min(3);
+    let mut tool_call_count: u32 = 0;
 
     // Force search mode: execute search before sending to model
     if search_mode == "force" && has_web_search && !is_ollama {
@@ -639,6 +1132,7 @@ async fn run_chat_mode(
             ),
         )
         .await?;
+        tool_call_count += 1;
         let search_elapsed = search_start.elapsed().as_secs_f64();
 
         if tool_output.starts_with("Error:") {
@@ -652,13 +1146,10 @@ async fn run_chat_mode(
                     "provider": config.search_provider,
                 }),
             );
-            emit_stream_chunk(
-                &window,
-                &request_id,
-                format!("\nSearch failed: {}\n", tool_output),
-            );
-            emit_stream_done(&window, &request_id, json!({ "success": false }));
-            return Err(format!("Force search failed: {}", tool_output));
+            messages.push(json!({
+                "role": "system",
+                "content": format!("A forced web search for '{}' failed with this tool observation:\n\n{}\n\nDo not invent search results. Answer using the information already available, and clearly say that the forced search failed if it affects the answer.", search_query, tool_output)
+            }));
         } else {
             let result_count = tool_output
                 .lines()
@@ -692,749 +1183,73 @@ async fn run_chat_mode(
         }
     }
 
-    let web_search_tool = json!({
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web for current information. Use this when you need up-to-date information that may not be in your training data.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query"
-                    }
-                },
-                "required": ["query"]
+    // Build the tool list once. Only web_search is exposed in chat mode, and not
+    // in force mode (the search already ran above) nor for Ollama (no tool calls).
+    let chat_tools: Vec<Value> = if has_web_search && !is_ollama && search_mode != "force" {
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web for current information. Use this when you need up-to-date information that may not be in your training data.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "The search query" }
+                    },
+                    "required": ["query"]
+                }
             }
-        }
-    });
+        })]
+    } else {
+        Vec::new()
+    };
 
     let request_start = Instant::now();
+    let wire = provider::Wire::from_config(&config);
 
-    let mut request_body = if is_ollama {
-        json!({
-            "model": config.model,
-            "messages": messages,
-            "stream": config.streaming,
-            "options": {
-                "temperature": config.temperature,
-                "top_p": config.top_p,
-            }
-        })
-    } else {
-        json!({
-            "model": config.model,
-            "messages": messages,
-            "stream": config.streaming,
-            "stream_options": {
-                "include_usage": true
-            }
-        })
-    };
+    // Chat mode runs at most a few turns: an initial answer, then up to two
+    // search → answer follow-ups when the model requests web_search. Tool calls
+    // (native or DSML) are surfaced uniformly via `chat_turn`.
+    let mut turn: u32 = 0;
 
-    if let Some(max_tokens) = config.max_tokens {
-        if is_ollama {
-            request_body["options"]["num_predict"] = json!(max_tokens);
+    loop {
+        turn += 1;
+        ensure_not_cancelled(&cancel_rx)?;
+
+        // Only offer tools on turns that may still search; the final turn answers.
+        let tools_for_turn: &[Value] = if turn < max_chat_turns && has_web_search {
+            &chat_tools
         } else {
-            request_body["max_tokens"] = json!(max_tokens);
-        }
-    }
-    if !is_ollama {
-        request_body["temperature"] = json!(config.temperature);
-        request_body["top_p"] = json!(config.top_p);
-    }
-    apply_reasoning_effort(&mut request_body, &config, is_ollama);
-
-    // In force mode, search was already executed and results injected;
-    // don't expose web_search tool to avoid duplicate searches.
-    // In auto mode, let the model decide whether to search.
-    if has_web_search && !is_ollama && search_mode != "force" {
-        request_body["tools"] = json!([web_search_tool]);
-        request_body["tool_choice"] = json!("auto");
-    }
-
-    let url = if is_ollama {
-        format!("{}/api/chat", config.base_url.trim_end_matches('/'))
-    } else {
-        format!("{}/chat/completions", config.base_url.trim_end_matches('/'))
-    };
-
-    let mut request_builder = client.post(&url).header("Content-Type", "application/json");
-
-    if !is_ollama && !config.api_key.is_empty() {
-        request_builder =
-            request_builder.header("Authorization", format!("Bearer {}", config.api_key));
-    }
-
-    ensure_not_cancelled(&cancel_rx)?;
-    let response = await_with_cancel(&cancel_rx, request_builder.json(&request_body).send())
-        .await?
-        .map_err(|e| format!("Request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-        let _ = window.emit("agent-error", &error_text);
-        return Err(format!("API error ({}): {}", status, error_text));
-    }
-
-    if !config.streaming {
-        let body: Value = await_with_cancel(&cancel_rx, response.json())
-            .await?
-            .map_err(|e| format!("Parse error: {}", e))?;
-        let content = if is_ollama {
-            body["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string()
-        } else {
-            body["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string()
+            &[]
         };
 
-        if has_web_search && !is_ollama {
-            if let Some(tool_calls) = body["choices"][0]["message"]["tool_calls"].as_array() {
-                if !tool_calls.is_empty() {
-                    let tool_call = &tool_calls[0];
-                    let tool_call_id = tool_call["id"].as_str().unwrap_or("").to_string();
-                    let tool_name = tool_call["function"]["name"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
-                    let tool_args = tool_call["function"]["arguments"]
-                        .as_str()
-                        .unwrap_or("{}")
-                        .to_string();
-
-                    let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tool_args)
-                    {
-                        args["query"].as_str().unwrap_or(&tool_name).to_string()
-                    } else {
-                        tool_name.clone()
-                    };
-                    let _ = window.emit(
-                        "agent-search-status",
-                        json!({
-                            "type": "searching",
-                            "query": query_display,
-                        }),
-                    );
-                    let search_start = std::time::Instant::now();
-
-                    let tool_output = await_with_cancel(
-                        &cancel_rx,
-                        execute_tool_with_timeout(
-                            &tool_name,
-                            &tool_args,
-                            &config.default_work_dir,
-                            &config.search_provider,
-                            &config.search_api_key,
-                            config.command_timeout,
-                        ),
-                    )
-                    .await?;
-
-                    let search_elapsed = search_start.elapsed().as_secs_f64();
-                    if tool_output.starts_with("Error:") {
-                        let _ = window.emit(
-                            "agent-search-status",
-                            json!({
-                                "type": "error",
-                                "query": query_display,
-                                "message": tool_output,
-                                "duration": search_elapsed,
-                                "provider": config.search_provider,
-                            }),
-                        );
-                    } else {
-                        let result_count = tool_output
-                            .lines()
-                            .filter(|l| l.starts_with("Title:"))
-                            .count();
-                        let preview = if tool_output.len() > 500 {
-                            &tool_output[..500]
-                        } else {
-                            &tool_output.clone()
-                        };
-                        let sources = parse_search_sources(&tool_output);
-                        let _ = window.emit(
-                            "agent-search-status",
-                            json!({
-                                "type": "results",
-                                "query": query_display,
-                                "results": preview,
-                                "duration": search_elapsed,
-                                "resultCount": result_count,
-                                "provider": config.search_provider,
-                                "sources": sources,
-                            }),
-                        );
-                    }
-
-                    messages.push(json!({
-                        "role": "assistant",
-                        "content": null,
-                        "tool_calls": tool_calls
-                    }));
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": tool_output
-                    }));
-                    add_search_instruction(&mut messages);
-
-                    let mut followup_body = json!({
-                        "model": config.model,
-                        "messages": messages,
-                        "stream": false,
-                    });
-                    if let Some(max_tokens) = config.max_tokens {
-                        followup_body["max_tokens"] = json!(max_tokens);
-                    }
-                    followup_body["temperature"] = json!(config.temperature);
-                    followup_body["top_p"] = json!(config.top_p);
-                    apply_reasoning_effort(&mut followup_body, &config, false);
-
-                    let followup_response = await_with_cancel(
-                        &cancel_rx,
-                        client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .header("Authorization", format!("Bearer {}", config.api_key))
-                            .json(&followup_body)
-                            .send(),
-                    )
-                    .await?
-                    .map_err(|e| format!("Follow-up request failed: {}", e))?;
-
-                    if followup_response.status().is_success() {
-                        let followup_body: Value =
-                            await_with_cancel(&cancel_rx, followup_response.json())
-                                .await?
-                                .map_err(|e| format!("Parse error: {}", e))?;
-                        let final_content = followup_body["choices"][0]["message"]["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        emit_stream_chunk(&window, &request_id, &final_content);
-                        emit_stream_done(
-                            &window,
-                            &request_id,
-                            json!({
-                                "content": final_content,
-                                "loopCount": 2,
-                                "ttftMs": request_start.elapsed().as_millis() as u64,
-                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                            }),
-                        );
-                    } else {
-                        emit_stream_done(
-                            &window,
-                            &request_id,
-                            json!({
-                                "content": content,
-                                "loopCount": 1,
-                                "ttftMs": request_start.elapsed().as_millis() as u64,
-                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                            }),
-                        );
-                    }
-                    emit_agent_complete(&window, &request_id, "success");
-                    return Ok(());
-                }
-            }
-
-            // DSML-format tool calls (DeepSeek models)
-            if content.contains("DSML") {
-                let dsml_calls = parse_dsml_tool_calls(&content);
-                if !dsml_calls.is_empty() {
-                    eprintln!(
-                        "[agent] Non-streaming: detected {} DSML tool call(s)",
-                        dsml_calls.len()
-                    );
-                    let clean_content = strip_dsml_tags(&content);
-
-                    for tc in &dsml_calls {
-                        let query_display =
-                            if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
-                                args["query"].as_str().unwrap_or(&tc.name).to_string()
-                            } else {
-                                tc.name.clone()
-                            };
-                        let _ = window.emit(
-                            "agent-search-status",
-                            json!({
-                                "type": "searching",
-                                "query": query_display,
-                            }),
-                        );
-                        let search_start = std::time::Instant::now();
-
-                        let tool_output = await_with_cancel(
-                            &cancel_rx,
-                            execute_tool_with_timeout(
-                                &tc.name,
-                                &tc.arguments,
-                                &config.default_work_dir,
-                                &config.search_provider,
-                                &config.search_api_key,
-                                config.command_timeout,
-                            ),
-                        )
-                        .await?;
-
-                        let search_elapsed = search_start.elapsed().as_secs_f64();
-                        if tool_output.starts_with("Error:") {
-                            let _ = window.emit(
-                                "agent-search-status",
-                                json!({
-                                    "type": "error",
-                                    "query": query_display,
-                                    "message": tool_output.clone(),
-                                    "duration": search_elapsed,
-                                    "provider": config.search_provider,
-                                }),
-                            );
-                        } else {
-                            let result_count = tool_output
-                                .lines()
-                                .filter(|l| l.starts_with("Title:"))
-                                .count();
-                            let preview = if tool_output.len() > 500 {
-                                &tool_output[..500]
-                            } else {
-                                &tool_output.clone()
-                            };
-                            let sources = parse_search_sources(&tool_output);
-                            let _ = window.emit(
-                                "agent-search-status",
-                                json!({
-                                    "type": "results",
-                                    "query": query_display,
-                                    "results": preview,
-                                    "duration": search_elapsed,
-                                    "resultCount": result_count,
-                                    "provider": config.search_provider,
-                                    "sources": sources,
-                                }),
-                            );
-                        }
-
-                        messages.push(json!({
-                        "role": "assistant",
-                        "content": if clean_content.is_empty() { Value::Null } else { json!(clean_content) },
-                        "tool_calls": [{ "id": tc.id, "type": "function", "function": { "name": tc.name, "arguments": tc.arguments } }]
-                    }));
-                        messages.push(json!({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": tool_output
-                        }));
-                    }
-                    add_search_instruction(&mut messages);
-
-                    let mut followup_body = json!({
-                        "model": config.model,
-                        "messages": messages,
-                        "stream": false,
-                    });
-                    if let Some(max_tokens) = config.max_tokens {
-                        followup_body["max_tokens"] = json!(max_tokens);
-                    }
-                    followup_body["temperature"] = json!(config.temperature);
-                    followup_body["top_p"] = json!(config.top_p);
-                    apply_reasoning_effort(&mut followup_body, &config, false);
-
-                    let followup_response = await_with_cancel(
-                        &cancel_rx,
-                        client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .header("Authorization", format!("Bearer {}", config.api_key))
-                            .json(&followup_body)
-                            .send(),
-                    )
-                    .await?
-                    .map_err(|e| format!("Follow-up request failed: {}", e))?;
-
-                    if followup_response.status().is_success() {
-                        let fb: Value = await_with_cancel(&cancel_rx, followup_response.json())
-                            .await?
-                            .map_err(|e| format!("Parse error: {}", e))?;
-                        let final_content = fb["choices"][0]["message"]["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        emit_stream_chunk(&window, &request_id, &final_content);
-                        emit_stream_done(
-                            &window,
-                            &request_id,
-                            json!({
-                                "content": final_content,
-                                "loopCount": 2,
-                                "ttftMs": request_start.elapsed().as_millis() as u64,
-                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                            }),
-                        );
-                    } else {
-                        emit_stream_done(
-                            &window,
-                            &request_id,
-                            json!({
-                                "content": clean_content,
-                                "loopCount": 1,
-                                "ttftMs": request_start.elapsed().as_millis() as u64,
-                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                            }),
-                        );
-                    }
-                    emit_agent_complete(&window, &request_id, "success");
-                    return Ok(());
-                }
-            }
-        }
-
-        emit_stream_done(
+        let outcome = chat_turn(
             &window,
             &request_id,
-            json!({
-                "content": content,
-                "loopCount": 1,
-                "ttftMs": request_start.elapsed().as_millis() as u64,
-                "responseTimeMs": request_start.elapsed().as_millis() as u64,
-            }),
-        );
-        emit_agent_complete(&window, &request_id, "success");
-        return Ok(());
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut assistant_content = String::new();
-    let mut first_content_received = false;
-    let mut ttft_ms: Option<u64> = None;
-    let mut accumulated_tool_calls: Vec<AccumulatedToolCall> = Vec::new();
-    let mut dsml_buffering = false;
-    let mut dsml_buffer = String::new();
-
-    while let Some(chunk) = await_with_cancel(&cancel_rx, stream.next()).await? {
-        let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
-        let text = String::from_utf8_lossy(&chunk);
-
-        if is_ollama {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let json_val: Value = match serde_json::from_str(line) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(content) = json_val["message"]["content"].as_str() {
-                    if !content.is_empty() {
-                        if !first_content_received {
-                            first_content_received = true;
-                            ttft_ms = Some(request_start.elapsed().as_millis() as u64);
-                        }
-                        assistant_content.push_str(content);
-                        if content.contains("DSML") || dsml_buffering {
-                            eprintln!(
-                                "[agent] DSML buffering: chunk contains DSML={}",
-                                content.contains("DSML")
-                            );
-                            dsml_buffering = true;
-                            dsml_buffer.push_str(content);
-                        } else {
-                            emit_stream_chunk(&window, &request_id, content);
-                        }
-                    }
-                }
-                if json_val["done"].as_bool() == Some(true) {
-                    if has_web_search && !is_ollama {
-                        if let Some(tool_calls) = json_val["message"]["tool_calls"].as_array() {
-                            if !tool_calls.is_empty() {
-                                for tc in tool_calls {
-                                    let tc_id = tc["id"].as_str().unwrap_or("").to_string();
-                                    let tc_name =
-                                        tc["function"]["name"].as_str().unwrap_or("").to_string();
-                                    let tc_args = tc["function"]["arguments"]
-                                        .as_str()
-                                        .unwrap_or("{}")
-                                        .to_string();
-                                    accumulated_tool_calls.push(AccumulatedToolCall {
-                                        id: tc_id,
-                                        name: tc_name,
-                                        arguments: tc_args,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-        } else {
-            for line in text.lines() {
-                let line = line.trim();
-                if !line.starts_with("data: ") {
-                    continue;
-                }
-                let data = &line[6..];
-                if data == "[DONE]" {
-                    break;
-                }
-                let json_val: Value = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(content) = json_val["choices"][0]["delta"]["content"].as_str() {
-                    if !content.is_empty() {
-                        if !first_content_received {
-                            first_content_received = true;
-                            ttft_ms = Some(request_start.elapsed().as_millis() as u64);
-                        }
-                        assistant_content.push_str(content);
-                        if content.contains("DSML") || dsml_buffering {
-                            dsml_buffering = true;
-                            dsml_buffer.push_str(content);
-                        } else {
-                            emit_stream_chunk(&window, &request_id, content);
-                        }
-                    }
-                }
-                if has_web_search {
-                    if let Some(delta_tool_calls) =
-                        json_val["choices"][0]["delta"]["tool_calls"].as_array()
-                    {
-                        for dtc in delta_tool_calls {
-                            let idx = dtc["index"].as_u64().unwrap_or(0) as usize;
-                            while accumulated_tool_calls.len() <= idx {
-                                accumulated_tool_calls.push(AccumulatedToolCall {
-                                    id: String::new(),
-                                    name: String::new(),
-                                    arguments: String::new(),
-                                });
-                            }
-                            if let Some(id) = dtc["id"].as_str() {
-                                accumulated_tool_calls[idx].id = id.to_string();
-                            }
-                            if let Some(name) = dtc["function"]["name"].as_str() {
-                                accumulated_tool_calls[idx].name = name.to_string();
-                            }
-                            if let Some(args) = dtc["function"]["arguments"].as_str() {
-                                accumulated_tool_calls[idx].arguments.push_str(args);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Detect DSML-format tool calls (DeepSeek models)
-    if accumulated_tool_calls.is_empty() && dsml_buffering {
-        eprintln!(
-            "[agent] DSML buffering ended, parsing tool calls from {} bytes",
-            assistant_content.len()
-        );
-        let dsml_calls = parse_dsml_tool_calls(&assistant_content);
-        if !dsml_calls.is_empty() {
-            eprintln!("[agent] Detected {} DSML tool call(s)", dsml_calls.len());
-            let clean_content = strip_dsml_tags(&assistant_content);
-            let buffer_clean = strip_dsml_tags(&dsml_buffer);
-            if !buffer_clean.trim().is_empty() {
-                emit_stream_chunk(&window, &request_id, &buffer_clean);
-            }
-            if has_web_search {
-                accumulated_tool_calls = dsml_calls;
-            }
-            assistant_content = clean_content;
-        } else {
-            eprintln!("[agent] DSML detected but no tool calls parsed, sending cleaned content");
-            let clean_content = strip_dsml_tags(&assistant_content);
-            if !clean_content.trim().is_empty() {
-                emit_stream_chunk(&window, &request_id, &clean_content);
-            }
-            assistant_content = clean_content;
-        }
-    }
-
-    if has_web_search && !accumulated_tool_calls.is_empty() {
-        let mut tool_results: Vec<Value> = Vec::new();
-        for tc in &accumulated_tool_calls {
-            if tc.name != "web_search" {
-                eprintln!("[agent] Skipping unsupported DSML tool: {}", tc.name);
-                tool_results.push(json!({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": format!("Error: Tool '{}' is not available. Only web_search is supported. Please answer based on the information you already have.", tc.name)
-                }));
-                continue;
-            }
-            let query_display = if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
-                args["query"].as_str().unwrap_or("").to_string()
-            } else {
-                tc.name.clone()
-            };
-            let _ = window.emit(
-                "agent-search-status",
-                json!({
-                    "type": "searching",
-                    "query": query_display,
-                }),
-            );
-            let search_start = std::time::Instant::now();
-            let tool_output = await_with_cancel(
-                &cancel_rx,
-                execute_tool_with_timeout(
-                    &tc.name,
-                    &tc.arguments,
-                    &config.default_work_dir,
-                    &config.search_provider,
-                    &config.search_api_key,
-                    config.command_timeout,
-                ),
-            )
-            .await?;
-            let search_elapsed = search_start.elapsed();
-            eprintln!(
-                "[agent] Search '{}' completed in {:.1}s, result length: {}",
-                query_display,
-                search_elapsed.as_secs_f64(),
-                tool_output.len()
-            );
-            if tool_output.starts_with("Error:") {
-                let _ = window.emit(
-                    "agent-search-status",
-                    json!({
-                        "type": "error",
-                        "query": query_display,
-                        "message": tool_output,
-                        "duration": search_elapsed.as_secs_f64(),
-                    }),
-                );
-            } else {
-                let result_count = tool_output
-                    .lines()
-                    .filter(|l| l.starts_with("Title:"))
-                    .count();
-                let preview = if tool_output.len() > 500 {
-                    &tool_output[..500]
-                } else {
-                    &tool_output.clone()
-                };
-                let sources = parse_search_sources(&tool_output);
-                let _ = window.emit(
-                    "agent-search-status",
-                    json!({
-                        "type": "results",
-                        "query": query_display,
-                        "results": preview,
-                        "duration": search_elapsed.as_secs_f64(),
-                        "resultCount": result_count,
-                        "provider": config.search_provider,
-                        "sources": sources,
-                    }),
-                );
-            }
-            tool_results.push(json!({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": tool_output
-            }));
-        }
-
-        messages.push(json!({
-            "role": "assistant",
-            "content": if assistant_content.is_empty() { Value::Null } else { json!(assistant_content) },
-            "tool_calls": accumulated_tool_calls.iter().map(|tc| {
-                json!({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": tc.arguments
-                    }
-                })
-            }).collect::<Vec<_>>()
-        }));
-        for tr in &tool_results {
-            messages.push(tr.clone());
-        }
-        add_search_instruction(&mut messages);
-
-        let mut followup_body = json!({
-            "model": config.model,
-            "messages": messages,
-            "stream": true,
-            "stream_options": {
-                "include_usage": true
-            }
-        });
-        if let Some(max_tokens) = config.max_tokens {
-            followup_body["max_tokens"] = json!(max_tokens);
-        }
-        followup_body["temperature"] = json!(config.temperature);
-        followup_body["top_p"] = json!(config.top_p);
-        apply_reasoning_effort(&mut followup_body, &config, false);
-
-        let followup_response = match await_with_cancel(
+            &client,
+            wire,
+            &config,
+            &messages,
+            tools_for_turn,
+            request_start,
             &cancel_rx,
-            client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", config.api_key))
-                .json(&followup_body)
-                .send(),
         )
-        .await?
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                emit_stream_chunk(
-                    &window,
-                    &request_id,
-                    format!("\nFollow-up request failed: {}\n", e),
-                );
-                emit_stream_done(
-                    &window,
-                    &request_id,
-                    json!({
-                        "content": format!("🔍 Search completed but follow-up failed: {}", e),
-                        "loopCount": 1,
-                        "ttftMs": ttft_ms.unwrap_or(0),
-                        "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                    }),
-                );
-                emit_agent_complete(&window, &request_id, "success");
-                return Ok(());
-            }
-        };
+        .await?;
 
-        if !followup_response.status().is_success() {
-            let status = followup_response.status();
-            let error_text = await_with_cancel(&cancel_rx, followup_response.text())
-                .await?
-                .unwrap_or_default();
-            emit_stream_chunk(
-                &window,
-                &request_id,
-                format!(
-                    "\nFollow-up API error ({}): {}\n",
-                    status,
-                    &error_text[..error_text.len().min(300)]
-                ),
-            );
+        let last_content = outcome.content.clone();
+
+        let runnable = has_web_search
+            && !outcome.tool_calls.is_empty()
+            && outcome.tool_calls.iter().any(|tc| tc.name == "web_search");
+
+        if !runnable || turn >= max_chat_turns {
             emit_stream_done(
                 &window,
                 &request_id,
                 json!({
-                    "content": format!("🔍 Search completed but follow-up failed ({}): {}", status, error_text),
-                    "loopCount": 1,
-                    "ttftMs": ttft_ms.unwrap_or(0),
+                    "content": last_content,
+                    "loopCount": turn,
+                    "ttftMs": outcome.ttft_ms.unwrap_or(0),
                     "responseTimeMs": request_start.elapsed().as_millis() as u64,
                 }),
             );
@@ -1442,279 +1257,34 @@ async fn run_chat_mode(
             return Ok(());
         }
 
-        let mut followup_stream = followup_response.bytes_stream();
-        let mut followup_content = String::new();
-        let mut followup_dsml_buffering = false;
-        let mut followup_dsml_buffer = String::new();
-
-        while let Some(chunk) = await_with_cancel(&cancel_rx, followup_stream.next()).await? {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(e) => {
-                    emit_stream_chunk(&window, &request_id, format!("\nStream error: {}\n", e));
-                    break;
-                }
-            };
-            let text = String::from_utf8_lossy(&chunk);
-            for line in text.lines() {
-                let line = line.trim();
-                if !line.starts_with("data: ") {
-                    continue;
-                }
-                let data = &line[6..];
-                if data == "[DONE]" {
-                    break;
-                }
-                let json_val: Value = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(content) = json_val["choices"][0]["delta"]["content"].as_str() {
-                    if !content.is_empty() {
-                        followup_content.push_str(content);
-                        if content.contains("DSML") || followup_dsml_buffering {
-                            followup_dsml_buffering = true;
-                            followup_dsml_buffer.push_str(content);
-                        } else {
-                            emit_stream_chunk(&window, &request_id, content);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Handle DSML in follow-up response
-        if followup_dsml_buffering {
-            let dsml_calls = parse_dsml_tool_calls(&followup_content);
-            let clean_content = strip_dsml_tags(&followup_content);
-            let buffer_clean = strip_dsml_tags(&followup_dsml_buffer);
-            if !buffer_clean.trim().is_empty() {
-                emit_stream_chunk(&window, &request_id, &buffer_clean);
-            }
-            followup_content = clean_content;
-
-            if !dsml_calls.is_empty() && has_web_search {
-                eprintln!(
-                    "[agent] Follow-up: detected {} DSML tool call(s)",
-                    dsml_calls.len()
-                );
-                let mut tool_results: Vec<Value> = Vec::new();
-                for tc in &dsml_calls {
-                    if tc.name != "web_search" {
-                        eprintln!("[agent] Skipping unsupported DSML tool: {}", tc.name);
-                        tool_results.push(json!({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": format!("Error: Tool '{}' is not available. Only web_search is supported.", tc.name)
-                        }));
-                        continue;
-                    }
-                    let query_display =
-                        if let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) {
-                            args["query"].as_str().unwrap_or(&tc.name).to_string()
-                        } else {
-                            tc.name.clone()
-                        };
-                    let _ = window.emit(
-                        "agent-search-status",
-                        json!({
-                            "type": "searching",
-                            "query": query_display,
-                        }),
-                    );
-                    let search_start = std::time::Instant::now();
-                    let tool_output = await_with_cancel(
-                        &cancel_rx,
-                        execute_tool_with_timeout(
-                            &tc.name,
-                            &tc.arguments,
-                            &config.default_work_dir,
-                            &config.search_provider,
-                            &config.search_api_key,
-                            config.command_timeout,
-                        ),
-                    )
-                    .await?;
-                    let search_elapsed = search_start.elapsed().as_secs_f64();
-                    if tool_output.starts_with("Error:") {
-                        let _ = window.emit(
-                            "agent-search-status",
-                            json!({
-                                "type": "error",
-                                "query": query_display,
-                                "message": tool_output.clone(),
-                                "duration": search_elapsed,
-                                "provider": config.search_provider,
-                            }),
-                        );
-                    } else {
-                        let result_count = tool_output
-                            .lines()
-                            .filter(|l| l.starts_with("Title:"))
-                            .count();
-                        let preview = if tool_output.len() > 500 {
-                            &tool_output[..500]
-                        } else {
-                            &tool_output.clone()
-                        };
-                        let sources = parse_search_sources(&tool_output);
-                        let _ = window.emit(
-                            "agent-search-status",
-                            json!({
-                                "type": "results",
-                                "query": query_display,
-                                "results": preview,
-                                "duration": search_elapsed,
-                                "resultCount": result_count,
-                                "provider": config.search_provider,
-                                "sources": sources,
-                            }),
-                        );
-                    }
-                    tool_results.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_output
-                    }));
-                }
-
-                if !tool_results.is_empty() {
-                    messages.push(json!({
-                        "role": "assistant",
-                        "content": if followup_content.is_empty() { Value::Null } else { json!(followup_content) },
-                        "tool_calls": dsml_calls.iter().map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments
-                                }
-                            })
-                        }).collect::<Vec<_>>()
-                    }));
-                    for tr in &tool_results {
-                        messages.push(tr.clone());
-                    }
-                    add_search_instruction(&mut messages);
-
-                    let mut second_followup_body = json!({
-                        "model": config.model,
-                        "messages": messages,
-                        "stream": true,
-                    });
-                    if let Some(max_tokens) = config.max_tokens {
-                        second_followup_body["max_tokens"] = json!(max_tokens);
-                    }
-                    second_followup_body["temperature"] = json!(config.temperature);
-                    second_followup_body["top_p"] = json!(config.top_p);
-                    apply_reasoning_effort(&mut second_followup_body, &config, false);
-
-                    let second_followup_response = await_with_cancel(
-                        &cancel_rx,
-                        client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .header("Authorization", format!("Bearer {}", config.api_key))
-                            .json(&second_followup_body)
-                            .send(),
-                    )
-                    .await?
-                    .map_err(|e| format!("Second follow-up request failed: {}", e))?;
-
-                    if second_followup_response.status().is_success() {
-                        let mut second_stream = second_followup_response.bytes_stream();
-                        let mut second_content = String::new();
-                        let mut second_dsml_buffering = false;
-                        let mut second_dsml_buffer = String::new();
-
-                        while let Some(chunk) =
-                            await_with_cancel(&cancel_rx, second_stream.next()).await?
-                        {
-                            let chunk = match chunk {
-                                Ok(c) => c,
-                                Err(_) => break,
-                            };
-                            let text = String::from_utf8_lossy(&chunk);
-                            for line in text.lines() {
-                                let line = line.trim();
-                                if !line.starts_with("data: ") {
-                                    continue;
-                                }
-                                let data = &line[6..];
-                                if data == "[DONE]" {
-                                    break;
-                                }
-                                let json_val: Value = match serde_json::from_str(data) {
-                                    Ok(v) => v,
-                                    Err(_) => continue,
-                                };
-                                if let Some(content) =
-                                    json_val["choices"][0]["delta"]["content"].as_str()
-                                {
-                                    if !content.is_empty() {
-                                        second_content.push_str(content);
-                                        if content.contains("DSML") || second_dsml_buffering {
-                                            second_dsml_buffering = true;
-                                            second_dsml_buffer.push_str(content);
-                                        } else {
-                                            emit_stream_chunk(&window, &request_id, content);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if second_dsml_buffering {
-                            let clean = strip_dsml_tags(&second_dsml_buffer);
-                            if !clean.trim().is_empty() {
-                                emit_stream_chunk(&window, &request_id, &clean);
-                            }
-                        }
-
-                        emit_stream_done(
-                            &window,
-                            &request_id,
-                            json!({
-                                "content": second_content,
-                                "loopCount": 3,
-                                "ttftMs": ttft_ms.unwrap_or(0),
-                                "responseTimeMs": request_start.elapsed().as_millis() as u64,
-                            }),
-                        );
-                        emit_agent_complete(&window, &request_id, "success");
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        emit_stream_done(
+        // Run the requested search(es) and append assistant + tool results, then
+        // loop to let the model answer from them on the next turn.
+        let ran = run_chat_search_tools(
             &window,
-            &request_id,
-            json!({
-                "content": followup_content,
-                "loopCount": 2,
-                "ttftMs": ttft_ms.unwrap_or(0),
-                "responseTimeMs": request_start.elapsed().as_millis() as u64,
-            }),
-        );
-        emit_agent_complete(&window, &request_id, "success");
-        return Ok(());
-    }
+            &config,
+            &mut messages,
+            &outcome.content,
+            &outcome.tool_calls,
+            &mut tool_call_count,
+            &cancel_rx,
+        )
+        .await?;
 
-    emit_stream_done(
-        &window,
-        &request_id,
-        json!({
-            "content": assistant_content,
-            "loopCount": 1,
-            "ttftMs": ttft_ms.unwrap_or(0),
-            "responseTimeMs": request_start.elapsed().as_millis() as u64,
-        }),
-    );
-    emit_agent_complete(&window, &request_id, "success");
-    Ok(())
+        if !ran {
+            emit_stream_done(
+                &window,
+                &request_id,
+                json!({
+                    "content": last_content,
+                    "loopCount": turn,
+                    "ttftMs": outcome.ttft_ms.unwrap_or(0),
+                    "responseTimeMs": request_start.elapsed().as_millis() as u64,
+                }),
+            );
+            emit_agent_complete(&window, &request_id, "success");
+            return Ok(());
+        }
+    }
 }
 
 async fn start_agent_loop_inner(
@@ -1731,7 +1301,8 @@ async fn start_agent_loop_inner(
 ) -> Result<(), String> {
     ensure_not_cancelled(&cancel_rx)?;
     let mut system_prompt = config.system_prompt.clone();
-    let is_ollama = config.provider == "ollama";
+    let wire = provider::Wire::from_config(&config);
+    let is_ollama = wire.is_ollama();
 
     if let Some((rules, filename)) = load_workspace_rules(&config.default_work_dir) {
         system_prompt.push_str(&format!(
@@ -1748,6 +1319,7 @@ async fn start_agent_loop_inner(
     }
 
     append_general_assistant_instruction(&mut system_prompt);
+    append_shell_guidance(&mut system_prompt);
     append_thinking_instruction(&mut system_prompt, &config.thinking_level);
 
     let mut messages: Vec<Value> = vec![json!({
@@ -1776,8 +1348,10 @@ async fn start_agent_loop_inner(
     let mut loop_count = 0;
     let mut total_prompt_tokens: u64 = 0;
     let mut total_completion_tokens: u64 = 0;
+    let max_loops = configured_max_agent_loops(&config);
+    let mut tool_call_count: u32 = 0;
 
-    while loop_count < MAX_LOOPS {
+    while loop_count < max_loops {
         ensure_not_cancelled(&cancel_rx)?;
         loop_count += 1;
 
@@ -1799,60 +1373,24 @@ async fn start_agent_loop_inner(
 
         let request_start = Instant::now();
 
-        // Build request body
-        let mut request_body = if is_ollama {
-            json!({
-                "model": config.model,
-                "messages": messages,
-                "stream": config.streaming,
-                "options": {
-                    "temperature": config.temperature,
-                    "top_p": config.top_p,
-                }
-            })
-        } else {
-            json!({
-                "model": config.model,
-                "messages": messages,
-                "stream": config.streaming,
-                "stream_options": {
-                    "include_usage": true
-                }
-            })
-        };
-
-        if let Some(max_tokens) = config.max_tokens {
-            if is_ollama {
-                request_body["options"]["num_predict"] = json!(max_tokens);
-            } else {
-                request_body["max_tokens"] = json!(max_tokens);
-            }
-        }
-        if !is_ollama {
-            request_body["temperature"] = json!(config.temperature);
-            request_body["top_p"] = json!(config.top_p);
-        }
-        apply_reasoning_effort(&mut request_body, &config, is_ollama);
-
-        // Add enabled tools
+        // Build the enabled tool set (OpenAI-shaped; provider layer converts).
         let mut enabled_tools = get_enabled_tool_definitions(&config.tools_enabled);
         enabled_tools.extend(mcp_tool_defs.clone());
-        if !enabled_tools.is_empty() {
-            request_body["tools"] = json!(enabled_tools);
-        }
 
-        let url = if is_ollama {
-            format!("{}/api/chat", config.base_url.trim_end_matches('/'))
-        } else {
-            format!("{}/chat/completions", config.base_url.trim_end_matches('/'))
-        };
+        // Build request body + URL + auth through the provider adapter so the
+        // wire format (OpenAI/Ollama/Anthropic/Gemini) is handled in one place.
+        let mut request_body = provider::build_body(
+            wire,
+            &config.model,
+            &messages,
+            &enabled_tools,
+            &config,
+            config.streaming,
+        );
+        apply_reasoning_effort(&mut request_body, &config, is_ollama);
 
-        let mut request_builder = client.post(&url).header("Content-Type", "application/json");
-
-        if !is_ollama && !config.api_key.is_empty() {
-            request_builder =
-                request_builder.header("Authorization", format!("Bearer {}", config.api_key));
-        }
+        let url = provider::build_url(wire, &config.base_url, &config.model, config.streaming);
+        let request_builder = provider::apply_auth(wire, client.post(&url), &config.api_key);
 
         let response = await_with_cancel(&cancel_rx, request_builder.json(&request_body).send())
             .await?
@@ -1872,9 +1410,8 @@ async fn start_agent_loop_inner(
 
             let response_time_ms = request_start.elapsed().as_millis() as u64;
 
-            // Extract usage
-            let prompt_tokens = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-            let completion_tokens = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+            let (content, reasoning_content, accumulated, prompt_tokens, completion_tokens) =
+                provider::parse_full_response(wire, &body);
             total_prompt_tokens += prompt_tokens;
             total_completion_tokens += completion_tokens;
 
@@ -1892,16 +1429,6 @@ async fn start_agent_loop_inner(
                 }),
             );
 
-            let content = body["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
-            let reasoning_content = body["choices"][0]["message"]["reasoning_content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
             if !reasoning_content.is_empty() {
                 emit_reasoning_chunk(&window, &request_id, &reasoning_content);
             }
@@ -1910,41 +1437,15 @@ async fn start_agent_loop_inner(
                 emit_stream_chunk(&window, &request_id, &content);
             }
 
-            let tool_calls = body["choices"][0]["message"]["tool_calls"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-
-            if tool_calls.is_empty() {
+            if accumulated.is_empty() {
                 mcp_manager.shutdown().await;
                 emit_agent_complete(&window, &request_id, "success");
                 return Ok(());
             }
 
-            // Process tool calls in non-streaming mode
-            let accumulated: Vec<AccumulatedToolCall> = tool_calls
-                .iter()
-                .map(|tc| AccumulatedToolCall {
-                    id: tc["id"].as_str().unwrap_or("").to_string(),
-                    name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                    arguments: tc["function"]["arguments"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
-                })
-                .collect();
-
-            // Add assistant message with content
-            let mut assistant_msg = json!({
-                "role": "assistant",
-            });
-            if !content.is_empty() {
-                assistant_msg["content"] = json!(content);
-            } else {
-                assistant_msg["content"] = Value::Null;
-            }
-            assistant_msg["tool_calls"] = json!(tool_calls);
-            messages.push(assistant_msg);
+            // Rebuild the assistant message in our canonical OpenAI shape so the
+            // rest of the loop (and the next request) stays provider-agnostic.
+            messages.push(assistant_message_with_tool_calls(&content, &accumulated));
 
             let result = process_tool_calls(
                 &window,
@@ -1952,6 +1453,7 @@ async fn start_agent_loop_inner(
                 &config,
                 &mut messages,
                 mcp_manager,
+                &mut tool_call_count,
                 &cancel_rx,
             )
             .await?;
@@ -1961,189 +1463,37 @@ async fn start_agent_loop_inner(
             continue;
         }
 
-        // Streaming mode
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-        let mut accumulated_tool_calls: Vec<AccumulatedToolCall> = Vec::new();
-        let mut has_tool_calls = false;
-        let mut assistant_content = String::new();
-        let mut assistant_reasoning = String::new();
-        let mut ttft_ms: Option<u64> = None;
-        let mut first_content_received = false;
-        let mut stream_usage_prompt: u64 = 0;
-        let mut stream_usage_completion: u64 = 0;
+        // Streaming mode — consume through the provider adapter.
+        let outcome = consume_stream(
+            &window,
+            &request_id,
+            wire,
+            response,
+            request_start,
+            &cancel_rx,
+            true,  // emit agent-tool-drafting events
+            false, // DSML handling is only relevant to chat-mode search path
+        )
+        .await?;
 
-        while let Some(chunk) = await_with_cancel(&cancel_rx, stream.next()).await? {
-            let bytes = chunk.map_err(|e| e.to_string())?;
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim().to_string();
-                buffer = buffer[pos + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                if is_ollama {
-                    // Ollama JSON Lines format: each line is a complete JSON object
-                    if let Ok(json_val) = serde_json::from_str::<Value>(&line) {
-                        if json_val["done"].as_bool() == Some(true) {
-                            if let Some(eval_count) = json_val["eval_count"].as_u64() {
-                                stream_usage_completion = eval_count;
-                            }
-                            if let Some(prompt_eval_count) = json_val["prompt_eval_count"].as_u64()
-                            {
-                                stream_usage_prompt = prompt_eval_count;
-                            }
-                            break;
-                        }
-
-                        if let Some(content) = json_val["message"]["content"].as_str() {
-                            if !content.is_empty() {
-                                if !first_content_received {
-                                    first_content_received = true;
-                                    ttft_ms = Some(request_start.elapsed().as_millis() as u64);
-                                }
-                                assistant_content.push_str(content);
-                                emit_stream_chunk(&window, &request_id, content);
-                            }
-                        }
-
-                        if let Some(tool_calls) = json_val["message"]["tool_calls"].as_array() {
-                            has_tool_calls = true;
-                            for (idx, tc) in tool_calls.iter().enumerate() {
-                                if idx >= accumulated_tool_calls.len() {
-                                    let id = tc["id"]
-                                        .as_str()
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| s.to_string())
-                                        .unwrap_or_else(|| format!("call_{}", idx));
-                                    accumulated_tool_calls.push(AccumulatedToolCall {
-                                        id,
-                                        name: tc["function"]["name"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        arguments: tc["function"]["arguments"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    });
-                                } else {
-                                    let existing = &mut accumulated_tool_calls[idx];
-                                    if let Some(args_chunk) = tc["function"]["arguments"].as_str() {
-                                        existing.arguments.push_str(args_chunk);
-                                    }
-                                    if existing.id.is_empty() {
-                                        if let Some(id) =
-                                            tc["id"].as_str().filter(|s| !s.is_empty())
-                                        {
-                                            existing.id = id.to_string();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // OpenAI SSE format
-                    if !line.starts_with("data: ") {
-                        continue;
-                    }
-                    let data = &line[6..];
-                    if data == "[DONE]" {
-                        break;
-                    }
-
-                    if let Ok(json_val) = serde_json::from_str::<Value>(data) {
-                        if let Some(usage) = json_val.get("usage") {
-                            stream_usage_prompt = usage["prompt_tokens"]
-                                .as_u64()
-                                .unwrap_or(stream_usage_prompt);
-                            stream_usage_completion = usage["completion_tokens"]
-                                .as_u64()
-                                .unwrap_or(stream_usage_completion);
-                        }
-
-                        if let Some(choices) = json_val["choices"].as_array() {
-                            if choices.is_empty() {
-                                continue;
-                            }
-                            let delta = &choices[0]["delta"];
-
-                            if let Some(reasoning) = delta["reasoning_content"].as_str() {
-                                if !reasoning.is_empty() {
-                                    assistant_reasoning.push_str(reasoning);
-                                    emit_reasoning_chunk(&window, &request_id, reasoning);
-                                }
-                            }
-
-                            if let Some(content) = delta["content"].as_str() {
-                                if !first_content_received && !content.is_empty() {
-                                    first_content_received = true;
-                                    ttft_ms = Some(request_start.elapsed().as_millis() as u64);
-                                }
-                                assistant_content.push_str(content);
-                                emit_stream_chunk(&window, &request_id, content);
-                            }
-
-                            if let Some(tool_calls) = delta["tool_calls"].as_array() {
-                                has_tool_calls = true;
-                                for tc in tool_calls {
-                                    let idx = tc["index"].as_u64().unwrap_or(0) as usize;
-
-                                    if idx >= accumulated_tool_calls.len() {
-                                        accumulated_tool_calls.push(AccumulatedToolCall {
-                                            id: tc["id"].as_str().unwrap_or("").to_string(),
-                                            name: tc["function"]["name"]
-                                                .as_str()
-                                                .unwrap_or("")
-                                                .to_string(),
-                                            arguments: String::new(),
-                                        });
-                                    }
-
-                                    if let Some(args_delta) = tc["function"]["arguments"].as_str() {
-                                        accumulated_tool_calls[idx].arguments.push_str(args_delta);
-                                        let _ = window.emit(
-                                            "agent-tool-drafting",
-                                            json!({
-                                                "index": idx,
-                                                "id": accumulated_tool_calls[idx].id,
-                                                "name": accumulated_tool_calls[idx].name,
-                                                "arguments": accumulated_tool_calls[idx].arguments
-                                            }),
-                                        );
-                                    }
-
-                                    if let Some(tc_id) = tc["id"].as_str() {
-                                        if !tc_id.is_empty() {
-                                            accumulated_tool_calls[idx].id = tc_id.to_string();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let mut accumulated_tool_calls = outcome.tool_calls;
+        let assistant_content = outcome.content;
+        let has_tool_calls = !accumulated_tool_calls.is_empty();
 
         // Emit usage stats for this streaming turn
         let response_time_ms = request_start.elapsed().as_millis() as u64;
-        total_prompt_tokens += stream_usage_prompt;
-        total_completion_tokens += stream_usage_completion;
+        total_prompt_tokens += outcome.prompt_tokens;
+        total_completion_tokens += outcome.completion_tokens;
 
         emit_usage(
             &window,
             &request_id,
             json!({
-                "prompt_tokens": stream_usage_prompt,
-                "completion_tokens": stream_usage_completion,
+                "prompt_tokens": outcome.prompt_tokens,
+                "completion_tokens": outcome.completion_tokens,
                 "total_prompt_tokens": total_prompt_tokens,
                 "total_completion_tokens": total_completion_tokens,
-                "ttft_ms": ttft_ms.unwrap_or(response_time_ms),
+                "ttft_ms": outcome.ttft_ms.unwrap_or(response_time_ms),
                 "response_time_ms": response_time_ms,
                 "loop_count": loop_count,
             }),
@@ -2156,31 +1506,19 @@ async fn start_agent_loop_inner(
             return Ok(());
         }
 
-        // Build assistant message for conversation history
-        let tool_calls_json: Vec<Value> = accumulated_tool_calls
-            .iter()
-            .map(|tc| {
-                json!({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": tc.arguments
-                    }
-                })
-            })
-            .collect();
-
-        let mut assistant_msg = json!({
-            "role": "assistant",
-            "tool_calls": tool_calls_json,
-        });
-        if assistant_content.is_empty() {
-            assistant_msg["content"] = Value::Null;
-        } else {
-            assistant_msg["content"] = json!(assistant_content);
+        // Drop any malformed tool calls that never received a name.
+        accumulated_tool_calls.retain(|tc| !tc.name.is_empty());
+        if accumulated_tool_calls.is_empty() {
+            mcp_manager.shutdown().await;
+            emit_agent_complete(&window, &request_id, "success");
+            return Ok(());
         }
-        messages.push(assistant_msg);
+
+        // Build assistant message for conversation history (canonical OpenAI shape).
+        messages.push(assistant_message_with_tool_calls(
+            &assistant_content,
+            &accumulated_tool_calls,
+        ));
 
         // Process tool calls with approval
         let result = process_tool_calls(
@@ -2189,6 +1527,7 @@ async fn start_agent_loop_inner(
             &config,
             &mut messages,
             mcp_manager,
+            &mut tool_call_count,
             &cancel_rx,
         )
         .await?;
@@ -2198,7 +1537,23 @@ async fn start_agent_loop_inner(
     }
 
     mcp_manager.shutdown().await;
-    Err("Max agent loop iterations reached.".to_string())
+    let budget_message = format!(
+        "\n\nAgent loop limit reached ({}). I paused here to avoid runaway tool use. Send a follow-up to continue, or increase the limit in settings.",
+        max_loops
+    );
+    emit_stream_chunk(&window, &request_id, &budget_message);
+    emit_stream_done(
+        &window,
+        &request_id,
+        json!({
+            "content": budget_message,
+            "loopCount": loop_count,
+            "ttftMs": 0,
+            "responseTimeMs": 0,
+        }),
+    );
+    emit_agent_complete(&window, &request_id, "success");
+    Ok(())
 }
 
 async fn git_checkpoint(work_dir: &str) {
@@ -2285,6 +1640,7 @@ async fn process_tool_calls(
     config: &AppConfig,
     messages: &mut Vec<Value>,
     mcp_manager: &mut McpManager,
+    tool_call_count: &mut u32,
     cancel_rx: &watch::Receiver<bool>,
 ) -> Result<bool, String> {
     ensure_not_cancelled(cancel_rx)?;
@@ -2295,8 +1651,35 @@ async fn process_tool_calls(
     let mut needs_confirmation = Vec::new();
     let mut auto_approved = Vec::new();
 
-    // Classify each tool call by approval level
+    let max_tool_calls = configured_max_tool_calls(config);
+
+    // Classify each tool call by approval level, while enforcing a per-request
+    // budget. Budget rejections are returned to the model as tool results so it
+    // can stop, summarize progress, or ask the user whether to continue.
     for tc in tool_calls {
+        if *tool_call_count >= max_tool_calls {
+            let reason = format!(
+                "Per-request tool call limit reached ({}). Ask the user before continuing.",
+                max_tool_calls
+            );
+            let _ = window.emit(
+                "agent-tool-blocked",
+                json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                    "reason": reason,
+                }),
+            );
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": format!("Error: {}", reason)
+            }));
+            continue;
+        }
+        *tool_call_count += 1;
+
         let level = check_approval(
             &tc.name,
             &tc.arguments,
@@ -2522,21 +1905,84 @@ pub async fn resolve_approval(
     }
 }
 
-/// Fetch available models from an OpenAI-compatible API
-pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, String> {
+/// Fetch the available model list for the given wire format. Each provider
+/// exposes a different models endpoint, auth scheme, and response shape; this
+/// normalizes them all into `[{ "id": "<model>" }, ...]`.
+pub async fn fetch_models(
+    wire: provider::Wire,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<Value>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let base = base_url.trim_end_matches('/');
 
-    let mut request = client.get(&url).header("Content-Type", "application/json");
-
-    if !api_key.is_empty() {
-        request = request.header("Authorization", format!("Bearer {}", api_key));
+    match wire {
+        provider::Wire::Gemini => {
+            // Gemini: GET /v1beta/models?key=API_KEY -> { models: [{ name: "models/x" }] }
+            if api_key.is_empty() {
+                return Err("Gemini requires an API key to list models.".to_string());
+            }
+            let prefix = if base.contains("/v1beta") || base.ends_with("/v1") {
+                base.to_string()
+            } else {
+                format!("{}/v1beta", base)
+            };
+            let url = format!("{}/models?key={}", prefix, api_key);
+            let body = fetch_models_json(client.get(&url)).await?;
+            let models = body["models"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|m| {
+                    // Strip the "models/" prefix so the id matches what the user types.
+                    let name = m["name"].as_str()?;
+                    let id = name.strip_prefix("models/").unwrap_or(name);
+                    Some(json!({ "id": id }))
+                })
+                .collect();
+            Ok(models)
+        }
+        provider::Wire::Anthropic => {
+            // Anthropic: GET /v1/models with x-api-key + version -> { data: [{ id }] }
+            if api_key.is_empty() {
+                return Err("Anthropic requires an API key to list models.".to_string());
+            }
+            // Don't double up /v1 when the user already typed the versioned URL.
+            let url = if base.ends_with("/v1") {
+                format!("{}/models", base)
+            } else {
+                format!("{}/v1/models", base)
+            };
+            let request = client
+                .get(&url)
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01");
+            let body = fetch_models_json(request).await?;
+            Ok(extract_openai_shaped_models(&body))
+        }
+        provider::Wire::Ollama => {
+            // Ollama has its own command (fetch_ollama_models); shouldn't reach here.
+            Err("Use the Ollama model fetch for local models.".to_string())
+        }
+        provider::Wire::OpenAI => {
+            // OpenAI-compatible: GET /models with Bearer -> { data: [{ id }] }
+            let url = format!("{}/models", base);
+            let mut request = client.get(&url).header("Content-Type", "application/json");
+            if !api_key.is_empty() {
+                request = request.header("Authorization", format!("Bearer {}", api_key));
+            }
+            let body = fetch_models_json(request).await?;
+            Ok(extract_openai_shaped_models(&body))
+        }
     }
+}
 
+async fn fetch_models_json(request: reqwest::RequestBuilder) -> Result<Value, String> {
     let response = request
         .send()
         .await
@@ -2548,20 +1994,20 @@ pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, S
         return Err(format!("Models API error ({}): {}", status, error_text));
     }
 
-    let body: Value = response
+    response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse models response: {}", e))?;
+        .map_err(|e| format!("Failed to parse models response: {}", e))
+}
 
-    let models = body["data"]
+fn extract_openai_shaped_models(body: &Value) -> Vec<Value> {
+    body["data"]
         .as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
         .filter(|m| m["id"].as_str().is_some())
-        .collect();
-
-    Ok(models)
+        .collect()
 }
 
 fn parse_dsml_tool_calls(content: &str) -> Vec<AccumulatedToolCall> {

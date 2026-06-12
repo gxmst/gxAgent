@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, type ClipboardEvent } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, type ClipboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
@@ -42,6 +42,7 @@ import {
   CircleStop,
   X,
   Eye,
+  EyeOff,
   Monitor,
   Smartphone,
   Download,
@@ -92,6 +93,12 @@ const i18n: Record<string, Record<string, string>> = {
     "settings.theme.dark": "深色",
     "settings.language": "语言",
     "settings.provider": "API 提供商",
+    "settings.wireFormat": "请求格式",
+    "settings.wire.openai": "OpenAI 兼容",
+    "settings.wire.anthropic": "Claude (Anthropic)",
+    "settings.wire.gemini": "Gemini (官方)",
+    "settings.wire.ollama": "Ollama",
+    "settings.wireFormat.hint": "实际使用的 API 协议格式，与供应商解耦。多数中转/第三方服务用 OpenAI 兼容；只有直连 Anthropic / Google 官方端点才选 Claude / Gemini。",
     "settings.baseUrl": "API 地址",
     "settings.apiKey": "API 密钥",
     "settings.model": "模型",
@@ -134,6 +141,8 @@ const i18n: Record<string, Record<string, string>> = {
     "search.provider.searxng": "SearXNG (免费免Key)",
     "search.apiKey": "API Key",
     "search.apiKeyPlaceholder": "输入 Tavily API Key",
+    "secret.reveal": "显示",
+    "secret.hide": "隐藏",
     "search.settings.desc": "配置搜索行为和搜索引擎。搜索模式可在输入框旁切换：关闭=不搜索，自动=模型判断，强制=每次必搜。",
     "search.settings.fallbackDesc": "使用 DuckDuckGo 时，搜索失败或超时会自动尝试 Tavily 备用路径（需配置 API Key）。SearXNG 无自动备用。",
     "search.settings.ollamaNote": "注意：Ollama 本地模型暂不支持工具调用，搜索功能对 Ollama 不生效。",
@@ -227,6 +236,8 @@ const i18n: Record<string, Record<string, string>> = {
     "mcp.fetchModels": "获取 Ollama 模型",
     "settings.fontSize": "字体大小",
     "settings.commandTimeout": "命令超时 (秒)",
+    "settings.maxAgentLoops": "最大 Agent 轮次",
+    "settings.maxToolCalls": "单次最大工具调用",
     "settings.previewSandbox": "预览沙箱",
     "settings.sandbox.on": "沙箱已开启",
     "settings.sandbox.off": "沙箱已关闭",
@@ -282,6 +293,12 @@ const i18n: Record<string, Record<string, string>> = {
     "settings.theme.dark": "Dark",
     "settings.language": "Language",
     "settings.provider": "Provider Preset",
+    "settings.wireFormat": "Request Format",
+    "settings.wire.openai": "OpenAI compatible",
+    "settings.wire.anthropic": "Claude (Anthropic)",
+    "settings.wire.gemini": "Gemini (Google)",
+    "settings.wire.ollama": "Ollama",
+    "settings.wireFormat.hint": "The on-the-wire protocol. Decoupled from the model brand: choose OpenAI compatible for most relays/proxies; pick Claude or Gemini only for their official native endpoints.",
     "settings.baseUrl": "API Base URL",
     "settings.apiKey": "API Key",
     "settings.model": "Model",
@@ -324,6 +341,8 @@ const i18n: Record<string, Record<string, string>> = {
     "search.provider.searxng": "SearXNG (Free, No Key)",
     "search.apiKey": "API Key",
     "search.apiKeyPlaceholder": "Enter Tavily API Key",
+    "secret.reveal": "Show",
+    "secret.hide": "Hide",
     "search.settings.desc": "Configure search behavior and search engine. Toggle search mode next to the input: Off=No search, Auto=Model decides, Force=Always search.",
     "search.settings.fallbackDesc": "When using DuckDuckGo, failed or timed-out searches will automatically try Tavily as fallback (requires API Key). SearXNG has no automatic fallback.",
     "search.settings.ollamaNote": "Note: Ollama local models do not support tool calls, so search does not work with Ollama.",
@@ -417,6 +436,8 @@ const i18n: Record<string, Record<string, string>> = {
     "mcp.fetchModels": "Fetch Ollama Models",
     "settings.fontSize": "Font Size",
     "settings.commandTimeout": "Command Timeout (seconds)",
+    "settings.maxAgentLoops": "Max Agent Loops",
+    "settings.maxToolCalls": "Max Tool Calls per Request",
     "settings.previewSandbox": "Preview Sandbox",
     "settings.sandbox.on": "Sandbox On",
     "settings.sandbox.off": "Sandbox Off",
@@ -655,6 +676,7 @@ const THINKING_LEVELS: SessionConfig["thinkingLevel"][] = ["low", "medium", "hig
 
 const DEFAULT_CONFIG: AppConfig = {
   provider: "openai",
+  wire_format: "openai",
   base_url: "https://api.deepseek.com/v1",
   api_key: "",
   model: "deepseek-chat",
@@ -662,7 +684,7 @@ const DEFAULT_CONFIG: AppConfig = {
   top_p: 1.0,
   max_tokens: null,
   system_prompt:
-    "You are a helpful AI assistant with access to local tools running on Windows. Help the user accomplish tasks by using the available tools when needed. Be careful, honest, and direct. If you are unsure or lack enough information, say so instead of guessing. Do not invent facts, files, command results, or tool output.\n\nIMPORTANT: The shell is Windows PowerShell. Do NOT use Unix/bash syntax (no ||, no &&, no /dev/null, no cat/grep/ls). Use PowerShell equivalents: use ; to chain commands, use Select-String instead of grep, use Get-ChildItem instead of ls, use Get-Content instead of cat. Redirect errors with 2>$null. Always use PowerShell-compatible commands.",
+    "You are a helpful AI assistant with access to local tools. Help the user accomplish tasks by using the available tools when needed. Be careful, honest, and direct. If you are unsure or lack enough information, say so instead of guessing. Do not invent facts, files, command results, or tool output.",
   streaming: true,
   thinking_level: "medium",
   context_limit: 50,
@@ -689,6 +711,8 @@ const DEFAULT_CONFIG: AppConfig = {
   font_family: "system",
   show_advanced_reply_info: false,
   command_timeout: 30,
+  max_agent_loops: 10,
+  max_tool_calls_per_request: 30,
   preview_sandbox: true,
 };
 
@@ -780,6 +804,27 @@ const FONT_OPTIONS = [
   { value: "mono", label: "Monospace", css: "'Cascadia Code', 'JetBrains Mono', Consolas, monospace" },
 ];
 
+// Available color themes. `mode` drives the `data-mode` attribute so that the
+// generic light/dark component tweaks apply, while `value` drives `data-theme`
+// for the actual palette. `swatch` is the dot shown in the theme picker.
+const THEME_OPTIONS: {
+  value: string;
+  mode: "light" | "dark";
+  labelZh: string;
+  label: string;
+  swatch: { bg: string; border: string; accent: string };
+}[] = [
+  { value: "light", mode: "light", labelZh: "浅色", label: "Light", swatch: { bg: "#ffffff", border: "#e5e5e5", accent: "#10a37f" } },
+  { value: "dark", mode: "dark", labelZh: "深色", label: "Dark", swatch: { bg: "#2f2f2f", border: "#424242", accent: "#10a37f" } },
+  { value: "yuzu", mode: "light", labelZh: "柚木书房", label: "Yuzu Study", swatch: { bg: "#f3e8d6", border: "#d8c4a0", accent: "#a9743f" } },
+  { value: "ember", mode: "dark", labelZh: "炭火终端", label: "Ember Terminal", swatch: { bg: "#1b1d19", border: "#3a3f33", accent: "#9bcf5f" } },
+  { value: "grape", mode: "dark", labelZh: "午夜葡萄", label: "Midnight Grape", swatch: { bg: "#221631", border: "#3e2a52", accent: "#c084fc" } },
+  { value: "amber", mode: "dark", labelZh: "暮光琥珀", label: "Twilight Amber", swatch: { bg: "#221a14", border: "#46352b", accent: "#f0a868" } },
+];
+
+const themeMode = (theme: string): "light" | "dark" =>
+  THEME_OPTIONS.find((t) => t.value === theme)?.mode ?? "light";
+
 const modelContextLimit = (modelId: string) => {
   const id = modelId.toLowerCase();
   if (id.includes("gpt-4o") || id.includes("gpt-4.1") || id.includes("gpt-5")) return 128000;
@@ -808,7 +853,124 @@ function DiffView({ oldContent, newContent }: { oldContent: string; newContent: 
   );
 }
 
+/**
+ * A masked text field with a reveal toggle. Hidden by default (guards against
+ * shoulder-surfing); the user clicks the eye to reveal the value when they need
+ * to verify it. The secret itself is kept in app state as usual — this only
+ * controls on-screen display.
+ */
+function SecretInput({
+  value,
+  onChange,
+  placeholder,
+  revealLabel,
+  hideLabel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  revealLabel: string;
+  hideLabel: string;
+}) {
+  const [revealed, setRevealed] = useState(false);
+  return (
+    <div className="secret-input">
+      <input
+        type={revealed ? "text" : "password"}
+        className={`input-text${revealed ? "" : " is-masked"}`}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete="off"
+        spellCheck={false}
+      />
+      <button
+        type="button"
+        className="secret-input-toggle"
+        onClick={() => setRevealed((v) => !v)}
+        title={revealed ? hideLabel : revealLabel}
+        aria-label={revealed ? hideLabel : revealLabel}
+        tabIndex={-1}
+      >
+        {revealed ? <EyeOff size={15} /> : <Eye size={15} />}
+      </button>
+    </div>
+  );
+}
+
 let mermaidIdCounter = 0;
+
+/**
+ * Positions a context menu near (x, y) but flips/clamps so it never gets
+ * clipped by the viewport edges. Measures its own rendered size first.
+ */
+function PositionedContextMenu({
+  x,
+  y,
+  className,
+  children,
+}: {
+  x: number;
+  y: number;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number; visible: boolean }>({
+    left: x,
+    top: y,
+    visible: false,
+  });
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // offsetWidth/Height ignore CSS transforms, so the entry animation's
+    // scale() doesn't skew the measurement.
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const margin = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    let left = x;
+    let top = y;
+
+    // Horizontal: flip to the left of the cursor if it would overflow right.
+    if (left + w + margin > vw) {
+      left = Math.max(margin, x - w);
+    }
+    left = Math.min(left, vw - w - margin);
+    left = Math.max(margin, left);
+
+    // Vertical: flip above the cursor if it would overflow the bottom.
+    if (top + h + margin > vh) {
+      top = Math.max(margin, y - h);
+    }
+    // If still taller than viewport, pin to top and let it scroll.
+    top = Math.min(top, vh - h - margin);
+    top = Math.max(margin, top);
+
+    setPos({ left, top, visible: true });
+  }, [x, y, children]);
+
+  return (
+    <div
+      ref={ref}
+      className={className}
+      style={{
+        left: pos.left,
+        top: pos.top,
+        visibility: pos.visible ? "visible" : "hidden",
+        maxHeight: "calc(100vh - 16px)",
+        overflowY: "auto",
+      }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {children}
+    </div>
+  );
+}
 
 function CustomPresetForm({ lang, onSave, t, editingPreset }: { lang: string; onSave: (preset: RolePreset) => void; t: (key: string, lang: string) => string; editingPreset?: RolePreset | null }) {
   const [emoji, setEmoji] = useState(editingPreset?.emoji || "🤖");
@@ -1109,6 +1271,15 @@ function App() {
   const activeRequestContextTokensRef = useRef(0);
   const lastPersistedSessionsRef = useRef("");
 
+  // Keep the input textarea height in sync with its content. This auto-shrinks
+  // the box back after sending (prompt → "") and after programmatic sets.
+  useLayoutEffect(() => {
+    const el = chatTextareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  }, [prompt]);
+
   // Keep the ref in sync with the reactive state
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -1218,7 +1389,12 @@ function App() {
   }, [contextMenu, toolStatsDialog, rolePresetsOpen, modelPickerOpen, settingsOpen, sessionSettingsOpen]);
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", config.theme || "light");
+    const theme = config.theme || "light";
+    const mode = themeMode(theme);
+    document.documentElement.setAttribute("data-theme", theme);
+    // data-mode drives the light/dark component tweaks so any dark-family theme
+    // inherits them without duplicating every override per theme.
+    document.documentElement.setAttribute("data-mode", mode);
   }, [config.theme]);
 
   useEffect(() => {
@@ -1259,11 +1435,14 @@ function App() {
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
+  // Header quick-toggle: flip between light and dark. If the active theme is a
+  // custom dark theme, this jumps to the plain light theme and vice versa.
   const toggleTheme = () => {
-    setConfig((prev) => ({
-      ...prev,
-      theme: prev.theme === "dark" ? "light" : "dark",
-    }));
+    setConfig((prev) => {
+      const current = THEME_OPTIONS.find((th) => th.value === prev.theme);
+      const isDark = current?.mode === "dark";
+      return { ...prev, theme: isDark ? "light" : "dark" };
+    });
   };
 
   // ==========================================
@@ -1579,10 +1758,16 @@ function App() {
     if (!config.base_url) return;
     setModelsLoading(true);
     try {
-      const list = await invoke<ModelInfo[]>("fetch_models", {
-        baseUrl: config.base_url,
-        apiKey: config.api_key,
-      });
+      const wire = config.wire_format || "openai";
+      // Ollama has a distinct models endpoint; route the shared "fetch models"
+      // button to it so the button works regardless of the active wire format.
+      const list = wire === "ollama"
+        ? await invoke<ModelInfo[]>("fetch_ollama_models", { baseUrl: config.base_url })
+        : await invoke<ModelInfo[]>("fetch_models", {
+            wireFormat: wire,
+            baseUrl: config.base_url,
+            apiKey: config.api_key,
+          });
       setModels(list);
       addLog(t("log.modelsFetched", lang, { count: String(list.length), url: config.base_url }), "success");
     } catch (e) {
@@ -1596,6 +1781,7 @@ function App() {
     setConfig((prev) => ({
       ...prev,
       provider: preset.provider,
+      wire_format: preset.wire_format || "openai",
       base_url: preset.base_url,
       model: preset.default_model || prev.model,
       api_key: preset.needs_api_key ? prev.api_key : "",
@@ -1609,7 +1795,7 @@ function App() {
     try {
       const updated = await invoke<AppConfig>("save_profile", {
         currentConfig: config,
-        profile: { name, base_url: config.base_url, api_key: config.api_key, default_model: config.model },
+        profile: { name, base_url: config.base_url, api_key: config.api_key, default_model: config.model, wire_format: config.wire_format || "openai", provider: config.provider || "openai" },
       });
       setConfig(updated);
       cacheModelDisplayName(config.model, name);
@@ -2909,13 +3095,10 @@ function App() {
 
         {/* Context Menu */}
         {contextMenu && (
-          <div
+          <PositionedContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
             className="context-menu"
-            style={{
-              left: Math.min(contextMenu.x, window.innerWidth - 180),
-              top: Math.min(contextMenu.y, window.innerHeight - 200),
-            }}
-            onClick={(e) => e.stopPropagation()}
           >
             {(() => {
               const targetSession = sessions.find(s => s.id === contextMenu.sessionId);
@@ -3084,7 +3267,7 @@ function App() {
                 </>
               );
             })()}
-          </div>
+          </PositionedContextMenu>
         )}
 
         {/* Sidebar Footer */}
@@ -3888,8 +4071,6 @@ function App() {
                 value={prompt}
                 onChange={(e) => {
                   setPrompt(e.target.value);
-                  e.target.style.height = "auto";
-                  e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px";
                 }}
                 onPaste={handlePasteImage}
                 onKeyDown={handleKeyPress}
@@ -4514,6 +4695,24 @@ function App() {
                 </div>
               </div>
 
+              {/* Request format (wire protocol) — decoupled from the provider
+                  preset so a Claude model behind an OpenAI-compatible proxy can
+                  still use the OpenAI format, etc. */}
+              <div className="form-group">
+                <label className="form-label">{t("settings.wireFormat", lang)}</label>
+                <select
+                  className="input-text"
+                  value={config.wire_format || "openai"}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, wire_format: e.target.value }))}
+                >
+                  <option value="openai">{t("settings.wire.openai", lang)}</option>
+                  <option value="anthropic">{t("settings.wire.anthropic", lang)}</option>
+                  <option value="gemini">{t("settings.wire.gemini", lang)}</option>
+                  <option value="ollama">{t("settings.wire.ollama", lang)}</option>
+                </select>
+                <div className="form-hint">{t("settings.wireFormat.hint", lang)}</div>
+              </div>
+
               <div className="form-group">
                 <label className="form-label">{t("settings.baseUrl", lang)}</label>
                 <input
@@ -4527,12 +4726,12 @@ function App() {
 
               <div className="form-group">
                 <label className="form-label">{t("settings.apiKey", lang)}</label>
-                <input
-                  type="password"
-                  className="input-text"
+                <SecretInput
                   value={config.api_key}
-                  onChange={(e) => setConfig((prev) => ({ ...prev, api_key: e.target.value }))}
+                  onChange={(v) => setConfig((prev) => ({ ...prev, api_key: v }))}
                   placeholder="sk-..."
+                  revealLabel={t("secret.reveal", lang)}
+                  hideLabel={t("secret.hide", lang)}
                 />
               </div>
 
@@ -4580,18 +4779,24 @@ function App() {
               <>
               <div className="form-group">
                 <label className="form-label">{t("settings.theme", lang)}</label>
-                <div className="theme-toggle">
-                  <Sun size={14} style={{ color: config.theme === "light" ? "var(--accent)" : "var(--text-tertiary)" }} />
-                  <div
-                    className={`theme-switch ${config.theme === "dark" ? "active" : ""}`}
-                    onClick={toggleTheme}
-                  >
-                    <div className="theme-switch-knob" />
-                  </div>
-                  <Moon size={14} style={{ color: config.theme === "dark" ? "var(--accent)" : "var(--text-tertiary)" }} />
-                  <span className="theme-toggle-label">
-                    {config.theme === "dark" ? t("settings.theme.dark", lang) : t("settings.theme.light", lang)}
-                  </span>
+                <div className="theme-picker">
+                  {THEME_OPTIONS.map((th) => (
+                    <button
+                      key={th.value}
+                      type="button"
+                      className={`theme-chip ${config.theme === th.value ? "active" : ""}`}
+                      onClick={() => setConfig((prev) => ({ ...prev, theme: th.value }))}
+                      title={lang === "zh" ? th.labelZh : th.label}
+                    >
+                      <span
+                        className="theme-chip-swatch"
+                        style={{ background: th.swatch.bg, borderColor: th.swatch.border }}
+                      >
+                        <span className="theme-chip-dot" style={{ background: th.swatch.accent }} />
+                      </span>
+                      <span className="theme-chip-label">{lang === "zh" ? th.labelZh : th.label}</span>
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -4817,6 +5022,30 @@ function App() {
                   onChange={(e) => setConfig((prev) => ({ ...prev, command_timeout: parseInt(e.target.value) || 30 }))}
                 />
               </div>
+
+              <div className="form-group">
+                <label className="form-label">{t("settings.maxAgentLoops", lang)}</label>
+                <input
+                  type="number"
+                  className="input-text"
+                  min={1}
+                  max={20}
+                  value={config.max_agent_loops}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, max_agent_loops: parseInt(e.target.value) || 10 }))}
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">{t("settings.maxToolCalls", lang)}</label>
+                <input
+                  type="number"
+                  className="input-text"
+                  min={1}
+                  max={100}
+                  value={config.max_tool_calls_per_request}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, max_tool_calls_per_request: parseInt(e.target.value) || 30 }))}
+                />
+              </div>
               </>
               )}
 
@@ -4852,12 +5081,12 @@ function App() {
               {config.search_provider !== "searxng" && (
                 <div className="form-group">
                   <label className="form-label">{t("search.apiKey", lang)}</label>
-                  <input
-                    type="password"
-                    className="input-text"
+                  <SecretInput
                     value={config.search_api_key}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, search_api_key: e.target.value }))}
+                    onChange={(v) => setConfig((prev) => ({ ...prev, search_api_key: v }))}
                     placeholder={t("search.apiKeyPlaceholder", lang)}
+                    revealLabel={t("secret.reveal", lang)}
+                    hideLabel={t("secret.hide", lang)}
                   />
                   {config.search_provider !== "tavily" && (
                     <span style={{ fontSize: "0.66rem", opacity: 0.5, display: "block", marginTop: 2 }}>
