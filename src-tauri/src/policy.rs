@@ -222,7 +222,10 @@ pub fn check_approval(
     }
 
     // 2. Read-only tools auto-approve
-    let read_only = matches!(tool_name, "read_file" | "list_dir" | "web_search");
+    let read_only = matches!(
+        tool_name,
+        "read_file" | "list_dir" | "web_search" | "grep" | "glob" | "todo_write"
+    );
     if read_only {
         return ApprovalLevel::AutoApprove;
     }
@@ -239,7 +242,10 @@ pub fn check_approval(
 
     // 5. Relaxed policy: only untrusted writes need confirmation
     if approval_policy == "relaxed" {
-        if tool_name == "write_file" || tool_name == "execute_command" || tool_name == "run_python"
+        if tool_name == "write_file"
+            || tool_name == "edit_file"
+            || tool_name == "execute_command"
+            || tool_name == "run_python"
         {
             return ApprovalLevel::NeedsConfirmation;
         }

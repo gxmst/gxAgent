@@ -968,6 +968,7 @@ dependencies = [
  "hex",
  "once_cell",
  "rand",
+ "regex",
  "reqwest 0.12.28",
  "scraper",
  "serde",
@@ -980,6 +981,7 @@ dependencies = [
  "tokio",
  "urlencoding",
  "uuid",
+ "walkdir",
  "whoami",
 ]
 

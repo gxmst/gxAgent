@@ -109,6 +109,80 @@ pub fn get_all_tool_definitions() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": "Make a precise, in-place edit to an existing file by replacing an exact string. STRONGLY PREFER this over write_file for modifying existing files — it avoids rewriting the whole file and is safer for large files. The old_string must match EXACTLY (including whitespace and indentation) and must be UNIQUE in the file, otherwise the edit is rejected. Include enough surrounding context to make it unique. To insert new code, include an anchor line in both old_string and new_string.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path to edit" },
+                        "old_string": { "type": "string", "description": "The exact text to find and replace. Must be unique in the file." },
+                        "new_string": { "type": "string", "description": "The text to replace it with." },
+                        "replace_all": { "type": "boolean", "description": "Replace all occurrences instead of requiring uniqueness. Defaults to false." }
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": "Search file contents for a regular expression across the workspace. Returns matching lines with file path and line number. Use this to find where symbols, functions, or text are defined/used — far faster and more reliable than shell commands. Results are capped to avoid flooding context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Regular expression to search for (Rust regex syntax)." },
+                        "path": { "type": "string", "description": "Directory or file to search in. Defaults to the workspace root." },
+                        "glob": { "type": "string", "description": "Optional filename glob to filter files, e.g. '*.rs' or '*.{ts,tsx}'." },
+                        "case_insensitive": { "type": "boolean", "description": "Case-insensitive match. Defaults to false." }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": "Find files by name using a glob pattern (e.g. '**/*.rs', 'src/**/*.tsx'). Returns matching file paths. Use this to discover files before reading them.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Glob pattern to match file paths against." },
+                        "path": { "type": "string", "description": "Directory to search in. Defaults to the workspace root." }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "todo_write",
+                "description": "Record or update a structured task list for the current multi-step task. Use this at the start of any non-trivial task to lay out the plan, and update it as you complete steps (mark items done, add newly discovered work). This keeps long tasks organized and visible to the user. Pass the full list every time — it replaces the previous one.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "The complete current task list, in order.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": { "type": "string", "description": "Short description of the task." },
+                                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Current status." }
+                                },
+                                "required": ["content", "status"]
+                            }
+                        }
+                    },
+                    "required": ["todos"]
+                }
+            }
+        }),
     ]
 }
 
@@ -197,6 +271,35 @@ pub async fn execute_tool_with_timeout(
                 Err(_) => format!("Error: Search timed out after {}s. DuckDuckGo may be blocked in your network — consider using Tavily API instead.", search_timeout.as_secs()),
             }
         }
+        "edit_file" => {
+            let path = args["path"].as_str().unwrap_or("");
+            let old_string = args["old_string"].as_str().unwrap_or("");
+            let new_string = args["new_string"].as_str().unwrap_or("");
+            let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+            match run_edit_file(path, old_string, new_string, replace_all, work_dir).await {
+                Ok(out) => out,
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "grep" => {
+            let pattern = args["pattern"].as_str().unwrap_or("");
+            let path = args["path"].as_str().unwrap_or(".");
+            let glob = args["glob"].as_str();
+            let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
+            match run_grep(pattern, path, glob, case_insensitive, work_dir).await {
+                Ok(out) => out,
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "glob" => {
+            let pattern = args["pattern"].as_str().unwrap_or("");
+            let path = args["path"].as_str().unwrap_or(".");
+            match run_glob(pattern, path, work_dir).await {
+                Ok(out) => out,
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "todo_write" => run_todo_write(&args),
         _ => format!("Unknown tool: {}", name),
     }
 }
@@ -317,6 +420,322 @@ async fn run_write_file(path: &str, content: &str, work_dir: &str) -> Result<(),
     tokio::fs::write(&full_path, content)
         .await
         .map_err(|e| format!("Failed to write file: {}", e))
+}
+
+/// Precise in-place edit: replace an exact `old_string` with `new_string`.
+/// Requires the match to be unique unless `replace_all` is set. This is the
+/// safe alternative to rewriting a whole file with `write_file`.
+async fn run_edit_file(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    work_dir: &str,
+) -> Result<String, String> {
+    if old_string.is_empty() {
+        return Err("old_string must not be empty. Use write_file to create a new file.".into());
+    }
+    if old_string == new_string {
+        return Err("old_string and new_string are identical — nothing to change.".into());
+    }
+
+    let full_path = resolve_path(path, work_dir)?;
+    let original = tokio::fs::read_to_string(&full_path)
+        .await
+        .map_err(|e| format!("Failed to read file for editing: {}", e))?;
+
+    let occurrences = original.matches(old_string).count();
+    if occurrences == 0 {
+        return Err(
+            "old_string not found in the file. It must match exactly, including whitespace and indentation. Read the file again to copy the exact text.".into(),
+        );
+    }
+
+    let (updated, replaced) = if replace_all {
+        (original.replace(old_string, new_string), occurrences)
+    } else {
+        if occurrences > 1 {
+            return Err(format!(
+                "old_string is not unique — it matches {} places. Add more surrounding context to make it unique, or set replace_all: true.",
+                occurrences
+            ));
+        }
+        (original.replacen(old_string, new_string, 1), 1)
+    };
+
+    tokio::fs::write(&full_path, &updated)
+        .await
+        .map_err(|e| format!("Failed to write edited file: {}", e))?;
+
+    Ok(format!(
+        "Edited {} ({} replacement{}).",
+        path,
+        replaced,
+        if replaced == 1 { "" } else { "s" }
+    ))
+}
+
+/// Directories that are never worth walking for grep/glob — noise and huge.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".idea",
+    ".vscode",
+];
+
+const GREP_MAX_MATCHES: usize = 200;
+const GLOB_MAX_RESULTS: usize = 500;
+
+fn should_skip_dir(entry: &walkdir::DirEntry) -> bool {
+    entry.file_type().is_dir()
+        && entry
+            .file_name()
+            .to_str()
+            .map(|n| SKIP_DIRS.contains(&n))
+            .unwrap_or(false)
+}
+
+/// Translate a simple glob pattern into a regex. Supports `**` (any depth),
+/// `*` (any run within a segment), `?` (single char), and `{a,b}` alternation.
+fn glob_to_regex(glob: &str) -> Result<regex::Regex, String> {
+    let mut re = String::from("(?i)^");
+    let mut chars = glob.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    // `**/` or `**` — match across directory separators
+                    if chars.peek() == Some(&'/') {
+                        chars.next();
+                    }
+                    re.push_str(".*");
+                } else {
+                    re.push_str("[^/\\\\]*");
+                }
+            }
+            '?' => re.push_str("[^/\\\\]"),
+            '{' => re.push('('),
+            '}' => re.push(')'),
+            ',' => re.push('|'),
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '[' | ']' => {
+                re.push('\\');
+                re.push(c);
+            }
+            '/' => re.push_str("[/\\\\]"),
+            _ => re.push(c),
+        }
+    }
+    re.push('$');
+    regex::Regex::new(&re).map_err(|e| format!("Invalid glob pattern: {}", e))
+}
+
+async fn run_grep(
+    pattern: &str,
+    path: &str,
+    glob: Option<&str>,
+    case_insensitive: bool,
+    work_dir: &str,
+) -> Result<String, String> {
+    if pattern.is_empty() {
+        return Err("pattern must not be empty.".into());
+    }
+    let root = resolve_path(path, work_dir)?;
+
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map_err(|e| format!("Invalid regex pattern: {}", e))?;
+
+    let name_re = match glob {
+        Some(g) if !g.is_empty() => Some(glob_to_regex(g)?),
+        _ => None,
+    };
+
+    // Blocking filesystem walk on the blocking pool.
+    let root_path = PathBuf::from(&root);
+    let root_is_file = root_path.is_file();
+    let root_clone = root_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut out = String::new();
+        let mut match_count = 0usize;
+        let mut files_with_matches = 0usize;
+        'walk: for entry in walkdir::WalkDir::new(&root_clone)
+            .into_iter()
+            .filter_entry(|e| !should_skip_dir(e))
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let entry_path = entry.path();
+            let rel = if root_is_file {
+                entry_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| entry_path.to_string_lossy().to_string())
+            } else {
+                entry_path
+                    .strip_prefix(&root_clone)
+                    .unwrap_or(entry_path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            };
+            if let Some(nre) = &name_re {
+                let fname = entry_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                if !nre.is_match(fname) && !nre.is_match(&rel) {
+                    continue;
+                }
+            }
+            // Skip files that are too large or binary.
+            if let Ok(meta) = entry_path.metadata() {
+                if meta.len() as usize > FILE_SIZE_LIMIT {
+                    continue;
+                }
+            }
+            let content = match std::fs::read_to_string(entry_path) {
+                Ok(c) => c,
+                Err(_) => continue, // binary / unreadable
+            };
+            let mut file_hit = false;
+            for (lineno, line) in content.lines().enumerate() {
+                if re.is_match(line) {
+                    file_hit = true;
+                    // Truncate on a char boundary — byte slicing at 300 could
+                    // land mid-codepoint on UTF-8 (Chinese/emoji) and panic.
+                    let trimmed: String = line.chars().take(300).collect();
+                    out.push_str(&format!("{}:{}:{}\n", rel, lineno + 1, trimmed.trim_end()));
+                    match_count += 1;
+                    if match_count >= GREP_MAX_MATCHES {
+                        out.push_str(&format!(
+                            "\n[Truncated at {} matches. Narrow the pattern or path.]",
+                            GREP_MAX_MATCHES
+                        ));
+                        break 'walk;
+                    }
+                }
+            }
+            if file_hit {
+                files_with_matches += 1;
+            }
+        }
+        (out, match_count, files_with_matches)
+    })
+    .await
+    .map_err(|e| format!("grep task failed: {}", e))?;
+
+    let (out, match_count, files_with_matches) = result;
+    if match_count == 0 {
+        Ok(format!("No matches for /{}/.", pattern))
+    } else {
+        Ok(format!(
+            "{} match(es) in {} file(s):\n{}",
+            match_count, files_with_matches, out
+        ))
+    }
+}
+
+async fn run_glob(pattern: &str, path: &str, work_dir: &str) -> Result<String, String> {
+    if pattern.is_empty() {
+        return Err("pattern must not be empty.".into());
+    }
+    let root = resolve_path(path, work_dir)?;
+    let re = glob_to_regex(pattern)?;
+
+    let root_clone = root.clone();
+    let matches = tokio::task::spawn_blocking(move || {
+        let mut found: Vec<String> = Vec::new();
+        for entry in walkdir::WalkDir::new(&root_clone)
+            .into_iter()
+            .filter_entry(|e| !should_skip_dir(e))
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let entry_path = entry.path();
+            let rel = entry_path
+                .strip_prefix(&root_clone)
+                .unwrap_or(entry_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if re.is_match(&rel) {
+                found.push(rel);
+                if found.len() >= GLOB_MAX_RESULTS {
+                    break;
+                }
+            }
+        }
+        found
+    })
+    .await
+    .map_err(|e| format!("glob task failed: {}", e))?;
+
+    if matches.is_empty() {
+        Ok(format!("No files match '{}'.", pattern))
+    } else {
+        Ok(format!(
+            "{} file(s):\n{}",
+            matches.len(),
+            matches.join("\n")
+        ))
+    }
+}
+
+/// Render an agent-managed todo list into a compact checklist. The model owns
+/// the list; this tool just echoes a normalized view back as the tool result so
+/// the plan stays visible in the transcript and steers the next steps.
+fn run_todo_write(args: &Value) -> String {
+    let todos = match args["todos"].as_array() {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return "Error: todos must be a non-empty array of { content, status } items."
+                .to_string()
+        }
+    };
+
+    let mut out = String::from("Todo list updated:\n");
+    let mut pending = 0usize;
+    let mut in_progress = 0usize;
+    let mut completed = 0usize;
+    for item in todos {
+        let content = item["content"].as_str().unwrap_or("").trim();
+        if content.is_empty() {
+            continue;
+        }
+        let status = item["status"].as_str().unwrap_or("pending");
+        let (marker, label) = match status {
+            "completed" => {
+                completed += 1;
+                ("[x]", "")
+            }
+            "in_progress" => {
+                in_progress += 1;
+                ("[~]", " (in progress)")
+            }
+            _ => {
+                pending += 1;
+                ("[ ]", "")
+            }
+        };
+        out.push_str(&format!("{} {}{}\n", marker, content, label));
+    }
+    out.push_str(&format!(
+        "\n{} done · {} in progress · {} pending.",
+        completed, in_progress, pending
+    ));
+    out
 }
 
 async fn run_list_dir(path: &str, work_dir: &str) -> Result<String, String> {
@@ -935,7 +1354,7 @@ pub async fn check_python_available() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_url;
+    use super::{glob_to_regex, is_safe_url};
 
     #[test]
     fn safe_url_allows_public_http_urls() {
@@ -963,5 +1382,20 @@ mod tests {
         assert!(!is_safe_url("http://169.254.1.1"));
         assert!(!is_safe_url("http://[::1]"));
         assert!(!is_safe_url("http://[fd00::1]"));
+    }
+
+    #[test]
+    fn glob_regex_matches_relative_paths() {
+        let re = glob_to_regex("src/**/*.tsx").expect("valid glob");
+        assert!(re.is_match("src/App.tsx"));
+        assert!(re.is_match("src/components/Chat/Message.tsx"));
+        assert!(!re.is_match("tests/App.tsx"));
+    }
+
+    #[test]
+    fn filename_glob_still_matches_basenames() {
+        let re = glob_to_regex("*.rs").expect("valid glob");
+        assert!(re.is_match("tools.rs"));
+        assert!(!re.is_match("src/tools.rs"));
     }
 }

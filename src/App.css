@@ -16,22 +16,36 @@
   font-weight: 400;
 
   /* Modern Card Style - Light */
-  --bg-main: #f9f9f9;
+  --bg-main: #f7f7f8;
   --bg-sidebar: #f0f0f0;
   --bg-card: #ffffff;
-  --bg-card-hover: #f7f7f8;
+  --bg-card-hover: #f2f2f4;
   --bg-input: #ffffff;
   --bg-code: #f4f4f4;
   --bg-overlay: rgba(0, 0, 0, 0.4);
-  --bg-user-bubble: #f4f4f4;
+  --bg-user-bubble: #f0f0f2;
   --bg-assistant-bubble: transparent;
 
-  --border-default: #e5e5e5;
-  --border-focus: #d1d5db;
+  /* B-system aliases so component styles that use --bg-surface / --border-medium
+     etc. resolve to the same palette as the chat surface (single source of truth). */
+  --bg-app: var(--bg-main);
+  --bg-surface: var(--bg-card);
+  --bg-surface-hover: var(--bg-card-hover);
+  --bg-elevated: var(--bg-card);
+  --border-light: #ededee;
+  --border-medium: var(--border-default);
+  --border-strong: var(--border-focus);
+  --accent-light: var(--accent-subtle);
+  --success-light: var(--success-subtle);
+  --warning-light: var(--warning-subtle);
+  --error-light: var(--error-subtle);
+
+  --border-default: #dcdce0;
+  --border-focus: #c4c4cc;
 
   --text-primary: #0d0d0d;
-  --text-secondary: #5e5e5e;
-  --text-tertiary: #8e8e8e;
+  --text-secondary: #565656;
+  --text-tertiary: #6e6e6e;
   --text-inverse: #ffffff;
   --text-code: #24292e;
 
@@ -75,20 +89,33 @@
   /* Modern Card Style - Dark */
   --bg-main: #212121;
   --bg-sidebar: #171717;
-  --bg-card: #2f2f2f;
-  --bg-card-hover: #3a3a3a;
-  --bg-input: #2f2f2f;
+  --bg-card: #2a2a2a;
+  --bg-card-hover: #343434;
+  --bg-input: #2a2a2a;
   --bg-code: #000000;
   --bg-overlay: rgba(0, 0, 0, 0.7);
   --bg-user-bubble: #2f2f2f;
   --bg-assistant-bubble: transparent;
+
+  /* B-system aliases → single source of truth with the chat surface. */
+  --bg-app: var(--bg-main);
+  --bg-surface: var(--bg-card);
+  --bg-surface-hover: var(--bg-card-hover);
+  --bg-elevated: #343434;
+  --border-light: #333333;
+  --border-medium: var(--border-default);
+  --border-strong: var(--border-focus);
+  --accent-light: var(--accent-subtle);
+  --success-light: var(--success-subtle);
+  --warning-light: var(--warning-subtle);
+  --error-light: var(--error-subtle);
 
   --border-default: #424242;
   --border-focus: #5a5a5a;
 
   --text-primary: #ececec;
   --text-secondary: #b4b4b4;
-  --text-tertiary: #888888;
+  --text-tertiary: #9a9a9a;
   --text-inverse: #ffffff;
   --text-code: #ececec;
 
@@ -378,6 +405,13 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Unified keyboard focus ring — replaces scattered `outline: none` with a single
+   accessible, theme-aware affordance. Only shows for keyboard nav, never on click. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 button,
 input,
 textarea,
@@ -425,7 +459,7 @@ body {
 .toast-dot {
   width: 8px;
   height: 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--accent);
   flex-shrink: 0;
 }
@@ -544,7 +578,7 @@ body {
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 9999px; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: var(--radius-full); }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 /* ========================================================
@@ -722,7 +756,7 @@ button.btn-reject:hover {
 
 .secret-input-toggle:hover {
   color: var(--text-primary);
-  background: var(--bg-hover);
+  background: var(--bg-card-hover);
 }
 
 select.input-text {
@@ -778,11 +812,7 @@ select.input-text {
 }
 
 .sidebar-pill:hover:not(.active) {
-  background: rgba(255, 255, 255, 0.3);
-}
-
-[data-mode="dark"] .sidebar-pill:hover:not(.active) {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--bg-card-hover);
 }
 
 .history-list {
@@ -828,7 +858,7 @@ select.input-text {
   top: 7px;
   bottom: 7px;
   width: 3px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--accent);
   box-shadow: 0 0 0 1px var(--accent-subtle);
 }
@@ -921,7 +951,7 @@ select.input-text {
   gap: 4px;
   height: 24px;
   padding: 0 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--border-default);
   background: transparent;
   color: var(--text-tertiary);
@@ -976,6 +1006,16 @@ select.input-text {
    Chat — Floating white bubbles + transparent AI
    ======================================================== */
 
+/* Wrapper that fills the remaining vertical space; holds either the plain
+   scroll list or the virtualized list. */
+.chat-messages-outer {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
 .chat-messages {
   flex-grow: 1;
   overflow-y: auto;
@@ -984,6 +1024,20 @@ select.input-text {
   flex-direction: column;
   align-items: center;
   gap: 24px;
+}
+
+/* Virtualized list (react-virtuoso): it owns the scroll container, so it can't
+   use the parent flex centering/gap. Center each row and space with margin. */
+.chat-messages-virtual {
+  flex-grow: 1;
+  padding: 24px 20px;
+}
+.chat-messages-virtual .chat-bubble-container {
+  margin: 0 auto 24px;
+}
+.chat-messages-virtual .context-divider {
+  max-width: 800px;
+  margin: 0 auto 24px;
 }
 
 .chat-bubble-container {
@@ -1086,18 +1140,18 @@ select.input-text {
 }
 
 .search-card.searching {
-  background: rgba(59, 130, 246, 0.06);
-  border-color: rgba(59, 130, 246, 0.2);
+  background: var(--accent-subtle);
+  border-color: var(--accent-border);
 }
 
 .search-card.search-error {
-  background: rgba(239, 68, 68, 0.06);
-  border-color: rgba(239, 68, 68, 0.2);
+  background: var(--error-subtle);
+  border-color: var(--error-border);
 }
 
 .search-card.results {
-  background: rgba(34, 197, 94, 0.04);
-  border-color: rgba(34, 197, 94, 0.15);
+  background: var(--success-subtle);
+  border-color: var(--success-border);
 }
 
 .search-card-header {
@@ -1149,8 +1203,8 @@ select.input-text {
 .search-card-spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(59, 130, 246, 0.2);
-  border-top-color: #3b82f6;
+  border: 2px solid var(--accent-border);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: search-spin 0.8s linear infinite;
   flex-shrink: 0;
@@ -1163,7 +1217,7 @@ select.input-text {
 /* Search sources — collapsible result items */
 .search-card-sources {
   padding: 6px 12px 10px;
-  border-top: 1px solid rgba(34, 197, 94, 0.1);
+  border-top: 1px solid var(--success-border);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1172,7 +1226,7 @@ select.input-text {
 .search-source-item {
   padding: 6px 8px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--bg-card-hover);
   border: 1px solid var(--border-default);
 }
 
@@ -1404,7 +1458,7 @@ select.input-text {
   height: 22px;
   padding: 0 7px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: transparent;
   color: var(--text-tertiary);
   font-size: 0.62rem;
@@ -1461,7 +1515,7 @@ select.input-text {
 
 .context-usage-meter {
   height: 5px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--bg-code);
   overflow: hidden;
   margin: 8px 0;
@@ -1830,7 +1884,7 @@ select.input-text {
 
 .welcome-icon {
   padding: 14px;
-  border-radius: 9999px;
+  border-radius: var(--radius-full);
   background: var(--bg-card);
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
@@ -1870,8 +1924,8 @@ select.input-text {
   align-items: center;
   justify-content: space-between;
   padding: 4px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  background: var(--bg-code);
+  border-bottom: 1px solid var(--border-default);
   font-size: 0.65rem;
   color: var(--text-code);
   font-weight: 600;
@@ -1891,15 +1945,15 @@ select.input-text {
   padding: 2px 5px;
   border: none;
   background: transparent;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--text-tertiary);
   border-radius: 4px;
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
 }
 
 .code-action-btn:hover {
-  color: rgba(255, 255, 255, 0.8);
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
 }
 
 .code-block-body {
@@ -1960,7 +2014,7 @@ select.input-text {
 .agent-action-badge {
   padding: 1px 7px;
   font-size: 0.6rem;
-  border-radius: 9999px;
+  border-radius: var(--radius-full);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.02em;
@@ -2012,7 +2066,7 @@ select.input-text {
   color: var(--text-code);
   white-space: pre-wrap;
   padding-top: 4px;
-  border-top: 1px dashed rgba(255, 255, 255, 0.06);
+  border-top: 1px dashed var(--border-default);
 }
 
 /* ========================================================
@@ -2163,7 +2217,7 @@ select.input-text {
   margin-bottom: 10px;
   border: none;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--bg-card-hover);
   overflow: hidden;
 }
 
@@ -2174,14 +2228,6 @@ select.input-text {
   border: 1px solid var(--border-default);
   background: var(--bg-card);
   box-shadow: var(--shadow-card);
-}
-
-[data-mode="dark"] .reasoning-chain {
-  background: rgba(255, 255, 255, 0.03);
-}
-
-[data-mode="dark"] .reasoning-chain-top {
-  background: var(--bg-card);
 }
 
 .reasoning-chain-summary {
@@ -2220,7 +2266,7 @@ select.input-text {
   min-width: 24px;
   height: 16px;
   padding: 0 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--accent-subtle);
   color: var(--accent);
   font-size: 0.58rem;
@@ -2349,21 +2395,21 @@ select.input-text {
 }
 
 .diff-add {
-  background: rgba(46, 160, 67, 0.1);
-  color: #2ea043;
+  background: var(--success-subtle);
+  color: var(--success);
 }
 
 .diff-add .diff-prefix {
-  color: #2ea043;
+  color: var(--success);
 }
 
 .diff-remove {
-  background: rgba(248, 81, 73, 0.1);
-  color: #f85149;
+  background: var(--error-subtle);
+  color: var(--error);
 }
 
 .diff-remove .diff-prefix {
-  color: #f85149;
+  color: var(--error);
 }
 
 .diff-unchanged {
@@ -2716,8 +2762,8 @@ select.input-text {
 .stats-meter {
   height: 6px;
   overflow: hidden;
-  border-radius: 999px;
-  background: var(--bg-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-card-hover);
 }
 
 .stats-meter span {
@@ -2989,7 +3035,7 @@ select.input-text {
 .tool-risk {
   align-self: start;
   padding: 1px 5px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   font-size: 0.56rem;
   font-weight: 800;
   text-transform: uppercase;
@@ -3121,8 +3167,8 @@ select.input-text {
 .theme-chip-dot {
   width: 12px;
   height: 12px;
-  border-radius: 999px;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 0 2px var(--bg-card);
 }
 
 .theme-chip-label {
@@ -3459,7 +3505,7 @@ select.input-text {
 }
 
 .input-send-btn.stop-active:hover {
-  background: #dc2626 !important;
+  filter: brightness(0.9);
 }
 
 @keyframes steering-glow {
@@ -3649,7 +3695,7 @@ select.input-text {
 .mode-indicator.code {
   border-color: var(--success);
   color: var(--success);
-  background: rgba(16, 185, 129, 0.06);
+  background: var(--success-subtle);
 }
 
 .history-preset-icon {
@@ -3683,7 +3729,7 @@ select.input-text {
   background: var(--bg-card);
   border: 1px solid var(--border-default);
   border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-elevated);
   padding: 5px;
   min-width: 168px;
   animation: context-menu-in 0.12s ease-out;
@@ -3717,7 +3763,7 @@ select.input-text {
 }
 
 .context-menu-item:hover {
-  background: var(--bg-hover);
+  background: var(--bg-card-hover);
 }
 
 .context-menu-item:hover svg {
@@ -3798,7 +3844,7 @@ select.input-text {
   margin-top: 6px;
   border: 1px solid var(--border-default);
   border-radius: 8px;
-  background: var(--bg-subtle);
+  background: var(--bg-card-hover);
 }
 
 .role-preset-form-input {
@@ -3851,7 +3897,7 @@ select.input-text {
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: rgba(16, 185, 129, 0.1);
+  background: var(--success-subtle);
   color: var(--success);
   font-size: 0.62rem;
   font-weight: 600;
@@ -3860,8 +3906,8 @@ select.input-text {
 .settings-section-desc {
   padding: 8px 12px;
   border-radius: 8px;
-  background: rgba(59, 130, 246, 0.06);
-  border: 1px solid rgba(59, 130, 246, 0.15);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border);
   font-size: 0.72rem;
   line-height: 1.6;
   color: var(--text-secondary);
@@ -3947,12 +3993,12 @@ select.input-text {
   text-transform: uppercase;
 }
 
-.activity-item-badge.done { background: rgba(34, 197, 94, 0.1); color: var(--success); }
-.activity-item-badge.error { background: rgba(239, 68, 68, 0.1); color: var(--error); }
-.activity-item-badge.executing { background: rgba(59, 130, 246, 0.1); color: #3b82f6; }
-.activity-item-badge.blocked { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
-.activity-item-badge.pending_approval { background: rgba(168, 85, 247, 0.1); color: #a855f7; }
-.activity-item-badge.drafting { background: rgba(107, 114, 128, 0.1); color: var(--text-tertiary); }
+.activity-item-badge.done { background: var(--success-subtle); color: var(--success); }
+.activity-item-badge.error { background: var(--error-subtle); color: var(--error); }
+.activity-item-badge.executing { background: var(--accent-subtle); color: var(--accent); }
+.activity-item-badge.blocked { background: var(--warning-subtle); color: var(--warning); }
+.activity-item-badge.pending_approval { background: var(--accent-subtle); color: var(--accent); }
+.activity-item-badge.drafting { background: var(--bg-card-hover); color: var(--text-tertiary); }
 
 .activity-item-output {
   margin-top: 4px;
@@ -4089,7 +4135,7 @@ select.input-text {
 }
 
 .search-active-dot.force {
-  background: #f59e0b;
+  background: var(--warning);
   animation: pulse-dot 1s infinite;
 }
 
@@ -4100,7 +4146,7 @@ select.input-text {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #f59e0b;
+  background: var(--warning);
   color: #fff;
   font-size: 0.6rem;
   font-weight: 700;
@@ -4138,7 +4184,7 @@ select.input-text {
   border-radius: 4px;
   display: flex;
   align-items: center;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  box-shadow: var(--shadow-card);
 }
 
 .role-preset-action-btn:hover {
@@ -4160,29 +4206,29 @@ select.input-text {
 }
 
 [data-mode="dark"] .mode-indicator {
-  border-color: rgba(255, 255, 255, 0.15);
+  border-color: var(--border-default);
 }
 
 [data-mode="dark"] .mode-indicator.chat {
-  border-color: rgba(59, 130, 246, 0.3);
+  border-color: var(--accent-border);
 }
 
 [data-mode="dark"] .mode-indicator.code {
-  border-color: rgba(16, 185, 129, 0.3);
-  background: rgba(16, 185, 129, 0.1);
+  border-color: var(--success-border);
+  background: var(--success-subtle);
 }
 
 [data-mode="dark"] .context-menu {
-  border-color: rgba(255, 255, 255, 0.12);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  border-color: var(--border-default);
+  box-shadow: var(--shadow-elevated);
 }
 
 [data-mode="dark"] .session-search-box {
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: var(--border-default);
 }
 
 [data-mode="dark"] .role-preset-action-btn {
-  background: var(--bg-subtle);
+  background: var(--bg-card-hover);
 }
 
 .shortcuts-hint {
@@ -4198,7 +4244,7 @@ select.input-text {
   gap: 3px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: var(--bg-subtle);
+  background: var(--bg-card-hover);
   color: var(--text-tertiary);
   font-size: 0.6rem;
   font-weight: 600;
@@ -4233,7 +4279,7 @@ select.input-text {
 .variant-nav-top {
   margin: 0 0 4px 2px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--bg-card);
   border: 1px solid var(--border-default);
   box-shadow: var(--shadow-card);
