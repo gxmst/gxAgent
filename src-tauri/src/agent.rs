@@ -71,6 +71,22 @@ const ABSOLUTE_MAX_TOOL_CALLS_PER_REQUEST: u32 = 100;
 const SEARCH_FOLLOWUP_INSTRUCTION: &str = "You have just received web search results. You MUST base your answer on these search results. Cite the sources by mentioning the title and link when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing and what you could find. Do not make up information not present in the search results.";
 const GENERAL_ASSISTANT_INSTRUCTION: &str = "Assistant behavior: Be helpful, careful, and honest. Answer in the user's language when practical. If information is uncertain, outdated, or unavailable, say so clearly. Do not invent facts, citations, files, command results, or tool output. Ask for clarification when the user's goal is ambiguous and a wrong assumption would be risky.";
 
+/// Agentic workflow guidance injected only in Code mode. This shapes the
+/// explore -> plan -> act -> verify loop that makes tool-using agents reliable,
+/// and steers the model toward the dedicated tools over ad-hoc shell commands.
+const CODE_MODE_INSTRUCTION: &str = "Code mode workflow — follow this loop for engineering tasks:\n\
+1. Explore before acting. Understand the existing code before changing it. Use grep to find symbols/usages, glob to discover files, and read_file to inspect them. Do not guess at file contents or APIs — verify them.\n\
+2. Plan for non-trivial work. For any task beyond a one-line change, briefly outline the steps first. Use the todo_write tool to track multi-step tasks so progress stays visible; mark each step in_progress before starting it and completed when done.\n\
+3. Prefer precise edits. Use edit_file for modifying existing files (exact string replacement) instead of rewriting whole files with write_file. Reserve write_file for creating new files. Match existing code style, naming, and libraries.\n\
+4. Prefer dedicated tools over shell. Use read_file/grep/glob/edit_file rather than running cat/findstr/Select-String through execute_command — they are faster and safer.\n\
+5. Verify your work. After changes, run the project's build/test/lint where possible and fix what you broke before reporting done. State what you verified and what you could not.\n\
+6. Be honest about outcomes. If a command fails or a step is skipped, say so with the evidence. Do not claim success you did not confirm. When an action is destructive or hard to undo, confirm with the user first.";
+
+fn append_code_mode_instruction(system_prompt: &mut String) {
+    system_prompt.push_str("\n\n");
+    system_prompt.push_str(CODE_MODE_INSTRUCTION);
+}
+
 fn configured_max_agent_loops(config: &AppConfig) -> u32 {
     config.max_agent_loops.clamp(1, MAX_LOOPS)
 }
@@ -98,8 +114,13 @@ fn append_shell_guidance(system_prompt: &mut String) {
     system_prompt.push_str(shell_guidance());
 }
 
-static STEERING_QUEUE: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<Vec<String>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(Vec::new())));
+// Steering messages are keyed by request_id so concurrent sessions/requests
+// never cross-contaminate each other's intervention queues.
+static STEERING_QUEUE: once_cell::sync::Lazy<
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>,
+> = once_cell::sync::Lazy::new(|| {
+    Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
+});
 
 const AGENT_CANCELLED_ERROR: &str = "__GX_AGENT_CANCELLED__";
 
@@ -278,15 +299,24 @@ fn apply_reasoning_effort(request_body: &mut Value, config: &AppConfig, is_ollam
     request_body["reasoning_effort"] = json!(normalized_thinking_level(&config.thinking_level));
 }
 
-pub async fn push_steering_message(msg: String) {
+pub async fn push_steering_message(request_id: String, msg: String) {
     let mut queue = STEERING_QUEUE.lock().await;
-    queue.push(msg);
+    queue.entry(request_id).or_default().push(msg);
 }
 
-async fn drain_steering_messages() -> Vec<String> {
+async fn drain_steering_messages(request_id: &str) -> Vec<String> {
     let mut queue = STEERING_QUEUE.lock().await;
-    let messages = queue.drain(..).collect();
-    messages
+    match queue.get_mut(request_id) {
+        Some(msgs) => msgs.drain(..).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Remove any steering queue for a finished request so the map doesn't grow
+/// unbounded across many requests.
+async fn clear_steering_messages(request_id: &str) {
+    let mut queue = STEERING_QUEUE.lock().await;
+    queue.remove(request_id);
 }
 
 fn load_workspace_rules(work_dir: &str) -> Option<(String, String)> {
@@ -575,6 +605,7 @@ pub async fn start_agent_loop(
     };
 
     unregister_cancellation(&request_id).await;
+    clear_steering_messages(&request_id).await;
 
     if let Err(err) = &result {
         if is_agent_cancelled_error(err) {
@@ -1287,6 +1318,127 @@ async fn run_chat_mode(
     }
 }
 
+/// True if an assistant message carries tool_calls (its tool results must
+/// immediately follow it, so we can never cut the history between them).
+fn message_has_tool_calls(msg: &Value) -> bool {
+    msg.get("tool_calls")
+        .map(|tc| tc.is_array() && !tc.as_array().map(|a| a.is_empty()).unwrap_or(true))
+        .unwrap_or(false)
+}
+
+/// When the running conversation grows past the configured message budget,
+/// replace the older portion with a real LLM-generated summary (reusing the
+/// same provider path as the manual `/compact`). This preserves structured
+/// context instead of the char-level truncation that `compact_messages` does,
+/// and — unlike the manual command — runs automatically inside the loop.
+///
+/// Returns Ok(true) if a summary replacement happened. Summarizer failures are
+/// non-fatal, but cancellation must propagate immediately.
+async fn maybe_auto_compact(
+    window: &Window,
+    request_id: &str,
+    client: &reqwest::Client,
+    config: &AppConfig,
+    wire: provider::Wire,
+    cancel_rx: &watch::Receiver<bool>,
+    messages: &mut Vec<Value>,
+) -> Result<bool, String> {
+    // context_limit is a message-count setting in the UI and in the initial
+    // history slicing. Trigger only after the live loop has grown beyond that
+    // budget plus the recent tail we always keep intact.
+    let keep_tail = 6usize;
+    let context_limit = (config.context_limit as usize).max(1);
+    let high_water = (1 + context_limit + keep_tail).max(12);
+    if messages.len() <= high_water {
+        return Ok(false);
+    }
+
+    // Keep the system prompt (index 0) and a recent tail intact; summarize the
+    // middle. Choose the cut so it lands on a clean boundary: never between an
+    // assistant tool_calls message and its tool results.
+    if messages.len() <= 1 + keep_tail {
+        return Ok(false);
+    }
+    let mut cut = messages.len() - keep_tail;
+    // Walk the boundary backward off any tool result, and off an assistant that
+    // has pending tool_calls, so the kept tail starts cleanly.
+    while cut > 1 {
+        let at = &messages[cut];
+        let prev = &messages[cut - 1];
+        let starts_on_tool_result = at["role"] == "tool";
+        let prev_has_tool_calls = prev["role"] == "assistant" && message_has_tool_calls(prev);
+        if starts_on_tool_result || prev_has_tool_calls {
+            cut -= 1;
+        } else {
+            break;
+        }
+    }
+    if cut <= 1 {
+        return Ok(false);
+    }
+
+    let to_summarize: Vec<Value> = messages[1..cut].to_vec();
+
+    // Build a summary request through the provider-agnostic path.
+    let mut summary_config = config.clone();
+    summary_config.temperature = 0.3;
+    summary_config.max_tokens = Some(1024);
+
+    let mut summary_messages: Vec<Value> = vec![json!({
+        "role": "system",
+        "content": "You are a conversation summarizer for an agentic coding session. Produce a concise but complete summary that preserves file locations, code changes made, decisions, pending tasks, and user configuration. Output only the summary."
+    })];
+    summary_messages.extend(to_summarize);
+    summary_messages.push(json!({
+        "role": "user",
+        "content": "Summarize the conversation so far into structured context for continuing the work. Preserve concrete details (paths, function names, what was changed, what remains). No commentary."
+    }));
+
+    let url = provider::build_url(wire, &summary_config.base_url, &summary_config.model, false);
+    let body = provider::build_body(
+        wire,
+        &summary_config.model,
+        &summary_messages,
+        &[],
+        &summary_config,
+        false,
+    );
+    let builder = provider::apply_auth(wire, client.post(&url), &summary_config.api_key);
+
+    let response = match await_with_cancel(cancel_rx, builder.json(&body).send()).await? {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(false), // summarizer unavailable — leave history as-is
+    };
+    let resp_body: Value = match await_with_cancel(cancel_rx, response.json()).await? {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let (summary, _r, _c, _pt, _ct) = provider::parse_full_response(wire, &resp_body);
+    if summary.trim().is_empty() {
+        return Ok(false);
+    }
+
+    // Replace [1..cut] with a single summary message.
+    let summary_msg = json!({
+        "role": "user",
+        "content": format!(
+            "[Auto-compacted earlier conversation summary]\n{}",
+            summary.trim()
+        )
+    });
+    let removed = cut - 1;
+    messages.splice(1..cut, std::iter::once(summary_msg));
+
+    let _ = window.emit(
+        "agent-auto-compacted",
+        json!({
+            "requestId": request_id,
+            "messagesSummarized": removed,
+        }),
+    );
+    Ok(true)
+}
+
 async fn start_agent_loop_inner(
     window: Window,
     request_id: String,
@@ -1319,6 +1471,7 @@ async fn start_agent_loop_inner(
     }
 
     append_general_assistant_instruction(&mut system_prompt);
+    append_code_mode_instruction(&mut system_prompt);
     append_shell_guidance(&mut system_prompt);
     append_thinking_instruction(&mut system_prompt, &config.thinking_level);
 
@@ -1355,7 +1508,7 @@ async fn start_agent_loop_inner(
         ensure_not_cancelled(&cancel_rx)?;
         loop_count += 1;
 
-        let steering_msgs = drain_steering_messages().await;
+        let steering_msgs = drain_steering_messages(&request_id).await;
         if !steering_msgs.is_empty() {
             let combined = steering_msgs.join("\n");
             let steering_prompt = format!(
@@ -1368,6 +1521,21 @@ async fn start_agent_loop_inner(
             }));
             let _ = window.emit("agent-steering-processed", &combined);
         }
+
+        // When history approaches the context window, summarize the older turns
+        // with the model (real LLM summary) so we lose far less than the cheap
+        // char-truncation fallback below. Best-effort: on any failure we keep the
+        // messages untouched and fall through to compact_messages.
+        maybe_auto_compact(
+            &window,
+            &request_id,
+            &client,
+            &config,
+            wire,
+            &cancel_rx,
+            &mut messages,
+        )
+        .await?;
 
         compact_messages(&mut messages, config.context_limit as usize);
 
@@ -1464,6 +1632,10 @@ async fn start_agent_loop_inner(
         }
 
         // Streaming mode — consume through the provider adapter.
+        // DSML is a DeepSeek text-format tool-call convention on the OpenAI
+        // wire; enable awareness here so code mode handles those models too
+        // (previously only chat mode did, so DSML models silently failed here).
+        let dsml_aware = matches!(wire, provider::Wire::OpenAI);
         let outcome = consume_stream(
             &window,
             &request_id,
@@ -1471,13 +1643,30 @@ async fn start_agent_loop_inner(
             response,
             request_start,
             &cancel_rx,
-            true,  // emit agent-tool-drafting events
-            false, // DSML handling is only relevant to chat-mode search path
+            true, // emit agent-tool-drafting events
+            dsml_aware,
         )
         .await?;
 
         let mut accumulated_tool_calls = outcome.tool_calls;
-        let assistant_content = outcome.content;
+        let mut assistant_content = outcome.content;
+        let dsml_buffering = outcome.dsml_buffering;
+        let dsml_buffer = outcome.dsml_buffer;
+
+        // If the model emitted DSML text tool calls instead of native ones,
+        // parse them out of the buffered content now.
+        if accumulated_tool_calls.is_empty() && dsml_buffering {
+            let dsml_calls = parse_dsml_tool_calls(&assistant_content);
+            assistant_content = strip_dsml_tags(&assistant_content);
+            let buffer_clean = strip_dsml_tags(&dsml_buffer);
+            if !buffer_clean.trim().is_empty() {
+                emit_stream_chunk(&window, &request_id, &buffer_clean);
+            }
+            if !dsml_calls.is_empty() {
+                accumulated_tool_calls = dsml_calls;
+            }
+        }
+
         let has_tool_calls = !accumulated_tool_calls.is_empty();
 
         // Emit usage stats for this streaming turn
@@ -1599,7 +1788,7 @@ async fn execute_tool_with_mcp(
     config: &AppConfig,
     mcp_manager: &mut McpManager,
 ) -> String {
-    let write_tools = ["write_file", "execute_command"];
+    let write_tools = ["write_file", "edit_file", "execute_command"];
     if write_tools.contains(&name) {
         git_checkpoint(&config.default_work_dir).await;
     }
@@ -1608,9 +1797,13 @@ async fn execute_tool_with_mcp(
         "execute_command",
         "read_file",
         "write_file",
+        "edit_file",
         "list_dir",
         "run_python",
         "web_search",
+        "grep",
+        "glob",
+        "todo_write",
     ];
     if builtin_tools.contains(&name) {
         execute_tool_with_timeout(
@@ -1722,9 +1915,77 @@ async fn process_tool_calls(
         }
     }
 
-    // Execute auto-approved tools through the same path as approved tools so MCP
-    // routing and pre-write checkpoints stay consistent.
-    for tc in &auto_approved {
+    // Execute auto-approved tools. Pure read-only builtins (no filesystem
+    // mutation, no MCP manager needed) run concurrently — this is the common
+    // case when the model fans out reads/greps to explore the codebase. Any
+    // other auto-approved tool (trusted writes, MCP calls) runs sequentially
+    // through the shared path so MCP routing and pre-write checkpoints stay
+    // consistent.
+    let is_parallel_read = |name: &str| {
+        matches!(
+            name,
+            "read_file" | "list_dir" | "web_search" | "grep" | "glob"
+        )
+    };
+
+    // Partition while preserving original order within each group.
+    let parallel_reads: Vec<&AccumulatedToolCall> = auto_approved
+        .iter()
+        .filter(|tc| is_parallel_read(&tc.name))
+        .collect();
+    let sequential: Vec<&AccumulatedToolCall> = auto_approved
+        .iter()
+        .filter(|tc| !is_parallel_read(&tc.name))
+        .collect();
+
+    // Collect outputs into a map keyed by tool-call id. We run reads
+    // concurrently but append the tool results to `messages` in the model's
+    // ORIGINAL tool_call order (below), so history ordering is deterministic
+    // and stays compatible with Anthropic/Gemini tool-result conversion.
+    let mut outputs_by_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    if !parallel_reads.is_empty() {
+        for tc in &parallel_reads {
+            let _ = window.emit(
+                "agent-tool-executing",
+                json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": sanitize_args_for_log(&tc.arguments)
+                }),
+            );
+        }
+
+        // Run all read-only calls concurrently on the blocking-friendly async
+        // path. execute_tool_with_timeout only needs cloned config fields.
+        let futures = parallel_reads.iter().map(|tc| {
+            let name = tc.name.clone();
+            let args = tc.arguments.clone();
+            let work_dir = config.default_work_dir.clone();
+            let provider = config.search_provider.clone();
+            let key = config.search_api_key.clone();
+            let timeout = config.command_timeout;
+            async move {
+                execute_tool_with_timeout(&name, &args, &work_dir, &provider, &key, timeout).await
+            }
+        });
+        let outputs = await_with_cancel(cancel_rx, futures_util::future::join_all(futures)).await?;
+
+        for (tc, output) in parallel_reads.iter().zip(outputs.into_iter()) {
+            let _ = window.emit(
+                "agent-tool-output",
+                json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "output": output
+                }),
+            );
+            outputs_by_id.insert(tc.id.clone(), output);
+        }
+    }
+
+    for tc in &sequential {
         let _ = window.emit(
             "agent-tool-executing",
             json!({
@@ -1749,11 +2010,20 @@ async fn process_tool_calls(
             }),
         );
 
-        messages.push(json!({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "content": output
-        }));
+        outputs_by_id.insert(tc.id.clone(), output);
+    }
+
+    // Append all tool results in the model's ORIGINAL tool_call order (not the
+    // parallel/sequential execution order), so conversation history is
+    // deterministic and compatible across provider wire formats.
+    for tc in &auto_approved {
+        if let Some(output) = outputs_by_id.remove(&tc.id) {
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": output
+            }));
+        }
     }
 
     // If there are tools needing confirmation, emit approval request and wait

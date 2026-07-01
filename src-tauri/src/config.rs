@@ -60,6 +60,12 @@ pub struct AppConfig {
     pub max_tool_calls_per_request: u32,
     #[serde(default = "default_preview_sandbox")]
     pub preview_sandbox: bool,
+    /// One-time migration marker for tools_enabled. When a release adds new
+    /// built-in tools we bump TOOLS_MIGRATION_VERSION and, on load, append the
+    /// newly-added tools exactly once for configs below that version. This
+    /// avoids re-enabling tools a user has since deliberately disabled.
+    #[serde(default)]
+    pub tools_migration_version: u32,
 }
 
 fn default_search_provider() -> String {
@@ -101,6 +107,13 @@ fn default_max_tool_calls_per_request() -> u32 {
 fn default_preview_sandbox() -> bool {
     true
 }
+
+/// Bump this when new built-in tools are added so existing saved configs get
+/// the new tools appended exactly once. Old configs deserialize with version 0
+/// (the `#[serde(default)]` on the field) and are migrated on load; after
+/// migration the version is stored, so a tool the user later disables stays
+/// disabled instead of being re-enabled on every launch.
+pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedPattern {
@@ -281,9 +294,13 @@ impl Default for AppConfig {
                 "execute_command".into(),
                 "read_file".into(),
                 "write_file".into(),
+                "edit_file".into(),
                 "list_dir".into(),
                 "run_python".into(),
                 "web_search".into(),
+                "grep".into(),
+                "glob".into(),
+                "todo_write".into(),
             ],
             approval_policy: "standard".into(),
             trusted_patterns: default_trusted_patterns(),
@@ -305,6 +322,7 @@ impl Default for AppConfig {
             max_agent_loops: 10,
             max_tool_calls_per_request: 30,
             preview_sandbox: true,
+            tools_migration_version: CURRENT_TOOLS_MIGRATION_VERSION,
         }
     }
 }

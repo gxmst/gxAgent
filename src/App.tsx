@@ -1,7 +1,8 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, type ClipboardEvent } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo, type ClipboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -692,9 +693,13 @@ const DEFAULT_CONFIG: AppConfig = {
     "execute_command",
     "read_file",
     "write_file",
+    "edit_file",
     "list_dir",
     "run_python",
     "web_search",
+    "grep",
+    "glob",
+    "todo_write",
   ],
   approval_policy: "standard",
   trusted_patterns: [],
@@ -714,6 +719,7 @@ const DEFAULT_CONFIG: AppConfig = {
   max_agent_loops: 10,
   max_tool_calls_per_request: 30,
   preview_sandbox: true,
+  tools_migration_version: 1,
 };
 
 function createDefaultSession(): ChatSession {
@@ -755,9 +761,13 @@ const TOOL_NAMES: { key: string; label: string; shortLabel: string; description:
   { key: "execute_command", label: "PowerShell", shortLabel: "Shell", description: "Run local Windows PowerShell commands.", risk: "high" },
   { key: "read_file", label: "Read File", shortLabel: "Read", description: "Inspect local text files and logs.", risk: "low" },
   { key: "write_file", label: "Write File", shortLabel: "Write", description: "Create or update local files.", risk: "high" },
+  { key: "edit_file", label: "Edit File", shortLabel: "Edit", description: "Make precise in-place edits to existing files.", risk: "high" },
   { key: "list_dir", label: "List Folder", shortLabel: "Files", description: "Browse folders in the workspace.", risk: "low" },
   { key: "run_python", label: "Python", shortLabel: "Py", description: "Run short Python scripts for analysis.", risk: "medium" },
   { key: "web_search", label: "Web Search", shortLabel: "Web", description: "Search the web for current information.", risk: "low" },
+  { key: "grep", label: "Grep", shortLabel: "Grep", description: "Search file contents by regex across the workspace.", risk: "low" },
+  { key: "glob", label: "Find Files", shortLabel: "Glob", description: "Find files by name pattern.", risk: "low" },
+  { key: "todo_write", label: "Task List", shortLabel: "Todo", description: "Track multi-step tasks as a checklist.", risk: "low" },
 ];
 
 const toolIcon = (key: string, size = 11) => {
@@ -774,6 +784,14 @@ const toolIcon = (key: string, size = 11) => {
       return <Zap size={size} />;
     case "web_search":
       return <Globe size={size} />;
+    case "edit_file":
+      return <Pencil size={size} />;
+    case "grep":
+      return <Search size={size} />;
+    case "glob":
+      return <FolderOpen size={size} />;
+    case "todo_write":
+      return <CheckCircle2 size={size} />;
     default:
       return <Settings2 size={size} />;
   }
@@ -1064,6 +1082,74 @@ function MermaidDiagram({ chart }: { chart: string }) {
   return <div ref={ref} className="mermaid-container" />;
 }
 
+// Self-contained code block: local copy state so copying does not re-render the app tree.
+const CodeBlock = memo(function CodeBlock({ code, codeLang, lang }: { code: string; codeLang: string; lang: string }) {
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const doCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCopied(false), 1500);
+  };
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
+  return (
+    <div className="code-block">
+      <div className="code-block-header">
+        <span className="code-lang-label" onClick={doCopy} title={t("code.copy", lang)}>
+          {copied ? (lang === "zh" ? "已复制!" : "Copied!") : codeLang}
+        </span>
+        <div className="code-block-actions">
+          <button className="code-action-btn" title={t("code.copy", lang)} onClick={doCopy}>
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+          </button>
+          <button
+            className="code-action-btn"
+            title={t("code.save", lang)}
+            onClick={() => { invoke("save_code_file", { content: code, language: codeLang }); }}
+          >
+            <Save size={12} />
+          </button>
+        </div>
+      </div>
+      <SyntaxHighlighter
+        language={codeLang}
+        style={oneDark}
+        customStyle={{ margin: 0, borderRadius: "0 0 6px 6px", fontSize: "0.78rem", padding: "10px 12px" }}
+      >
+        {code}
+      </SyntaxHighlighter>
+    </div>
+  );
+});
+
+// Memoized markdown renderer: unchanged messages skip the entire remark/rehype/KaTeX/Prism pipeline.
+const MarkdownContent = memo(function MarkdownContent({ content, lang }: { content: string; lang: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
+      components={{
+        code({ className, children, ...props }) {
+          const match = /language-(\w+)/.exec(className || "");
+          const isBlock = (className || "").includes("language-");
+          const codeStr = String(children).replace(/\n$/, "");
+          if (isBlock) {
+            const codeLang = match ? match[1] : "text";
+            if (codeLang === "mermaid") {
+              return <MermaidDiagram chart={codeStr} />;
+            }
+            return <CodeBlock code={codeStr} codeLang={codeLang} lang={lang} />;
+          }
+          return <code className={className} {...props}>{children}</code>;
+        },
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
 function McpAddForm({ setConfig, addLog, lang, t, config }: {
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   addLog: (text: string, type: "info" | "success" | "error" | "cmd") => void;
@@ -1163,9 +1249,12 @@ function App() {
 
   const [prompt, setPrompt] = useState("");
 
-  // Auto-save draft
+  // Auto-save draft — debounced so each keystroke does not hit localStorage.
   useEffect(() => {
-    localStorage.setItem('gx_draft', prompt);
+    const timer = setTimeout(() => {
+      try { localStorage.setItem('gx_draft', prompt); } catch { /* ignore */ }
+    }, 400);
+    return () => clearTimeout(timer);
   }, [prompt]);
 
   // Restore draft on mount
@@ -1240,7 +1329,6 @@ function App() {
     () => localStorage.getItem("gx_current_session") || "default"
   );
   const [expandedActions, setExpandedActions] = useState<Record<string, boolean>>({});
-  const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [sessionSettingsOpen, setSessionSettingsOpen] = useState(false);
@@ -1260,6 +1348,7 @@ function App() {
   const [draggingRight, setDraggingRight] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
   const isAtBottomRef = useRef(true);
@@ -1270,6 +1359,10 @@ function App() {
   const activeRequestModelRef = useRef("");
   const activeRequestContextTokensRef = useRef(0);
   const lastPersistedSessionsRef = useRef("");
+  // Stream token batching: accumulate chunks and flush once per animation frame
+  // so a burst of tokens triggers one setSessions/render instead of one per token.
+  const streamBufferRef = useRef("");
+  const streamFlushRafRef = useRef<number | null>(null);
 
   // Keep the input textarea height in sync with its content. This auto-shrinks
   // the box back after sending (prompt → "") and after programmatic sets.
@@ -1289,7 +1382,10 @@ function App() {
     isStreamingRef.current = isStreaming;
   }, [isStreaming]);
 
-  const currentSession = sessions.find((s) => s.id === currentSessionId) || sessions[0] || createDefaultSession();
+  const currentSession = useMemo(
+    () => sessions.find((s) => s.id === currentSessionId) || sessions[0] || createDefaultSession(),
+    [sessions, currentSessionId]
+  );
   const currentMode = currentSession.sessionConfig.mode || "chat";
   const lang = config.language || "zh";
   const currentLocale = LANGUAGE_OPTIONS.find((l) => l.code === lang)?.locale || "en-US";
@@ -1553,36 +1649,49 @@ function App() {
   }, [loadSessions]);
 
   useEffect(() => {
-    const data = JSON.stringify(sessions);
+    if (!sessionStorageReady) return;
 
-    try {
-      if (data.length > 4 * 1024 * 1024) {
-        const trimmed = sessions.map((s: ChatSession) => ({
-          ...s,
-          messages: s.messages.slice(-20).map((m) => (
-            m.attachments
-              ? {
-                  ...m,
-                  attachments: m.attachments.map((att) =>
-                    att.type === "image" ? { ...att, data: "" } : att
-                  ),
-                }
-              : m
-          )),
-        }));
-        localStorage.setItem("gx_sessions", JSON.stringify(trimmed));
-      } else {
-        localStorage.setItem("gx_sessions", data);
+    // Persisting serializes the entire session set (potentially several MB with
+    // image attachments). Debounce it and skip entirely while streaming so a
+    // burst of token updates doesn't trigger one multi-MB JSON.stringify per frame.
+    const persist = () => {
+      const data = JSON.stringify(sessions);
+
+      try {
+        if (data.length > 4 * 1024 * 1024) {
+          const trimmed = sessions.map((s: ChatSession) => ({
+            ...s,
+            messages: s.messages.slice(-20).map((m) => (
+              m.attachments
+                ? {
+                    ...m,
+                    attachments: m.attachments.map((att) =>
+                      att.type === "image" ? { ...att, data: "" } : att
+                    ),
+                  }
+                : m
+            )),
+          }));
+          localStorage.setItem("gx_sessions", JSON.stringify(trimmed));
+        } else {
+          localStorage.setItem("gx_sessions", data);
+        }
+      } catch {
+        try { localStorage.removeItem("gx_sessions"); } catch { /* quota exceeded, nothing to do */ }
       }
-    } catch {
-      try { localStorage.removeItem("gx_sessions"); } catch { /* quota exceeded, nothing to do */ }
-    }
 
-    if (!sessionStorageReady || lastPersistedSessionsRef.current === data) return;
+      if (lastPersistedSessionsRef.current === data) return;
+      lastPersistedSessionsRef.current = data;
+      void saveSessions(sessions);
+    };
 
-    lastPersistedSessionsRef.current = data;
-    void saveSessions(sessions);
-  }, [saveSessions, sessionStorageReady, sessions]);
+    // While streaming, defer persistence until tokens stop arriving. The
+    // stream-complete handler flips isStreaming, re-running this effect and
+    // persisting the final state once.
+    const delay = isStreaming ? 1500 : 400;
+    const timer = setTimeout(persist, delay);
+    return () => clearTimeout(timer);
+  }, [saveSessions, sessionStorageReady, sessions, isStreaming]);
 
   useEffect(() => {
     try {
@@ -1607,10 +1716,18 @@ function App() {
     return () => document.removeEventListener("click", handleClick);
   }, []);
 
-  const ALL_PRESETS = [...ROLE_PRESETS, ...customPresets];
+  const ALL_PRESETS = useMemo(() => [...ROLE_PRESETS, ...customPresets], [customPresets]);
 
   useEffect(() => {
-    if (isAtBottomRef.current && chatContainerRef.current) {
+    if (!isAtBottomRef.current) return;
+    // Virtualized path scrolls via the Virtuoso handle; plain path scrolls the container.
+    if (virtuosoRef.current) {
+      virtuosoRef.current.scrollToIndex({
+        index: currentSession.messages.length - 1,
+        align: "end",
+        behavior: "auto",
+      });
+    } else if (chatContainerRef.current) {
       const el = chatContainerRef.current;
       el.scrollTop = el.scrollHeight;
     }
@@ -1928,6 +2045,51 @@ function App() {
     const unlisteners: (() => void)[] = [];
     let disposed = false;
 
+    // Apply all buffered stream text in a single state update. Safe to call
+    // synchronously (e.g. right before a tool/done event mutates the last
+    // message) — it cancels any pending frame and applies immediately.
+    const flushStreamBuffer = () => {
+      if (streamFlushRafRef.current !== null) {
+        cancelAnimationFrame(streamFlushRafRef.current);
+        streamFlushRafRef.current = null;
+      }
+      const chunk = streamBufferRef.current;
+      if (!chunk) return;
+      streamBufferRef.current = "";
+      setSessions((prev) =>
+        prev.map((s) => {
+          if (s.id !== agentEventSessionId()) return s;
+          const messages = [...s.messages];
+          if (
+            messages.length === 0 ||
+            messages[messages.length - 1].role !== "assistant"
+          ) {
+            messages.push({
+              role: "assistant",
+              content: chunk,
+              actions: [],
+              variants: [chunk],
+              currentVariantIndex: 0,
+              timestamp: Date.now(),
+              model: activeRequestModelRef.current,
+              contextTokens: activeRequestContextTokensRef.current,
+            });
+          } else {
+            const last = { ...messages[messages.length - 1] };
+            last.content += chunk;
+            if (last.variants) {
+              last.variants[last.currentVariantIndex || 0] = last.content;
+            } else {
+              last.variants = [last.content];
+              last.currentVariantIndex = 0;
+            }
+            messages[messages.length - 1] = last;
+          }
+          return { ...s, messages };
+        })
+      );
+    };
+
     async function setup() {
       unlisteners.push(
         await listen<AgentEventPayload>("agent-stream-chunk", (event) => {
@@ -1939,39 +2101,11 @@ function App() {
             payload = payload.replace(/<\/[｜|][｜|][^>]*>/g, "");
             if (!payload.trim()) return;
           }
-          const filteredPayload = payload;
-          setSessions((prev) =>
-            prev.map((s) => {
-              if (s.id !== agentEventSessionId()) return s;
-              const messages = [...s.messages];
-              if (
-                messages.length === 0 ||
-                messages[messages.length - 1].role !== "assistant"
-              ) {
-                messages.push({
-                  role: "assistant",
-                  content: filteredPayload,
-                  actions: [],
-                  variants: [filteredPayload],
-                  currentVariantIndex: 0,
-                  timestamp: Date.now(),
-                  model: activeRequestModelRef.current,
-                  contextTokens: activeRequestContextTokensRef.current,
-                });
-              } else {
-                const last = { ...messages[messages.length - 1] };
-                last.content += filteredPayload;
-                if (last.variants) {
-                  last.variants[last.currentVariantIndex || 0] = last.content;
-                } else {
-                  last.variants = [last.content];
-                  last.currentVariantIndex = 0;
-                }
-                messages[messages.length - 1] = last;
-              }
-              return { ...s, messages };
-            })
-          );
+          // Accumulate and flush once per frame instead of one render per token.
+          streamBufferRef.current += payload;
+          if (streamFlushRafRef.current === null) {
+            streamFlushRafRef.current = requestAnimationFrame(flushStreamBuffer);
+          }
         })
       );
 
@@ -2104,22 +2238,24 @@ function App() {
           (event) => {
             const { id, name, arguments: args } = event.payload;
             addLog(`[Exec] ${name}: ${args.substring(0, 200)}`, "cmd");
-            // Pre-read old file content for diff before write_file executes
-            if (name === "write_file") {
+            // Pre-read old file content for diff before file mutation tools execute.
+            if (name === "write_file" || name === "edit_file") {
               try {
                 const parsed = JSON.parse(args);
                 const filePath = parsed.path || "";
                 if (filePath) {
                   invoke<string>("read_file_content", { path: filePath }).then((oldContent) => {
+                    const optimisticNewContent = name === "write_file" ? (parsed.content || "") : oldContent;
                     setModifiedFiles((prev) => ({
                       ...prev,
-                      [filePath]: { old: oldContent, new: parsed.content || "" },
+                      [filePath]: { old: oldContent, new: optimisticNewContent },
                     }));
                   }).catch(() => {
-                    // File doesn't exist yet — mark as new
+                    // write_file may create a new file; edit_file will surface its own tool error.
+                    const optimisticNewContent = name === "write_file" ? (parsed.content || "") : "";
                     setModifiedFiles((prev) => ({
                       ...prev,
-                      [filePath]: { old: "", new: parsed.content || "" },
+                      [filePath]: { old: "", new: optimisticNewContent },
                     }));
                   });
                 }
@@ -2158,8 +2294,8 @@ function App() {
               `[${isErrorOutput ? "Error" : "Done"}] ${name}: ${output.substring(0, 200)}${output.length > 200 ? "..." : ""}`,
               isErrorOutput ? "error" : "success"
             );
-            if (name === "write_file") {
-              refreshFileList();
+            if (name === "write_file" || name === "edit_file") {
+              if (!isErrorOutput) refreshFileList();
               // Auto-preview HTML files — get path from action arguments, not output
               setSessions((prev) => {
                 const session = prev.find((s) => s.id === agentEventSessionId());
@@ -2170,10 +2306,19 @@ function App() {
                   try {
                     const args = JSON.parse(action.arguments);
                     const filePath = args.path || "";
-                    if (/\.(html?|svg)$/i.test(filePath)) {
+                    if (!isErrorOutput && filePath) {
                       invoke<string>("read_file_content", { path: filePath }).then((content) => {
-                        setPreviewSrc(content);
-                        setActiveTab("preview");
+                        setModifiedFiles((prevModified) => ({
+                          ...prevModified,
+                          [filePath]: {
+                            old: prevModified[filePath]?.old || "",
+                            new: content,
+                          },
+                        }));
+                        if (/\.(html?|svg)$/i.test(filePath)) {
+                          setPreviewSrc(content);
+                          setActiveTab("preview");
+                        }
                       }).catch(() => {});
                     }
                   } catch {}
@@ -2262,6 +2407,7 @@ function App() {
           responseTimeMs?: number;
         }>("agent-stream-done", (event) => {
           if (!isCurrentRequestPayload(event.payload)) return;
+          flushStreamBuffer();
           const done = event.payload || {};
           setSessions((prev) =>
             prev.map((s) => {
@@ -2298,6 +2444,7 @@ function App() {
       unlisteners.push(
         await listen<AgentEventPayload<{ status?: string }>>("agent-complete", (event) => {
           if (!isCurrentRequestPayload(event.payload)) return;
+          flushStreamBuffer();
           const status = typeof event.payload === "string" ? "" : event.payload.status;
           finishStreamingLocally();
           addLog(status === "cancelled" ? (lang === "zh" ? "已停止当前输出。" : "Current output stopped.") : t("log.complete", lang), "info");
@@ -2354,6 +2501,10 @@ function App() {
 
     return () => {
       disposed = true;
+      if (streamFlushRafRef.current !== null) {
+        cancelAnimationFrame(streamFlushRafRef.current);
+        streamFlushRafRef.current = null;
+      }
       unlisteners.splice(0).forEach((fn) => fn());
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2566,7 +2717,7 @@ function App() {
     const message = prompt.trim();
     if (!message || !isStreamingRef.current || currentMode !== "code") return;
     try {
-      await invoke("push_steering_message", { message });
+      await invoke("push_steering_message", { requestId: activeRequestIdRef.current, message });
       setSessions(prev => prev.map(s => s.id === currentSessionId ? {
         ...s,
         messages: [...s.messages, { role: "user" as const, content: `[Steering] ${message}` }]
@@ -2707,7 +2858,7 @@ function App() {
             } catch {
               pattern = tc.name;
             }
-          } else if (tc.name === "write_file") {
+          } else if (tc.name === "write_file" || tc.name === "edit_file") {
             try {
               const args = JSON.parse(tc.arguments);
               const path = (args.path || "").trim();
@@ -2904,13 +3055,382 @@ function App() {
     if (att.type === "image" && att.data) return sum + 1100;
     return sum + estimateTextTokens(att.data || "");
   }, 0);
-  const currentContextTokens =
+  // Context token count shown in each message's meta line. Deliberately EXCLUDES
+  // the live `prompt` so the message list can be memoized without depending on
+  // every keystroke — the counter is an approximation and this meta line is
+  // hidden by default (show_advanced_reply_info). The live input's contribution
+  // is added back where a keystroke-accurate figure is actually needed.
+  const currentContextTokensBase =
     estimateMessagesTokens(currentSession.messages) +
-    estimateTextTokens(prompt) +
     currentInputAttachmentTokens;
   const currentModelLimit = modelContextLimit(activeModelId);
   const pendingApprovalHasInlineAction = !!pendingApprovals && currentSession.messages.some((msg) =>
     msg.actions?.some((action) => pendingApprovals.tool_calls.some((tc) => tc.id === action.id))
+  );
+
+  // Render a single message row. Kept as a closure (not a separate component)
+  // so all the surrounding handlers/state stay in scope with zero prop
+  // threading — this same function feeds both the plain list (short sessions)
+  // and the virtualized list (long sessions).
+  const renderMessage = (msg: Message, mIdx: number) => (
+    msg.role === "context_divider" ? (
+      <div key={mIdx} className="context-divider">
+        <div className="context-divider-line" />
+        <span className="context-divider-label">{lang === "zh" ? "上方上下文已忽略" : "Context Ignored Above"}</span>
+        <div className="context-divider-line" />
+        <button
+          className="context-divider-remove"
+          onClick={() => {
+            setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+              ...s,
+              messages: s.messages.filter((_, i) => i !== mIdx)
+            } : s));
+          }}
+        >
+          <X size={10} />
+        </button>
+      </div>
+    ) : (
+    <div key={mIdx} className={`chat-bubble-container ${msg.role}`}>
+      {editingMessageIdx === mIdx ? (
+        <div className="edit-message-container">
+          <textarea
+            className="edit-message-textarea"
+            value={editText}
+            onChange={(e) => {
+              setEditText(e.target.value);
+              e.target.style.height = "auto";
+              e.target.style.height = Math.max(e.target.scrollHeight, 80) + "px";
+            }}
+            ref={(el) => {
+              if (el) {
+                el.style.height = "auto";
+                el.style.height = Math.max(el.scrollHeight, 80) + "px";
+              }
+            }}
+            autoFocus
+          />
+          <div className="edit-message-actions">
+            <button className="btn btn-primary btn-sm" onClick={() => {
+              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+                ...s,
+                messages: s.messages.map((m, i) => i === mIdx ? { ...m, content: editText } : m)
+              } : s));
+              setEditingMessageIdx(null);
+            }}>{t("msg.edit", lang)}</button>
+            <button className="btn btn-secondary btn-sm" onClick={() => setEditingMessageIdx(null)}>{lang === "zh" ? "取消" : "Cancel"}</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {msg.role === "assistant" && msg.variants && msg.variants.length > 1 && (
+            <div className="variant-nav variant-nav-top">
+              <button
+                className="variant-nav-btn"
+                disabled={(msg.currentVariantIndex || 0) === 0}
+                onClick={() => {
+                  const newIdx = Math.max(0, (msg.currentVariantIndex || 0) - 1);
+                  setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+                    ...s,
+                    messages: s.messages.map((m, i) => i === mIdx ? {
+                      ...m,
+                      currentVariantIndex: newIdx,
+                      content: m.variants![newIdx],
+                    } : m)
+                  } : s));
+                }}
+              >
+                <ChevronLeft size={10} />
+              </button>
+              <span className="variant-nav-label">
+                {(msg.currentVariantIndex || 0) + 1} / {msg.variants.length}
+              </span>
+              <button
+                className="variant-nav-btn"
+                disabled={(msg.currentVariantIndex || 0) >= msg.variants.length - 1}
+                onClick={() => {
+                  const newIdx = Math.min(msg.variants!.length - 1, (msg.currentVariantIndex || 0) + 1);
+                  setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+                    ...s,
+                    messages: s.messages.map((m, i) => i === mIdx ? {
+                      ...m,
+                      currentVariantIndex: newIdx,
+                      content: m.variants![newIdx],
+                    } : m)
+                  } : s));
+                }}
+              >
+                <ChevronRight size={10} />
+              </button>
+            </div>
+          )}
+          {msg.role === "assistant" && msg.reasoningContent && (
+            <details className="reasoning-chain reasoning-chain-top">
+              <summary className="reasoning-chain-summary">
+                <span className="reasoning-chain-icon">CoT</span>
+                {t("reasoning.label", lang)}
+                {isStreaming && mIdx === currentSession.messages.length - 1 && !msg.content && (
+                  <span className="reasoning-chain-typing">...</span>
+                )}
+              </summary>
+              <div className="reasoning-chain-content">
+                <MarkdownContent content={msg.reasoningContent} lang={lang} />
+              </div>
+            </details>
+          )}
+          <div className="chat-bubble">
+            {msg.role === "assistant" ? (
+              <>
+                {/* Tool actions — rendered BEFORE content, in order */}
+                {msg.actions?.map((act, aIdx) => (
+                  <div key={aIdx} className={`agent-action-card ${act.status}`}>
+                    <div
+                      className="agent-action-header"
+                      onClick={() => toggleActionExpanded(act.id)}
+                    >
+                      <div className="agent-action-title">
+                        {statusIcon(act.status)}
+                        <span>{act.name}</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span className={`agent-action-badge ${act.status}`}>
+                          {statusLabel(act.status)}
+                        </span>
+                        {expandedActions[act.id] ? (
+                          <ChevronDown size={12} style={{ color: "var(--text-tertiary)" }} />
+                        ) : (
+                          <ChevronRight size={12} style={{ color: "var(--text-tertiary)" }} />
+                        )}
+                      </div>
+                    </div>
+
+                    {expandedActions[act.id] && (
+                      <div className="agent-action-body">
+                        <div style={{ fontSize: "0.65rem", color: "var(--accent)", fontWeight: 700, marginBottom: 3 }}>
+                          {t("action.arguments", lang)}:
+                        </div>
+                        <pre className="tool-arguments">
+                          <code>{act.arguments}</code>
+                        </pre>
+                        {act.output && (
+                          <>
+                            <div style={{ fontSize: "0.65rem", color: "var(--success)", fontWeight: 700, marginTop: 6, marginBottom: 3 }}>
+                              {t("action.output", lang)}:
+                            </div>
+                            <pre className="tool-output">
+                              <code>{act.output}</code>
+                            </pre>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                {/* Search status indicators */}
+                {msg.searchStatus && msg.searchStatus.length > 0 && (
+                  <div className="search-status-list">
+                    {msg.searchStatus.map((ss, ssIdx) => {
+                      if (ss.type === "searching") {
+                        return (
+                          <div key={ssIdx} className="search-card searching">
+                            <div className="search-card-header">
+                              <span className="search-card-icon">&#128269;</span>
+                              <span className="search-card-query">{ss.query}</span>
+                              <span className="search-card-spinner" />
+                            </div>
+                          </div>
+                        );
+                      }
+                      if (ss.type === "error") {
+                        return (
+                          <div key={ssIdx} className="search-card search-error">
+                            <div className="search-card-header">
+                              <span className="search-card-icon">&#9888;&#65039;</span>
+                              <span className="search-card-query">{ss.query}</span>
+                            </div>
+                            <div className="search-card-meta">
+                              <span>{ss.message}</span>
+                              {ss.duration != null && <span> &middot; {ss.duration.toFixed(1)}s</span>}
+                            </div>
+                          </div>
+                        );
+                      }
+                      if (ss.type === "results") {
+                        // Use structured sources from backend, fallback to parsing if not available
+                        const sources = ss.sources && ss.sources.length > 0
+                          ? ss.sources
+                          : ss.results
+                            ? ss.results.split("\n---\n").map((block) => {
+                                const title = (block.match(/Title:\s*(.+)/) || [])[1] || "";
+                                const link = (block.match(/Link:\s*(.+)/) || [])[1] || "";
+                                const snippet = (block.match(/Snippet:\s*([\s\S]+)/) || [])[1] || "";
+                                return { title, link, snippet: snippet.trim() };
+                              }).filter((s) => s.title || s.snippet)
+                            : [];
+                        return (
+                          <details key={ssIdx} className="search-card results" open>
+                            <summary className="search-card-header">
+                              <span className="search-card-icon">&#128270;</span>
+                              <span className="search-card-query">{ss.query}</span>
+                              <span className="search-card-meta-inline">
+                                {ss.resultCount ?? sources.length} {lang === "zh" ? "个结果" : "results"}
+                                {ss.duration != null && ` · ${ss.duration.toFixed(1)}s`}
+                                {ss.provider && ` · ${ss.provider}`}
+                              </span>
+                            </summary>
+                            {sources.length > 0 && (
+                              <div className="search-card-sources">
+                                {sources.slice(0, 5).map((src, si) => (
+                                  <div key={si} className="search-source-item">
+                                    <div className="search-source-title">
+                                      {src.link ? <a href={src.link} target="_blank" rel="noopener noreferrer">{src.title || src.link}</a> : src.title}
+                                    </div>
+                                    {src.snippet && <div className="search-source-snippet">{src.snippet}</div>}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </details>
+                        );
+                      }
+                      return null;
+                    })}
+                  </div>
+                )}
+
+                {/* Markdown content — rendered AFTER tool actions */}
+                <div className="md-content">
+                  <MarkdownContent content={msg.content} lang={lang} />
+                  {isStreaming && mIdx === currentSession.messages.length - 1 && msg.role === "assistant" && (
+                    <span className="typing-cursor" />
+                  )}
+                </div>
+
+                {/* Inline approval card */}
+                {pendingApprovals &&
+                  msg.actions?.some((a) =>
+                    pendingApprovals.tool_calls.some((tc) => tc.id === a.id)
+                  ) && renderApprovalCard()}
+              </>
+            ) : (
+              <>
+                {msg.attachments && msg.attachments.length > 0 && (
+                  <div className="message-attachments">
+                    {msg.attachments.map((att, aIdx) => (
+                      att.type === "image" && att.data ? (
+                        <img
+                          key={aIdx}
+                          className="message-attachment-image"
+                          src={att.data}
+                          alt={att.name}
+                        />
+                      ) : (
+                        <div key={aIdx} className="message-attachment-file">
+                          <FileText size={12} />
+                          <span>{att.name}</span>
+                        </div>
+                      )
+                    ))}
+                  </div>
+                )}
+                {msg.content && <div className="user-message-text">{msg.content}</div>}
+              </>
+            )}
+            {/* Hover action buttons */}
+            <div className="bubble-actions">
+              {msg.role === "assistant" && (
+                <button
+                  className="bubble-action-btn"
+                  title={t("msg.retry", lang)}
+                  onClick={() => handleRetry(mIdx)}
+                >
+                  <RotateCcw size={12} />
+                </button>
+              )}
+              <button
+                className="bubble-action-btn"
+                title={t("msg.edit", lang)}
+                onClick={() => {
+                  setEditingMessageIdx(mIdx);
+                  setEditText(msg.content);
+                }}
+              >
+                <Pencil size={12} />
+              </button>
+              <button
+                className="bubble-action-btn"
+                title={t("msg.copy", lang)}
+                onClick={() => {
+                  navigator.clipboard.writeText(msg.content);
+                }}
+              >
+                <Copy size={12} />
+              </button>
+              <button
+                className="bubble-action-btn"
+                title={t("msg.delete", lang)}
+                onClick={() => {
+                  setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+                    ...s,
+                    messages: s.messages.filter((_, i) => i !== mIdx)
+                  } : s));
+                }}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          </div>
+          {msg.timestamp && (
+            <div className="bubble-timestamp">
+              <span>{new Date(msg.timestamp).toLocaleTimeString(currentLocale, { hour: "2-digit", minute: "2-digit" })}</span>
+              {config.show_advanced_reply_info && msg.role === "assistant" && (
+                <>
+                  <span className="bubble-meta-sep">·</span>
+                  <span>{getModelDisplayName(msg.model || activeRequestModelRef.current || currentSession.sessionConfig.model || config.model)}</span>
+                  <span className="bubble-meta-sep">·</span>
+                  <span>输入 {formatTokenCount(msg.usage?.promptTokens || msg.contextTokens || 0)} / 输出 {formatTokenCount(msg.usage?.completionTokens || estimateTextTokens(msg.content))}</span>
+                  <span className="bubble-meta-sep">·</span>
+                  <span>上下文 {formatTokenCount(currentContextTokensBase)} / {formatTokenCount(currentModelLimit)}</span>
+                  <span className="bubble-meta-sep">·</span>
+                  <span>{formatDuration(msg.usage?.responseTimeMs)}</span>
+                </>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+    )
+  );
+
+  // Above this many messages, switch to a virtualized list so DOM node count
+  // stays bounded regardless of conversation length. Below it, a plain list
+  // keeps native Ctrl+F and all existing behavior intact.
+  const VIRTUALIZE_THRESHOLD = 80;
+  const useVirtualized = currentSession.messages.length > VIRTUALIZE_THRESHOLD;
+
+  // Pre-render the plain-list rows. Deps list everything renderMessage actually
+  // reads EXCEPT `prompt` — so typing in the input box no longer rebuilds the
+  // (up to 80) message shells. The live prompt was intentionally removed from
+  // the meta line above so this exclusion is correct, not stale.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const plainMessageRows = useMemo(
+    () => currentSession.messages.map((msg, mIdx) => renderMessage(msg, mIdx)),
+    [
+      currentSession.messages,
+      currentSessionId,
+      editingMessageIdx,
+      editText,
+      isStreaming,
+      expandedActions,
+      lang,
+      config.show_advanced_reply_info,
+      pendingApprovals,
+      currentContextTokensBase,
+      currentModelLimit,
+      currentLocale,
+    ]
   );
 
   // ==========================================
@@ -3593,436 +4113,76 @@ function App() {
             </div>
           )}
 
-          <div className="chat-messages" ref={chatContainerRef} onScroll={() => {
-            const el = chatContainerRef.current;
-            if (!el) return;
-            isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-          }} style={currentSession.sessionConfig.backgroundImage ? { backgroundImage: `url(${currentSession.sessionConfig.backgroundImage})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>
+          <div className="chat-messages-outer">
             {currentSession.messages.length === 0 ? (
-              <div className="preview-placeholder">
-                <div className="welcome-icon" style={{ display: "flex", justifyContent: "center" }}>
-                  <img src={CaturtleLogo} alt="Agent Logo" width="80" height="80" style={{ marginBottom: "16px", opacity: 0.95 }} />
-                </div>
-                <h2 className="welcome-title">{t("welcome.title", lang)}</h2>
-                <p className="welcome-desc">{t("welcome.desc", lang)}</p>
-                <div className="shortcuts-hint">
-                  <span className="shortcut-tag"><kbd>Ctrl+N</kbd> {lang === "zh" ? "新建" : "New"}</span>
-                  <span className="shortcut-tag"><kbd>Ctrl+,</kbd> {lang === "zh" ? "设置" : "Settings"}</span>
-                  <span className="shortcut-tag"><kbd>Ctrl+Shift+N</kbd> {lang === "zh" ? "切换模式" : "Mode"}</span>
-                  <span className="shortcut-tag"><kbd>Esc</kbd> {lang === "zh" ? "关闭" : "Close"}</span>
+              <div className="chat-messages" ref={chatContainerRef}
+                style={currentSession.sessionConfig.backgroundImage ? { backgroundImage: `url(${currentSession.sessionConfig.backgroundImage})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>
+                <div className="preview-placeholder">
+                  <div className="welcome-icon" style={{ display: "flex", justifyContent: "center" }}>
+                    <img src={CaturtleLogo} alt="Agent Logo" width="80" height="80" style={{ marginBottom: "16px", opacity: 0.95 }} />
+                  </div>
+                  <h2 className="welcome-title">{t("welcome.title", lang)}</h2>
+                  <p className="welcome-desc">{t("welcome.desc", lang)}</p>
+                  <div className="shortcuts-hint">
+                    <span className="shortcut-tag"><kbd>Ctrl+N</kbd> {lang === "zh" ? "新建" : "New"}</span>
+                    <span className="shortcut-tag"><kbd>Ctrl+,</kbd> {lang === "zh" ? "设置" : "Settings"}</span>
+                    <span className="shortcut-tag"><kbd>Ctrl+Shift+N</kbd> {lang === "zh" ? "切换模式" : "Mode"}</span>
+                    <span className="shortcut-tag"><kbd>Esc</kbd> {lang === "zh" ? "关闭" : "Close"}</span>
+                  </div>
                 </div>
               </div>
-            ) : (
-              currentSession.messages.map((msg, mIdx) => (
-                msg.role === "context_divider" ? (
-                  <div key={mIdx} className="context-divider">
-                    <div className="context-divider-line" />
-                    <span className="context-divider-label">{lang === "zh" ? "上方上下文已忽略" : "Context Ignored Above"}</span>
-                    <div className="context-divider-line" />
-                    <button
-                      className="context-divider-remove"
-                      onClick={() => {
-                        setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                          ...s,
-                          messages: s.messages.filter((_, i) => i !== mIdx)
-                        } : s));
-                      }}
-                    >
-                      <X size={10} />
-                    </button>
-                  </div>
-                ) : (
-                <div key={mIdx} className={`chat-bubble-container ${msg.role}`}>
-                  {editingMessageIdx === mIdx ? (
-                    <div className="edit-message-container">
-                      <textarea
-                        className="edit-message-textarea"
-                        value={editText}
-                        onChange={(e) => {
-                          setEditText(e.target.value);
-                          e.target.style.height = "auto";
-                          e.target.style.height = Math.max(e.target.scrollHeight, 80) + "px";
-                        }}
-                        ref={(el) => {
-                          if (el) {
-                            el.style.height = "auto";
-                            el.style.height = Math.max(el.scrollHeight, 80) + "px";
-                          }
-                        }}
-                        autoFocus
-                      />
-                      <div className="edit-message-actions">
-                        <button className="btn btn-primary btn-sm" onClick={() => {
-                          setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                            ...s,
-                            messages: s.messages.map((m, i) => i === mIdx ? { ...m, content: editText } : m)
-                          } : s));
-                          setEditingMessageIdx(null);
-                        }}>{t("msg.edit", lang)}</button>
-                        <button className="btn btn-secondary btn-sm" onClick={() => setEditingMessageIdx(null)}>{lang === "zh" ? "取消" : "Cancel"}</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      {msg.role === "assistant" && msg.variants && msg.variants.length > 1 && (
-                        <div className="variant-nav variant-nav-top">
-                          <button
-                            className="variant-nav-btn"
-                            disabled={(msg.currentVariantIndex || 0) === 0}
-                            onClick={() => {
-                              const newIdx = Math.max(0, (msg.currentVariantIndex || 0) - 1);
-                              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                ...s,
-                                messages: s.messages.map((m, i) => i === mIdx ? {
-                                  ...m,
-                                  currentVariantIndex: newIdx,
-                                  content: m.variants![newIdx],
-                                } : m)
-                              } : s));
-                            }}
-                          >
-                            <ChevronLeft size={10} />
-                          </button>
-                          <span className="variant-nav-label">
-                            {(msg.currentVariantIndex || 0) + 1} / {msg.variants.length}
-                          </span>
-                          <button
-                            className="variant-nav-btn"
-                            disabled={(msg.currentVariantIndex || 0) >= msg.variants.length - 1}
-                            onClick={() => {
-                              const newIdx = Math.min(msg.variants!.length - 1, (msg.currentVariantIndex || 0) + 1);
-                              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                ...s,
-                                messages: s.messages.map((m, i) => i === mIdx ? {
-                                  ...m,
-                                  currentVariantIndex: newIdx,
-                                  content: m.variants![newIdx],
-                                } : m)
-                              } : s));
-                            }}
-                          >
-                            <ChevronRight size={10} />
-                          </button>
-                        </div>
-                      )}
-                      {msg.role === "assistant" && msg.reasoningContent && (
-                        <details className="reasoning-chain reasoning-chain-top">
-                          <summary className="reasoning-chain-summary">
-                            <span className="reasoning-chain-icon">CoT</span>
-                            {t("reasoning.label", lang)}
-                            {isStreaming && mIdx === currentSession.messages.length - 1 && !msg.content && (
-                              <span className="reasoning-chain-typing">...</span>
-                            )}
-                          </summary>
-                          <div className="reasoning-chain-content">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {msg.reasoningContent}
-                            </ReactMarkdown>
+            ) : useVirtualized ? (
+              <Virtuoso
+                ref={virtuosoRef}
+                className="chat-messages chat-messages-virtual"
+                style={currentSession.sessionConfig.backgroundImage ? { backgroundImage: `url(${currentSession.sessionConfig.backgroundImage})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
+                data={currentSession.messages}
+                followOutput={(atBottom: boolean) => (atBottom ? "auto" : false)}
+                atBottomStateChange={(atBottom: boolean) => { isAtBottomRef.current = atBottom; }}
+                itemContent={(mIdx: number, msg: Message) => renderMessage(msg, mIdx)}
+                components={{
+                  Footer: () => (
+                    isStreaming &&
+                    currentSession.messages[currentSession.messages.length - 1]?.role !== "assistant" ? (
+                      <div className="chat-bubble-container assistant">
+                        <div className="chat-bubble" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <div className="loading-indicator">
+                            <span className="loading-dot" />
+                            <span className="loading-dot" />
+                            <span className="loading-dot" />
                           </div>
-                        </details>
-                      )}
-                      <div className="chat-bubble">
-                        {msg.role === "assistant" ? (
-                          <>
-                            {/* Tool actions — rendered BEFORE content, in order */}
-                            {msg.actions?.map((act, aIdx) => (
-                              <div key={aIdx} className={`agent-action-card ${act.status}`}>
-                                <div
-                                  className="agent-action-header"
-                                  onClick={() => toggleActionExpanded(act.id)}
-                                >
-                                  <div className="agent-action-title">
-                                    {statusIcon(act.status)}
-                                    <span>{act.name}</span>
-                                  </div>
-                                  <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                                    <span className={`agent-action-badge ${act.status}`}>
-                                      {statusLabel(act.status)}
-                                    </span>
-                                    {expandedActions[act.id] ? (
-                                      <ChevronDown size={12} style={{ color: "var(--text-tertiary)" }} />
-                                    ) : (
-                                      <ChevronRight size={12} style={{ color: "var(--text-tertiary)" }} />
-                                    )}
-                                  </div>
-                                </div>
-
-                                {expandedActions[act.id] && (
-                                  <div className="agent-action-body">
-                                    <div style={{ fontSize: "0.65rem", color: "var(--accent)", fontWeight: 700, marginBottom: 3 }}>
-                                      {t("action.arguments", lang)}:
-                                    </div>
-                                    <pre className="tool-arguments">
-                                      <code>{act.arguments}</code>
-                                    </pre>
-                                    {act.output && (
-                                      <>
-                                        <div style={{ fontSize: "0.65rem", color: "var(--success)", fontWeight: 700, marginTop: 6, marginBottom: 3 }}>
-                                          {t("action.output", lang)}:
-                                        </div>
-                                        <pre className="tool-output">
-                                          <code>{act.output}</code>
-                                        </pre>
-                                      </>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            ))}
-
-                            {/* Search status indicators */}
-                            {msg.searchStatus && msg.searchStatus.length > 0 && (
-                              <div className="search-status-list">
-                                {msg.searchStatus.map((ss, ssIdx) => {
-                                  if (ss.type === "searching") {
-                                    return (
-                                      <div key={ssIdx} className="search-card searching">
-                                        <div className="search-card-header">
-                                          <span className="search-card-icon">&#128269;</span>
-                                          <span className="search-card-query">{ss.query}</span>
-                                          <span className="search-card-spinner" />
-                                        </div>
-                                      </div>
-                                    );
-                                  }
-                                  if (ss.type === "error") {
-                                    return (
-                                      <div key={ssIdx} className="search-card search-error">
-                                        <div className="search-card-header">
-                                          <span className="search-card-icon">&#9888;&#65039;</span>
-                                          <span className="search-card-query">{ss.query}</span>
-                                        </div>
-                                        <div className="search-card-meta">
-                                          <span>{ss.message}</span>
-                                          {ss.duration != null && <span> &middot; {ss.duration.toFixed(1)}s</span>}
-                                        </div>
-                                      </div>
-                                    );
-                                  }
-                                  if (ss.type === "results") {
-                                    // Use structured sources from backend, fallback to parsing if not available
-                                    const sources = ss.sources && ss.sources.length > 0
-                                      ? ss.sources
-                                      : ss.results
-                                        ? ss.results.split("\n---\n").map((block) => {
-                                            const title = (block.match(/Title:\s*(.+)/) || [])[1] || "";
-                                            const link = (block.match(/Link:\s*(.+)/) || [])[1] || "";
-                                            const snippet = (block.match(/Snippet:\s*([\s\S]+)/) || [])[1] || "";
-                                            return { title, link, snippet: snippet.trim() };
-                                          }).filter((s) => s.title || s.snippet)
-                                        : [];
-                                    return (
-                                      <details key={ssIdx} className="search-card results" open>
-                                        <summary className="search-card-header">
-                                          <span className="search-card-icon">&#128270;</span>
-                                          <span className="search-card-query">{ss.query}</span>
-                                          <span className="search-card-meta-inline">
-                                            {ss.resultCount ?? sources.length} {lang === "zh" ? "个结果" : "results"}
-                                            {ss.duration != null && ` · ${ss.duration.toFixed(1)}s`}
-                                            {ss.provider && ` · ${ss.provider}`}
-                                          </span>
-                                        </summary>
-                                        {sources.length > 0 && (
-                                          <div className="search-card-sources">
-                                            {sources.slice(0, 5).map((src, si) => (
-                                              <div key={si} className="search-source-item">
-                                                <div className="search-source-title">
-                                                  {src.link ? <a href={src.link} target="_blank" rel="noopener noreferrer">{src.title || src.link}</a> : src.title}
-                                                </div>
-                                                {src.snippet && <div className="search-source-snippet">{src.snippet}</div>}
-                                              </div>
-                                            ))}
-                                          </div>
-                                        )}
-                                      </details>
-                                    );
-                                  }
-                                  return null;
-                                })}
-                              </div>
-                            )}
-
-                            {/* Markdown content — rendered AFTER tool actions */}
-                            <div className="md-content">
-                              <ReactMarkdown
-                                remarkPlugins={[remarkGfm, remarkMath]}
-                                rehypePlugins={[rehypeKatex]}
-                                components={{
-                                  code({ className, children, ...props }) {
-                                    const match = /language-(\w+)/.exec(className || "");
-                                    const isBlock = (className || "").includes("language-");
-                                    const codeStr = String(children).replace(/\n$/, "");
-                                    if (isBlock) {
-                                      const codeLang = match ? match[1] : "text";
-                                      if (codeLang === "mermaid") {
-                                        return <MermaidDiagram chart={codeStr} />;
-                                      }
-                                      return (
-                                        <div className="code-block">
-                                          <div className="code-block-header">
-                                            <span className="code-lang-label" onClick={() => { navigator.clipboard.writeText(codeStr); setCopiedCodeId(`${mIdx}-${codeLang}`); setTimeout(() => setCopiedCodeId(null), 1500); }} title={t("code.copy", lang)}>{copiedCodeId === `${mIdx}-${codeLang}` ? (lang === "zh" ? "已复制!" : "Copied!") : codeLang}</span>
-                                            <div className="code-block-actions">
-                                              <button
-                                                className="code-action-btn"
-                                                title={t("code.copy", lang)}
-                                                onClick={() => {
-                                                  navigator.clipboard.writeText(codeStr);
-                                                  setCopiedCodeId(`${mIdx}-${codeLang}`);
-                                                  setTimeout(() => setCopiedCodeId(null), 1500);
-                                                }}
-                                              >
-                                                {copiedCodeId === `${mIdx}-${codeLang}` ? <Check size={12} /> : <Copy size={12} />}
-                                              </button>
-                                              <button
-                                                className="code-action-btn"
-                                                title={t("code.save", lang)}
-                                                onClick={() => {
-                                                  invoke("save_code_file", { content: codeStr, language: codeLang });
-                                                }}
-                                              >
-                                                <Save size={12} />
-                                              </button>
-                                            </div>
-                                          </div>
-                                          <SyntaxHighlighter
-                                            language={codeLang}
-                                            style={oneDark}
-                                            customStyle={{
-                                              margin: 0,
-                                              borderRadius: "0 0 6px 6px",
-                                              fontSize: "0.78rem",
-                                              padding: "10px 12px",
-                                            }}
-                                          >
-                                            {codeStr}
-                                          </SyntaxHighlighter>
-                                        </div>
-                                      );
-                                    }
-                                    return <code className={className} {...props}>{children}</code>;
-                                  },
-                                }}
-                              >
-                                {msg.content}
-                              </ReactMarkdown>
-                              {isStreaming && mIdx === currentSession.messages.length - 1 && msg.role === "assistant" && (
-                                <span className="typing-cursor" />
-                              )}
-                            </div>
-
-                            {/* Inline approval card */}
-                            {pendingApprovals &&
-                              msg.actions?.some((a) =>
-                                pendingApprovals.tool_calls.some((tc) => tc.id === a.id)
-                              ) && renderApprovalCard()}
-                          </>
-                        ) : (
-                          <>
-                            {msg.attachments && msg.attachments.length > 0 && (
-                              <div className="message-attachments">
-                                {msg.attachments.map((att, aIdx) => (
-                                  att.type === "image" && att.data ? (
-                                    <img
-                                      key={aIdx}
-                                      className="message-attachment-image"
-                                      src={att.data}
-                                      alt={att.name}
-                                    />
-                                  ) : (
-                                    <div key={aIdx} className="message-attachment-file">
-                                      <FileText size={12} />
-                                      <span>{att.name}</span>
-                                    </div>
-                                  )
-                                ))}
-                              </div>
-                            )}
-                            {msg.content && <div className="user-message-text">{msg.content}</div>}
-                          </>
-                        )}
-                        {/* Hover action buttons */}
-                        <div className="bubble-actions">
-                          {msg.role === "assistant" && (
-                            <button
-                              className="bubble-action-btn"
-                              title={t("msg.retry", lang)}
-                              onClick={() => handleRetry(mIdx)}
-                            >
-                              <RotateCcw size={12} />
-                            </button>
-                          )}
-                          <button
-                            className="bubble-action-btn"
-                            title={t("msg.edit", lang)}
-                            onClick={() => {
-                              setEditingMessageIdx(mIdx);
-                              setEditText(msg.content);
-                            }}
-                          >
-                            <Pencil size={12} />
-                          </button>
-                          <button
-                            className="bubble-action-btn"
-                            title={t("msg.copy", lang)}
-                            onClick={() => {
-                              navigator.clipboard.writeText(msg.content);
-                            }}
-                          >
-                            <Copy size={12} />
-                          </button>
-                          <button
-                            className="bubble-action-btn"
-                            title={t("msg.delete", lang)}
-                            onClick={() => {
-                              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                ...s,
-                                messages: s.messages.filter((_, i) => i !== mIdx)
-                              } : s));
-                            }}
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          <span style={{ fontSize: "0.8rem", color: "var(--accent)" }}>{t("thinking", lang)}</span>
                         </div>
                       </div>
-                      {msg.timestamp && (
-                        <div className="bubble-timestamp">
-                          <span>{new Date(msg.timestamp).toLocaleTimeString(currentLocale, { hour: "2-digit", minute: "2-digit" })}</span>
-                          {config.show_advanced_reply_info && msg.role === "assistant" && (
-                            <>
-                              <span className="bubble-meta-sep">·</span>
-                              <span>{getModelDisplayName(msg.model || activeRequestModelRef.current || currentSession.sessionConfig.model || config.model)}</span>
-                              <span className="bubble-meta-sep">·</span>
-                              <span>输入 {formatTokenCount(msg.usage?.promptTokens || msg.contextTokens || 0)} / 输出 {formatTokenCount(msg.usage?.completionTokens || estimateTextTokens(msg.content))}</span>
-                              <span className="bubble-meta-sep">·</span>
-                              <span>上下文 {formatTokenCount(currentContextTokens)} / {formatTokenCount(currentModelLimit)}</span>
-                              <span className="bubble-meta-sep">·</span>
-                              <span>{formatDuration(msg.usage?.responseTimeMs)}</span>
-                            </>
-                          )}
+                    ) : null
+                  ),
+                }}
+              />
+            ) : (
+              <div className="chat-messages" ref={chatContainerRef} onScroll={() => {
+                const el = chatContainerRef.current;
+                if (!el) return;
+                isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+              }} style={currentSession.sessionConfig.backgroundImage ? { backgroundImage: `url(${currentSession.sessionConfig.backgroundImage})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>
+                {plainMessageRows}
+
+                {isStreaming &&
+                  currentSession.messages[currentSession.messages.length - 1]?.role !== "assistant" && (
+                    <div className="chat-bubble-container assistant">
+                      <div className="chat-bubble" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div className="loading-indicator">
+                          <span className="loading-dot" />
+                          <span className="loading-dot" />
+                          <span className="loading-dot" />
                         </div>
-                      )}
-                    </>
-                  )}
-                </div>
-                )
-              ))
-            )}
-
-            {isStreaming &&
-              currentSession.messages[currentSession.messages.length - 1]?.role !== "assistant" && (
-                <div className="chat-bubble-container assistant">
-                  <div className="chat-bubble" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <div className="loading-indicator">
-                      <span className="loading-dot" />
-                      <span className="loading-dot" />
-                      <span className="loading-dot" />
+                        <span style={{ fontSize: "0.8rem", color: "var(--accent)" }}>{t("thinking", lang)}</span>
+                      </div>
                     </div>
-                    <span style={{ fontSize: "0.8rem", color: "var(--accent)" }}>{t("thinking", lang)}</span>
-                  </div>
-                </div>
-              )}
+                  )}
 
-            <div ref={chatEndRef} />
+                <div ref={chatEndRef} />
+              </div>
+            )}
           </div>
 
           <div

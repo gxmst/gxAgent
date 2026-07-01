@@ -39,6 +39,7 @@ export interface AppConfig {
   max_agent_loops: number;
   max_tool_calls_per_request: number;
   preview_sandbox: boolean;
+  tools_migration_version: number;
 }
 
 export interface TrustedPattern {

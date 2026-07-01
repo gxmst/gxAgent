@@ -169,13 +169,36 @@ fn load_config() -> Result<AppConfig, String> {
 
     let json = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
     let mut config: AppConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+
+    // One-time migration: seed built-in tools added in this release so existing
+    // users gain the new capabilities. Gated on a stored version marker so it
+    // runs exactly once — after that, a tool the user disables stays disabled
+    // instead of being re-enabled on every launch. Read-only tools are safe to
+    // append broadly; edit_file follows the user's existing write_file choice.
+    let mut config_changed = false;
+    if config.tools_migration_version < config::CURRENT_TOOLS_MIGRATION_VERSION {
+        const NEW_READ_ONLY_TOOLS: &[&str] = &["grep", "glob", "todo_write"];
+        for tool in NEW_READ_ONLY_TOOLS {
+            if !config.tools_enabled.iter().any(|t| t == tool) {
+                config.tools_enabled.push((*tool).to_string());
+            }
+        }
+        if config.tools_enabled.iter().any(|t| t == "write_file")
+            && !config.tools_enabled.iter().any(|t| t == "edit_file")
+        {
+            config.tools_enabled.push("edit_file".to_string());
+        }
+        config.tools_migration_version = config::CURRENT_TOOLS_MIGRATION_VERSION;
+        config_changed = true;
+    }
+
     let mut needs_rekey = false;
     needs_rekey = decrypt_key_for_load(&mut config.api_key) || needs_rekey;
     needs_rekey = decrypt_key_for_load(&mut config.search_api_key) || needs_rekey;
     for profile in config.profiles.values_mut() {
         needs_rekey = decrypt_key_for_load(&mut profile.api_key) || needs_rekey;
     }
-    if needs_rekey {
+    if needs_rekey || config_changed {
         persist_config(&config)?;
     }
     Ok(config)
@@ -467,8 +490,8 @@ async fn fetch_ollama_models(base_url: String) -> Result<Vec<Value>, String> {
 
 /// Push a steering message into the agent's intervention queue
 #[tauri::command]
-async fn push_steering_message(message: String) -> Result<(), String> {
-    agent::push_steering_message(message).await;
+async fn push_steering_message(message: String, request_id: String) -> Result<(), String> {
+    agent::push_steering_message(request_id, message).await;
     Ok(())
 }
 

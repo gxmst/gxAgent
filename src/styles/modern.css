@@ -28,73 +28,9 @@
   --shadow-xl: 0 12px 32px rgba(0, 0, 0, 0.16);
 }
 
-/* Light Theme - 温暖明亮 */
-[data-theme="light"] {
-  --bg-app: #fafafa;
-  --bg-surface: #ffffff;
-  --bg-surface-hover: #f8f8f8;
-  --bg-elevated: #ffffff;
-  --bg-overlay: rgba(0, 0, 0, 0.5);
-
-  --text-primary: #1a1a1a;
-  --text-secondary: #666666;
-  --text-tertiary: #999999;
-  --text-inverse: #ffffff;
-
-  --border-light: #f0f0f0;
-  --border-medium: #e0e0e0;
-  --border-strong: #d0d0d0;
-
-  --accent: #007aff;
-  --accent-hover: #0051d5;
-  --accent-light: rgba(0, 122, 255, 0.1);
-
-  --success: #34c759;
-  --success-light: rgba(52, 199, 89, 0.1);
-
-  --warning: #ff9500;
-  --warning-light: rgba(255, 149, 0, 0.1);
-
-  --error: #ff3b30;
-  --error-light: rgba(255, 59, 48, 0.1);
-
-  color: var(--text-primary);
-  background: var(--bg-app);
-}
-
-/* Dark Theme - 深邃优雅 */
-[data-theme="dark"] {
-  --bg-app: #0d0d0d;
-  --bg-surface: #1a1a1a;
-  --bg-surface-hover: #242424;
-  --bg-elevated: #2a2a2a;
-  --bg-overlay: rgba(0, 0, 0, 0.7);
-
-  --text-primary: #f5f5f5;
-  --text-secondary: #a0a0a0;
-  --text-tertiary: #707070;
-  --text-inverse: #1a1a1a;
-
-  --border-light: #2a2a2a;
-  --border-medium: #333333;
-  --border-strong: #444444;
-
-  --accent: #0a84ff;
-  --accent-hover: #409cff;
-  --accent-light: rgba(10, 132, 255, 0.15);
-
-  --success: #32d74b;
-  --success-light: rgba(50, 215, 75, 0.15);
-
-  --warning: #ff9f0a;
-  --warning-light: rgba(255, 159, 10, 0.15);
-
-  --error: #ff453a;
-  --error-light: rgba(255, 69, 58, 0.15);
-
-  color: var(--text-primary);
-  background: var(--bg-app);
-}
+/* Theme color tokens (light/dark + custom themes) are the single source of
+   truth in App.css. modern.css only owns the non-color scale tokens above so
+   the two files can no longer drift apart. */
 
 * {
   box-sizing: border-box;
@@ -103,9 +39,8 @@
 }
 
 body {
-  font-family: var(--font-sans);
-  font-size: 15px;
-  line-height: 1.5;
+  /* Font family / size / line-height come from :root in App.css (single
+     source of truth). Keep only rendering hints here. */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
