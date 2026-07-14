@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::workspace;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiProfile {
     pub name: String,
@@ -25,6 +27,10 @@ pub struct AppConfig {
     pub top_p: f32,
     pub max_tokens: Option<u32>,
     pub system_prompt: String,
+    /// Active role text duplicated into the current user request for gateways
+    /// that ignore OpenAI/Anthropic system prompts. This field is request-only.
+    #[serde(default, skip_serializing)]
+    pub role_prompt: Option<String>,
     pub streaming: bool,
     #[serde(default = "default_thinking_level")]
     pub thinking_level: String,
@@ -287,6 +293,7 @@ impl Default for AppConfig {
             top_p: 1.0,
             max_tokens: None,
             system_prompt: "You are a capable AI assistant with access to local tools (running commands, reading and writing files, searching the web). Help the user accomplish their task by using the available tools when they are needed, and answering directly when they are not. Be careful, honest, and direct. Prefer concrete actions over lengthy explanations. If you are unsure or lack enough information, say so instead of guessing, and do not invent facts, files, command results, or tool output. When a task could be destructive or hard to undo, confirm with the user before proceeding.".into(),
+            role_prompt: None,
             streaming: true,
             thinking_level: "medium".into(),
             context_limit: 50,
@@ -304,9 +311,9 @@ impl Default for AppConfig {
             ],
             approval_policy: "standard".into(),
             trusted_patterns: default_trusted_patterns(),
-            default_work_dir: dirs::home_dir()
-                .map(|h| h.join("gxAgent-workspace").to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string()),
+            default_work_dir: workspace::default_workspace_path()
+                .to_string_lossy()
+                .to_string(),
             persist_trust: false,
             theme: "light".into(),
             language: "zh".into(),
@@ -324,5 +331,23 @@ impl Default for AppConfig {
             preview_sandbox: true,
             tools_migration_version: CURRENT_TOOLS_MIGRATION_VERSION,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_prompt_is_accepted_from_requests_but_never_serialized() {
+        let mut request_value = serde_json::to_value(AppConfig::default()).unwrap();
+        assert!(request_value.get("role_prompt").is_none());
+        request_value["role_prompt"] = serde_json::json!("active role");
+
+        let request_config: AppConfig = serde_json::from_value(request_value).unwrap();
+        assert_eq!(request_config.role_prompt.as_deref(), Some("active role"));
+
+        let persisted_value = serde_json::to_value(request_config).unwrap();
+        assert!(persisted_value.get("role_prompt").is_none());
     }
 }

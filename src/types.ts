@@ -17,6 +17,8 @@ export interface AppConfig {
   top_p: number;
   max_tokens: number | null;
   system_prompt: string;
+  /** Request-only compatibility copy of an active role preset. Never persisted. */
+  role_prompt?: string | null;
   streaming: boolean;
   thinking_level: "low" | "medium" | "high";
   context_limit: number;
@@ -94,6 +96,10 @@ export interface Attachment {
   type: "image" | "text";
   data: string;
   mimeType?: string;
+  path?: string;
+  warning?: string;
+  truncated?: boolean;
+  originalSize?: number;
 }
 
 export interface Message {
@@ -117,18 +123,25 @@ export interface ChatSession {
   messages: Message[];
   sessionConfig: SessionConfig;
   pinned?: boolean;
+  sidebarOrder: number;
+  createdAt: number;
+  updatedAt: number;
+  compactBackup?: Message[];
 }
 
 export interface SessionConfig {
+  schemaVersion: 2;
   mode: "chat" | "code";
-  systemPrompt: string;
-  model: string;
-  contextLimit: number;
-  temperature: number;
-  topP: number;
-  maxTokens: number | null;
-  streaming: boolean;
-  thinkingLevel: "low" | "medium" | "high";
+  profileId: string | null;
+  workDir: string | null;
+  systemPrompt: string | null;
+  model: string | null;
+  contextLimit: number | null;
+  temperature: number | null;
+  topP: number | null;
+  maxTokens: number | null | "inherit";
+  streaming: boolean | null;
+  thinkingLevel: "low" | "medium" | "high" | null;
   backgroundImage: string;
   activeRolePresetId: string | null;
   searchMode: "off" | "auto" | "force";

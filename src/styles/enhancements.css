@@ -228,7 +228,16 @@
 }
 
 .command-item {
+  display: block;
+  width: 100%;
   padding: var(--space-3);
+  background: transparent;
+  color: inherit;
+  border-top: none;
+  border-right: none;
+  border-left: none;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 0.2s;
   border-bottom: 1px solid var(--border-light);

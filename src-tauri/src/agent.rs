@@ -3,7 +3,11 @@ use crate::config::AppConfig;
 use crate::mcp::McpManager;
 use crate::policy::{check_approval, ApprovalLevel};
 use crate::provider;
-use crate::tools::{execute_tool_with_timeout, get_enabled_tool_definitions};
+use crate::text::{utf8_prefix, utf8_suffix, IncrementalUtf8Decoder};
+use crate::tools::{
+    execute_tool_with_control, get_enabled_tool_definitions, ExecutionChunk, TOOL_CANCELLED_ERROR,
+};
+use crate::workspace;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::future::Future;
@@ -70,6 +74,42 @@ const ABSOLUTE_MAX_TOOL_CALLS_PER_REQUEST: u32 = 100;
 
 const SEARCH_FOLLOWUP_INSTRUCTION: &str = "You have just received web search results. You MUST base your answer on these search results. Cite the sources by mentioning the title and link when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing and what you could find. Do not make up information not present in the search results.";
 const GENERAL_ASSISTANT_INSTRUCTION: &str = "Assistant behavior: Be helpful, careful, and honest. Answer in the user's language when practical. If information is uncertain, outdated, or unavailable, say so clearly. Do not invent facts, citations, files, command results, or tool output. Ask for clarification when the user's goal is ambiguous and a wrong assumption would be risky.";
+const DEFAULT_CHAT_SYSTEM_PROMPT: &str = "You are a helpful AI assistant. Be careful, honest, and practical. Answer in the user's language when practical. If you are unsure or lack enough information, say so instead of guessing. When using web search, ground the answer in the search results and cite relevant sources.";
+const ROLE_PRESET_BEGIN_MARKER: &str = "<<<GXAGENT_ACTIVE_ROLE_PRESET_BEGIN>>>";
+const ROLE_PRESET_END_MARKER: &str = "<<<GXAGENT_ACTIVE_ROLE_PRESET_END>>>";
+const USER_REQUEST_BEGIN_MARKER: &str = "<<<GXAGENT_USER_REQUEST_BEGIN>>>";
+const USER_REQUEST_END_MARKER: &str = "<<<GXAGENT_USER_REQUEST_END>>>";
+
+fn resolve_chat_system_prompt(configured_prompt: &str) -> String {
+    if configured_prompt.trim().is_empty() {
+        DEFAULT_CHAT_SYSTEM_PROMPT.to_string()
+    } else {
+        configured_prompt.to_string()
+    }
+}
+
+/// Some OpenAI-compatible Claude/Kiro gateways silently ignore the canonical
+/// system message. Repeat only an explicitly active role preset at user level
+/// for the current outbound request. The UI history keeps the original user
+/// text, and the leading marker prevents accidental double wrapping.
+fn prepend_active_role_prompt(user_prompt: &str, role_prompt: Option<&str>) -> String {
+    let Some(role_prompt) = role_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    else {
+        return user_prompt.to_string();
+    };
+    if user_prompt
+        .trim_start()
+        .starts_with(ROLE_PRESET_BEGIN_MARKER)
+    {
+        return user_prompt.to_string();
+    }
+
+    format!(
+        "{ROLE_PRESET_BEGIN_MARKER}\nThe following role preset was explicitly selected by the user. Apply it to this response while keeping the user's actual request separate.\n{role_prompt}\n{ROLE_PRESET_END_MARKER}\n\n{USER_REQUEST_BEGIN_MARKER}\n{user_prompt}\n{USER_REQUEST_END_MARKER}"
+    )
+}
 
 /// Agentic workflow guidance injected only in Code mode. This shapes the
 /// explore -> plan -> act -> verify loop that makes tool-using agents reliable,
@@ -129,16 +169,25 @@ type CancellationMap = std::collections::HashMap<String, watch::Sender<bool>>;
 static AGENT_CANCELLATIONS: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<CancellationMap>>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(CancellationMap::new())));
 
-async fn register_cancellation(request_id: &str) -> watch::Receiver<bool> {
+static CHECKPOINTED_REQUESTS: once_cell::sync::Lazy<
+    Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+> = once_cell::sync::Lazy::new(|| {
+    Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()))
+});
+
+pub(crate) async fn register_cancellation(request_id: &str) -> watch::Receiver<bool> {
     let (tx, rx) = watch::channel(false);
     let mut cancellations = AGENT_CANCELLATIONS.lock().await;
     cancellations.insert(request_id.to_string(), tx);
     rx
 }
 
-async fn unregister_cancellation(request_id: &str) {
-    let mut cancellations = AGENT_CANCELLATIONS.lock().await;
-    cancellations.remove(request_id);
+pub(crate) async fn unregister_cancellation(request_id: &str) {
+    {
+        let mut cancellations = AGENT_CANCELLATIONS.lock().await;
+        cancellations.remove(request_id);
+    }
+    CHECKPOINTED_REQUESTS.lock().await.remove(request_id);
 }
 
 pub async fn cancel_agent_request(request_id: &str) -> Result<(), String> {
@@ -166,7 +215,7 @@ fn is_agent_cancelled_error(err: &str) -> bool {
     err == AGENT_CANCELLED_ERROR
 }
 
-async fn wait_for_cancellation(cancel_rx: &mut watch::Receiver<bool>) {
+pub(crate) async fn wait_for_cancellation(cancel_rx: &mut watch::Receiver<bool>) {
     if *cancel_rx.borrow() {
         return;
     }
@@ -256,6 +305,13 @@ fn emit_usage(window: &Window, request_id: &str, mut payload: Value) {
         obj.insert("requestId".to_string(), json!(request_id));
     }
     let _ = window.emit("agent-usage", payload);
+}
+
+fn emit_request_event(window: &Window, event: &str, request_id: &str, mut payload: Value) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("requestId".to_string(), json!(request_id));
+    }
+    let _ = window.emit(event, payload);
 }
 
 fn normalized_thinking_level(level: &str) -> &'static str {
@@ -374,9 +430,9 @@ fn compact_messages(messages: &mut Vec<Value>, context_limit: usize) {
                 if content.len() > 800 {
                     let truncated = format!(
                         "⚡[Tool output truncated] Prefix:\n{}\n...\n[{} chars omitted]\n...\nSuffix:\n{}",
-                        &content[..400.min(content.len())],
+                        utf8_prefix(content, 400),
                         content.len().saturating_sub(800),
-                        &content[content.len().saturating_sub(400)..]
+                        utf8_suffix(content, 400)
                     );
                     msg["content"] = json!(truncated);
                 }
@@ -386,7 +442,7 @@ fn compact_messages(messages: &mut Vec<Value>, context_limit: usize) {
                 if content.len() > 2000 {
                     let truncated = format!(
                         "{}\n...\n[{} chars omitted]",
-                        &content[..1500.min(content.len())],
+                        utf8_prefix(content, 1500),
                         content.len().saturating_sub(1500)
                     );
                     msg["content"] = json!(truncated);
@@ -559,30 +615,34 @@ pub async fn start_agent_loop(
     } else {
         let mut mcp_manager = McpManager::new();
         let mcp_tool_defs = if !config.mcp_servers.is_empty() {
-            match mcp_manager.start_all(&config.mcp_servers).await {
-                Ok(tools) => {
-                    let count = tools.len();
-                    let _ = window.emit(
-                        "agent-mcp-status",
-                        json!({
-                            "status": "started",
-                            "servers": config.mcp_servers.len(),
-                            "tools": count,
-                        }),
-                    );
-                    tools
-                }
-                Err(e) => {
-                    let _ = window.emit(
-                        "agent-mcp-status",
-                        json!({
-                            "status": "error",
-                            "error": e,
-                        }),
-                    );
-                    Vec::new()
-                }
-            }
+            let report = mcp_manager.start_all(&config.mcp_servers).await;
+            let started = report
+                .servers
+                .iter()
+                .filter(|server| server.status == "started")
+                .count();
+            let failed = report.servers.len().saturating_sub(started);
+            let status = if failed == 0 {
+                "started"
+            } else if started == 0 {
+                "error"
+            } else {
+                "partial"
+            };
+            emit_request_event(
+                &window,
+                "agent-mcp-status",
+                &request_id,
+                json!({
+                    "status": status,
+                    "servers": report.servers.len(),
+                    "serverStatuses": report.servers,
+                    "started": started,
+                    "failed": failed,
+                    "tools": report.tool_definitions.len(),
+                }),
+            );
+            report.tool_definitions
         } else {
             Vec::new()
         };
@@ -666,6 +726,7 @@ async fn consume_stream(
 ) -> Result<StreamOutcome, String> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut utf8_decoder = IncrementalUtf8Decoder::default();
     let mut state = provider::StreamState::default();
 
     let mut content = String::new();
@@ -698,7 +759,7 @@ async fn consume_stream(
             Some(c) => c.map_err(|e| format!("Stream error: {}", e))?,
             None => break,
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        buffer.push_str(&utf8_decoder.push(&chunk));
 
         while let Some(pos) = buffer.find('\n') {
             let line = buffer[..pos].trim().to_string();
@@ -720,7 +781,7 @@ async fn consume_stream(
                     emit_reasoning_chunk(window, request_id, &think);
                 }
                 for tc in delta.tool_calls {
-                    apply_tool_call_delta(&mut tool_calls, tc, window, emit_drafting);
+                    apply_tool_call_delta(&mut tool_calls, tc, window, request_id, emit_drafting);
                 }
                 if let Some(pt) = delta.prompt_tokens {
                     prompt_tokens = pt;
@@ -735,6 +796,8 @@ async fn consume_stream(
         }
     }
 
+    buffer.push_str(&utf8_decoder.finish());
+
     // Flush any trailing buffered line (some servers omit a final newline).
     let tail = buffer.trim();
     if !tail.is_empty() {
@@ -747,7 +810,7 @@ async fn consume_stream(
                 emit_reasoning_chunk(window, request_id, &think);
             }
             for tc in delta.tool_calls {
-                apply_tool_call_delta(&mut tool_calls, tc, window, emit_drafting);
+                apply_tool_call_delta(&mut tool_calls, tc, window, request_id, emit_drafting);
             }
             if let Some(pt) = delta.prompt_tokens {
                 prompt_tokens = pt;
@@ -801,6 +864,7 @@ fn apply_tool_call_delta(
     acc: &mut Vec<AccumulatedToolCall>,
     delta: provider::ToolCallDelta,
     window: &Window,
+    request_id: &str,
     emit_drafting: bool,
 ) {
     let idx = delta.index;
@@ -831,6 +895,7 @@ fn apply_tool_call_delta(
         let _ = window.emit(
             "agent-tool-drafting",
             json!({
+                "requestId": request_id,
                 "index": idx,
                 "id": acc[idx].id,
                 "name": acc[idx].name,
@@ -876,7 +941,12 @@ async fn chat_turn(
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        let _ = window.emit("agent-error", &error_text);
+        emit_request_event(
+            window,
+            "agent-error",
+            request_id,
+            json!({ "error": error_text }),
+        );
         return Err(format!("API error ({}): {}", status, error_text));
     }
 
@@ -962,6 +1032,7 @@ async fn chat_turn(
 /// appended for the model to inspect.
 async fn run_chat_search_tools(
     window: &Window,
+    request_id: &str,
     config: &AppConfig,
     messages: &mut Vec<Value>,
     assistant_content: &str,
@@ -979,8 +1050,10 @@ async fn run_chat_search_tools(
                 "Error: Per-request tool call limit reached ({}). Ask the user before continuing.",
                 max_tool_calls
             );
-            let _ = window.emit(
+            emit_request_event(
+                window,
                 "agent-tool-blocked",
+                request_id,
                 json!({
                     "id": tc.id,
                     "name": tc.name,
@@ -1010,27 +1083,33 @@ async fn run_chat_search_tools(
             .ok()
             .and_then(|a| a["query"].as_str().map(String::from))
             .unwrap_or_else(|| tc.name.clone());
-        let _ = window.emit(
+        emit_request_event(
+            window,
             "agent-search-status",
+            request_id,
             json!({ "type": "searching", "query": query_display }),
         );
         let search_start = std::time::Instant::now();
-        let tool_output = await_with_cancel(
-            cancel_rx,
-            execute_tool_with_timeout(
-                &tc.name,
-                &tc.arguments,
-                &config.default_work_dir,
-                &config.search_provider,
-                &config.search_api_key,
-                config.command_timeout,
-            ),
+        let tool_output = execute_tool_with_control(
+            &tc.name,
+            &tc.arguments,
+            &config.default_work_dir,
+            &config.search_provider,
+            &config.search_api_key,
+            config.command_timeout,
+            Some(cancel_rx.clone()),
+            None,
         )
-        .await?;
+        .await;
+        if tool_output == TOOL_CANCELLED_ERROR {
+            return Err(AGENT_CANCELLED_ERROR.to_string());
+        }
         let elapsed = search_start.elapsed().as_secs_f64();
         if tool_output.starts_with("Error:") {
-            let _ = window.emit(
+            emit_request_event(
+                window,
                 "agent-search-status",
+                request_id,
                 json!({
                     "type": "error",
                     "query": query_display,
@@ -1044,14 +1123,12 @@ async fn run_chat_search_tools(
                 .lines()
                 .filter(|l| l.starts_with("Title:"))
                 .count();
-            let preview = if tool_output.len() > 500 {
-                &tool_output[..500]
-            } else {
-                &tool_output
-            };
+            let preview = utf8_prefix(&tool_output, 500);
             let sources = parse_search_sources(&tool_output);
-            let _ = window.emit(
+            emit_request_event(
+                window,
                 "agent-search-status",
+                request_id,
                 json!({
                     "type": "results",
                     "query": query_display,
@@ -1094,18 +1171,11 @@ async fn run_chat_mode(
     cancel_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     ensure_not_cancelled(&cancel_rx)?;
-    // Chat mode has no command/file tools, so any shell- or local-tool-specific
-    // instructions in the configured prompt (including legacy defaults that
-    // hardcoded PowerShell) are irrelevant here and can mislead the model.
-    // Fall back to a clean general prompt in that case.
-    let mut chat_system_prompt = if config.system_prompt.contains("PowerShell")
-        || config.system_prompt.contains("execute_command")
-        || config.system_prompt.contains("local tools")
-    {
-        "You are a helpful AI assistant. Be careful, honest, and practical. Answer in the user's language when practical. If you are unsure or lack enough information, say so instead of guessing. When using web search, ground the answer in the search results and cite relevant sources.".to_string()
-    } else {
-        config.system_prompt.clone()
-    };
+    // The configured prompt may intentionally describe PowerShell or tools as
+    // part of a user-selected role. Never discard it based on its contents.
+    let mut chat_system_prompt = resolve_chat_system_prompt(&config.system_prompt);
+    let outbound_user_prompt =
+        prepend_active_role_prompt(&user_prompt, config.role_prompt.as_deref());
     append_general_assistant_instruction(&mut chat_system_prompt);
     append_thinking_instruction(&mut chat_system_prompt, &config.thinking_level);
     let has_web_search = config.tools_enabled.contains(&"web_search".to_string());
@@ -1130,7 +1200,7 @@ async fn run_chat_mode(
     };
     messages.extend(normalize_session_messages(limited_messages, is_ollama));
     messages.push(build_user_message(
-        user_prompt.clone(),
+        outbound_user_prompt,
         &image_attachments,
         is_ollama,
     ));
@@ -1142,8 +1212,10 @@ async fn run_chat_mode(
     if search_mode == "force" && has_web_search && !is_ollama {
         ensure_not_cancelled(&cancel_rx)?;
         let search_query = user_prompt.clone();
-        let _ = window.emit(
+        emit_request_event(
+            &window,
             "agent-search-status",
+            &request_id,
             json!({
                 "type": "searching",
                 "query": search_query,
@@ -1151,24 +1223,28 @@ async fn run_chat_mode(
         );
         let search_start = std::time::Instant::now();
         let search_args = json!({"query": search_query}).to_string();
-        let tool_output = await_with_cancel(
-            &cancel_rx,
-            execute_tool_with_timeout(
-                "web_search",
-                &search_args,
-                &config.default_work_dir,
-                &config.search_provider,
-                &config.search_api_key,
-                config.command_timeout,
-            ),
+        let tool_output = execute_tool_with_control(
+            "web_search",
+            &search_args,
+            &config.default_work_dir,
+            &config.search_provider,
+            &config.search_api_key,
+            config.command_timeout,
+            Some(cancel_rx.clone()),
+            None,
         )
-        .await?;
+        .await;
+        if tool_output == TOOL_CANCELLED_ERROR {
+            return Err(AGENT_CANCELLED_ERROR.to_string());
+        }
         tool_call_count += 1;
         let search_elapsed = search_start.elapsed().as_secs_f64();
 
         if tool_output.starts_with("Error:") {
-            let _ = window.emit(
+            emit_request_event(
+                &window,
                 "agent-search-status",
+                &request_id,
                 json!({
                     "type": "error",
                     "query": search_query,
@@ -1186,15 +1262,13 @@ async fn run_chat_mode(
                 .lines()
                 .filter(|l| l.starts_with("Title:"))
                 .count();
-            let preview = if tool_output.len() > 500 {
-                &tool_output[..500]
-            } else {
-                &tool_output.clone()
-            };
+            let preview = utf8_prefix(&tool_output, 500);
             let sources = parse_search_sources(&tool_output);
 
-            let _ = window.emit(
+            emit_request_event(
+                &window,
                 "agent-search-status",
+                &request_id,
                 json!({
                     "type": "results",
                     "query": search_query,
@@ -1292,6 +1366,7 @@ async fn run_chat_mode(
         // loop to let the model answer from them on the next turn.
         let ran = run_chat_search_tools(
             &window,
+            &request_id,
             &config,
             &mut messages,
             &outcome.content,
@@ -1453,6 +1528,8 @@ async fn start_agent_loop_inner(
 ) -> Result<(), String> {
     ensure_not_cancelled(&cancel_rx)?;
     let mut system_prompt = config.system_prompt.clone();
+    let outbound_user_prompt =
+        prepend_active_role_prompt(&user_prompt, config.role_prompt.as_deref());
     let wire = provider::Wire::from_config(&config);
     let is_ollama = wire.is_ollama();
 
@@ -1461,8 +1538,10 @@ async fn start_agent_loop_inner(
             "\n\n===========================================\n📌 [Workspace Rules (from {})]:\n{}\n===========================================\n",
             filename, rules
         ));
-        let _ = window.emit(
+        emit_request_event(
+            &window,
             "agent-workspace-rules",
+            &request_id,
             json!({
                 "file": filename,
                 "length": rules.len(),
@@ -1493,7 +1572,7 @@ async fn start_agent_loop_inner(
     };
     messages.extend(normalize_session_messages(limited_messages, is_ollama));
     messages.push(build_user_message(
-        user_prompt,
+        outbound_user_prompt,
         &image_attachments,
         is_ollama,
     ));
@@ -1519,7 +1598,12 @@ async fn start_agent_loop_inner(
                 "role": "user",
                 "content": steering_prompt
             }));
-            let _ = window.emit("agent-steering-processed", &combined);
+            emit_request_event(
+                &window,
+                "agent-steering-processed",
+                &request_id,
+                json!({ "content": combined }),
+            );
         }
 
         // When history approaches the context window, summarize the older turns
@@ -1617,6 +1701,7 @@ async fn start_agent_loop_inner(
 
             let result = process_tool_calls(
                 &window,
+                &request_id,
                 &accumulated,
                 &config,
                 &mut messages,
@@ -1712,6 +1797,7 @@ async fn start_agent_loop_inner(
         // Process tool calls with approval
         let result = process_tool_calls(
             &window,
+            &request_id,
             &accumulated_tool_calls,
             &config,
             &mut messages,
@@ -1745,52 +1831,64 @@ async fn start_agent_loop_inner(
     Ok(())
 }
 
-async fn git_checkpoint(work_dir: &str) {
-    let output = tokio::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(work_dir)
-        .creation_flags(0x08000000)
-        .output()
-        .await;
-
-    if let Ok(out) = output {
-        if !out.status.success() {
-            return;
-        }
-    } else {
+async fn git_checkpoint(window: &Window, request_id: &str, work_dir: &str) {
+    // Parallel mutating tools in one agent turn must all wait for the same
+    // pre-run snapshot. Holding this short-lived lock prevents a second tool
+    // from starting before the first checkpoint has finished being written.
+    let mut checkpointed = CHECKPOINTED_REQUESTS.lock().await;
+    if checkpointed.contains(request_id) {
         return;
     }
-
-    let _ = tokio::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(work_dir)
-        .creation_flags(0x08000000)
-        .output()
-        .await;
-
-    let _ = tokio::process::Command::new("git")
-        .args([
-            "commit",
-            "-m",
-            "gxagent-auto-checkpoint",
-            "--no-verify",
-            "--allow-empty",
-        ])
-        .current_dir(work_dir)
-        .creation_flags(0x08000000)
-        .output()
-        .await;
+    match workspace::create_checkpoint_internal(work_dir, Some("before tool execution".into()))
+        .await
+    {
+        Ok(checkpoint) => {
+            checkpointed.insert(request_id.to_string());
+            emit_request_event(
+                window,
+                "agent-checkpoint",
+                request_id,
+                json!({
+                    "status": "created",
+                    "reference": checkpoint.reference,
+                    "commit": checkpoint.commit,
+                    "createdAt": checkpoint.created_at,
+                    "label": checkpoint.label,
+                }),
+            );
+        }
+        Err(error) => emit_request_event(
+            window,
+            "agent-checkpoint",
+            request_id,
+            json!({
+                "status": "unavailable",
+                "error": error,
+            }),
+        ),
+    }
 }
 
 async fn execute_tool_with_mcp(
+    window: &Window,
+    request_id: &str,
+    tool_call_id: &str,
     name: &str,
     args_str: &str,
     config: &AppConfig,
     mcp_manager: &mut McpManager,
-) -> String {
-    let write_tools = ["write_file", "edit_file", "execute_command"];
-    if write_tools.contains(&name) {
-        git_checkpoint(&config.default_work_dir).await;
+    cancel_rx: &watch::Receiver<bool>,
+) -> Result<String, String> {
+    let read_only_tools = [
+        "read_file",
+        "list_dir",
+        "web_search",
+        "grep",
+        "glob",
+        "todo_write",
+    ];
+    if !read_only_tools.contains(&name) {
+        git_checkpoint(window, request_id, &config.default_work_dir).await;
     }
 
     let builtin_tools = [
@@ -1806,22 +1904,122 @@ async fn execute_tool_with_mcp(
         "todo_write",
     ];
     if builtin_tools.contains(&name) {
-        execute_tool_with_timeout(
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutionChunk>();
+        let execution = execute_tool_with_control(
             name,
             args_str,
             &config.default_work_dir,
             &config.search_provider,
             &config.search_api_key,
             config.command_timeout,
-        )
-        .await
+            Some(cancel_rx.clone()),
+            Some(output_tx),
+        );
+        tokio::pin!(execution);
+
+        let output = loop {
+            tokio::select! {
+                output = &mut execution => break output,
+                chunk = output_rx.recv() => {
+                    if let Some(chunk) = chunk {
+                        emit_request_event(
+                            window,
+                            "agent-tool-output-chunk",
+                            request_id,
+                            json!({
+                                "id": tool_call_id,
+                                "name": name,
+                                "stream": chunk.stream,
+                                "content": chunk.content,
+                            }),
+                        );
+                    }
+                }
+            }
+        };
+        while let Ok(chunk) = output_rx.try_recv() {
+            emit_request_event(
+                window,
+                "agent-tool-output-chunk",
+                request_id,
+                json!({
+                    "id": tool_call_id,
+                    "name": name,
+                    "stream": chunk.stream,
+                    "content": chunk.content,
+                }),
+            );
+        }
+
+        if output == TOOL_CANCELLED_ERROR {
+            Err(AGENT_CANCELLED_ERROR.to_string())
+        } else {
+            Ok(output)
+        }
     } else {
         let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
-        match mcp_manager.route_tool_call(name, args).await {
-            Ok(output) => output,
-            Err(e) => format!("MCP tool error: {}", e),
+        match await_with_cancel(cancel_rx, mcp_manager.route_tool_call(name, args)).await? {
+            Ok(output) => Ok(output),
+            Err(e) => Ok(format!("MCP tool error: {}", e)),
         }
     }
+}
+
+async fn read_mutation_target(
+    tool_call: &AccumulatedToolCall,
+    config: &AppConfig,
+) -> Option<(String, bool, Option<String>)> {
+    if !matches!(tool_call.name.as_str(), "write_file" | "edit_file") {
+        return None;
+    }
+    let arguments: Value = serde_json::from_str(&tool_call.arguments).ok()?;
+    let path = arguments.get("path")?.as_str()?;
+    let resolved = workspace::resolve_within_workspace(path, &config.default_work_dir).ok()?;
+    let resolved_path = resolved.to_string_lossy().to_string();
+    let exists = resolved.is_file();
+    let content = if exists {
+        tokio::fs::read_to_string(resolved).await.ok()
+    } else {
+        None
+    };
+    Some((resolved_path, exists, content))
+}
+
+async fn tool_executing_payload(tool_call: &AccumulatedToolCall, config: &AppConfig) -> Value {
+    let mut payload = json!({
+        "id": tool_call.id,
+        "name": tool_call.name,
+        "arguments": tool_call.arguments,
+        "displayArguments": sanitize_args_for_log(&tool_call.arguments)
+    });
+    if let Some((path, exists, content)) = read_mutation_target(tool_call, config).await {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("path".to_string(), json!(path));
+            object.insert("beforeExists".to_string(), json!(exists));
+            object.insert("beforeContent".to_string(), json!(content));
+        }
+    }
+    payload
+}
+
+async fn tool_output_payload(
+    tool_call: &AccumulatedToolCall,
+    config: &AppConfig,
+    output: &str,
+) -> Value {
+    let mut payload = json!({
+        "id": tool_call.id,
+        "name": tool_call.name,
+        "output": output
+    });
+    if let Some((path, exists, content)) = read_mutation_target(tool_call, config).await {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("path".to_string(), json!(path));
+            object.insert("afterExists".to_string(), json!(exists));
+            object.insert("afterContent".to_string(), json!(content));
+        }
+    }
+    payload
 }
 
 /// Process accumulated tool calls with human-in-the-loop approval.
@@ -1829,6 +2027,7 @@ async fn execute_tool_with_mcp(
 /// Ok(false) if the loop should continue.
 async fn process_tool_calls(
     window: &Window,
+    request_id: &str,
     tool_calls: &[AccumulatedToolCall],
     config: &AppConfig,
     messages: &mut Vec<Value>,
@@ -1855,8 +2054,10 @@ async fn process_tool_calls(
                 "Per-request tool call limit reached ({}). Ask the user before continuing.",
                 max_tool_calls
             );
-            let _ = window.emit(
+            emit_request_event(
+                window,
                 "agent-tool-blocked",
+                request_id,
                 json!({
                     "id": tc.id,
                     "name": tc.name,
@@ -1897,8 +2098,10 @@ async fn process_tool_calls(
             }
             ApprovalLevel::Blocked => {
                 // Emit blocked event and add error as tool response
-                let _ = window.emit(
+                emit_request_event(
+                    window,
                     "agent-tool-blocked",
+                    request_id,
                     json!({
                         "id": tc.id,
                         "name": tc.name,
@@ -1947,18 +2150,21 @@ async fn process_tool_calls(
 
     if !parallel_reads.is_empty() {
         for tc in &parallel_reads {
-            let _ = window.emit(
+            emit_request_event(
+                window,
                 "agent-tool-executing",
+                request_id,
                 json!({
                     "id": tc.id,
                     "name": tc.name,
-                    "arguments": sanitize_args_for_log(&tc.arguments)
+                    "arguments": tc.arguments,
+                    "displayArguments": sanitize_args_for_log(&tc.arguments)
                 }),
             );
         }
 
         // Run all read-only calls concurrently on the blocking-friendly async
-        // path. execute_tool_with_timeout only needs cloned config fields.
+        // path. The controlled executor only needs cloned config fields.
         let futures = parallel_reads.iter().map(|tc| {
             let name = tc.name.clone();
             let args = tc.arguments.clone();
@@ -1966,15 +2172,31 @@ async fn process_tool_calls(
             let provider = config.search_provider.clone();
             let key = config.search_api_key.clone();
             let timeout = config.command_timeout;
+            let cancel_rx = cancel_rx.clone();
             async move {
-                execute_tool_with_timeout(&name, &args, &work_dir, &provider, &key, timeout).await
+                execute_tool_with_control(
+                    &name,
+                    &args,
+                    &work_dir,
+                    &provider,
+                    &key,
+                    timeout,
+                    Some(cancel_rx),
+                    None,
+                )
+                .await
             }
         });
-        let outputs = await_with_cancel(cancel_rx, futures_util::future::join_all(futures)).await?;
+        let outputs = futures_util::future::join_all(futures).await;
 
         for (tc, output) in parallel_reads.iter().zip(outputs.into_iter()) {
-            let _ = window.emit(
+            if output == TOOL_CANCELLED_ERROR {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
+            emit_request_event(
+                window,
                 "agent-tool-output",
+                request_id,
                 json!({
                     "id": tc.id,
                     "name": tc.name,
@@ -1986,28 +2208,30 @@ async fn process_tool_calls(
     }
 
     for tc in &sequential {
-        let _ = window.emit(
+        emit_request_event(
+            window,
             "agent-tool-executing",
-            json!({
-                "id": tc.id,
-                "name": tc.name,
-                "arguments": sanitize_args_for_log(&tc.arguments)
-            }),
+            request_id,
+            tool_executing_payload(tc, config).await,
         );
 
-        let output = await_with_cancel(
+        let output = execute_tool_with_mcp(
+            window,
+            request_id,
+            &tc.id,
+            &tc.name,
+            &tc.arguments,
+            config,
+            &mut *mcp_manager,
             cancel_rx,
-            execute_tool_with_mcp(&tc.name, &tc.arguments, &config, &mut *mcp_manager),
         )
         .await?;
 
-        let _ = window.emit(
+        emit_request_event(
+            window,
             "agent-tool-output",
-            json!({
-                "id": tc.id,
-                "name": tc.name,
-                "output": output
-            }),
+            request_id,
+            tool_output_payload(tc, config, &output).await,
         );
 
         outputs_by_id.insert(tc.id.clone(), output);
@@ -2028,17 +2252,21 @@ async fn process_tool_calls(
 
     // If there are tools needing confirmation, emit approval request and wait
     if !needs_confirmation.is_empty() {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let approval_request_id = uuid::Uuid::new_v4().to_string();
         let request = ToolApprovalRequest {
-            request_id: request_id.clone(),
+            request_id: approval_request_id.clone(),
             tool_calls: needs_confirmation,
         };
 
-        let _ = window.emit("agent-tool-approval-request", &request);
+        let mut approval_payload = serde_json::to_value(&request).map_err(|e| e.to_string())?;
+        if let Some(object) = approval_payload.as_object_mut() {
+            object.insert("requestId".to_string(), json!(request_id));
+        }
+        let _ = window.emit("agent-tool-approval-request", approval_payload);
 
         // Wait for user response via Tauri state
         // The frontend will invoke "resolve_tool_approval" command
-        let approval_result = wait_for_approval(window, &request_id, cancel_rx).await?;
+        let approval_result = wait_for_approval(window, &approval_request_id, cancel_rx).await?;
 
         for (tc_id, approved) in approval_result {
             ensure_not_cancelled(cancel_rx)?;
@@ -2049,28 +2277,30 @@ async fn process_tool_calls(
                         .log_command(&tc.name, &tc.arguments, true, &username)
                         .await;
 
-                    let _ = window.emit(
+                    emit_request_event(
+                        window,
                         "agent-tool-executing",
-                        json!({
-                            "id": tc.id,
-                            "name": tc.name,
-                            "arguments": sanitize_args_for_log(&tc.arguments)
-                        }),
+                        request_id,
+                        tool_executing_payload(tc, config).await,
                     );
 
-                    let output = await_with_cancel(
+                    let output = execute_tool_with_mcp(
+                        window,
+                        request_id,
+                        &tc.id,
+                        &tc.name,
+                        &tc.arguments,
+                        config,
+                        &mut *mcp_manager,
                         cancel_rx,
-                        execute_tool_with_mcp(&tc.name, &tc.arguments, &config, &mut *mcp_manager),
                     )
                     .await?;
 
-                    let _ = window.emit(
+                    emit_request_event(
+                        window,
                         "agent-tool-output",
-                        json!({
-                            "id": tc.id,
-                            "name": tc.name,
-                            "output": output
-                        }),
+                        request_id,
+                        tool_output_payload(tc, config, &output).await,
                     );
 
                     messages.push(json!({
@@ -2381,4 +2611,79 @@ fn strip_dsml_tags(content: &str) -> String {
         })
         .collect();
     cleaned.join("\n").trim().to_string()
+}
+
+#[cfg(test)]
+mod role_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn chat_system_prompt_preserves_tool_related_role_text() {
+        for prompt in [
+            "You are a PowerShell specialist.",
+            "Explain when to use execute_command.",
+            "You can coordinate with local tools when useful.",
+        ] {
+            assert_eq!(resolve_chat_system_prompt(prompt), prompt);
+        }
+    }
+
+    #[test]
+    fn chat_system_prompt_falls_back_only_when_empty() {
+        assert_eq!(resolve_chat_system_prompt(""), DEFAULT_CHAT_SYSTEM_PROMPT);
+        assert_eq!(
+            resolve_chat_system_prompt("  \n\t"),
+            DEFAULT_CHAT_SYSTEM_PROMPT
+        );
+    }
+
+    #[test]
+    fn active_role_is_wrapped_before_the_current_user_request() {
+        let wrapped = prepend_active_role_prompt("Who are you?", Some("You are Little Orange."));
+
+        assert!(wrapped.starts_with(ROLE_PRESET_BEGIN_MARKER));
+        assert!(wrapped.contains("You are Little Orange."));
+        assert!(wrapped.contains(&format!(
+            "{USER_REQUEST_BEGIN_MARKER}\nWho are you?\n{USER_REQUEST_END_MARKER}"
+        )));
+        assert!(wrapped.find(ROLE_PRESET_END_MARKER) < wrapped.find(USER_REQUEST_BEGIN_MARKER));
+    }
+
+    #[test]
+    fn inactive_or_empty_role_does_not_modify_the_user_request() {
+        assert_eq!(prepend_active_role_prompt("hello", None), "hello");
+        assert_eq!(prepend_active_role_prompt("hello", Some(" \n ")), "hello");
+    }
+
+    #[test]
+    fn already_wrapped_request_is_not_wrapped_again() {
+        let once = prepend_active_role_prompt("hello", Some("role"));
+        let twice = prepend_active_role_prompt(&once, Some("role"));
+
+        assert_eq!(twice, once);
+        assert_eq!(twice.matches(ROLE_PRESET_BEGIN_MARKER).count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn registered_request_can_be_cancelled_and_unregistered() {
+        let request_id = format!("cancellation-test-{}", uuid::Uuid::new_v4());
+        let mut cancel_rx = register_cancellation(&request_id).await;
+
+        cancel_agent_request(&request_id).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_cancellation(&mut cancel_rx),
+        )
+        .await
+        .expect("cancellation signal should be observed");
+
+        unregister_cancellation(&request_id).await;
+        let error = cancel_agent_request(&request_id).await.unwrap_err();
+        assert!(error.contains("No active agent request found"));
+    }
 }

@@ -7,6 +7,22 @@ use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 
 type PendingMap = std::sync::Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+const MCP_REQUEST_TIMEOUT_SECS: u64 = 20;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub name: String,
+    pub status: String,
+    pub tool_count: usize,
+    pub tool_names: Vec<String>,
+    pub error: Option<String>,
+}
+
+pub struct McpStartReport {
+    pub tool_definitions: Vec<Value>,
+    pub servers: Vec<McpServerStatus>,
+}
 
 /// Running MCP server process with its tool definitions
 pub struct McpServer {
@@ -99,6 +115,7 @@ impl McpServer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .creation_flags(0x08000000); // CREATE_NO_WINDOW on Windows
 
         let mut child = cmd
@@ -131,6 +148,10 @@ impl McpServer {
                         }
                     }
                 }
+            }
+            let mut map = reader_pending.lock().await;
+            for (_, sender) in map.drain() {
+                let _ = sender.send(Err("MCP server closed its output stream".to_string()));
             }
         });
 
@@ -215,8 +236,18 @@ impl McpServer {
         })?;
 
         // Wait for the reader task to deliver the response
-        rx.await
-            .map_err(|_| "MCP server closed connection".to_string())?
+        match tokio::time::timeout(std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS), rx)
+            .await
+        {
+            Ok(result) => result.map_err(|_| "MCP server closed connection".to_string())?,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(format!(
+                    "MCP request '{}' timed out after {}s",
+                    method, MCP_REQUEST_TIMEOUT_SECS
+                ))
+            }
+        }
     }
 
     /// Send a JSON-RPC notification (no response expected)
@@ -281,11 +312,6 @@ impl McpServer {
         Ok(())
     }
 
-    /// Check if the server process is still running
-    pub fn is_running(&mut self) -> bool {
-        self.child.try_wait().ok().flatten().is_none()
-    }
-
     /// Kill the server process
     pub async fn kill(&mut self) {
         let _ = self.child.kill().await;
@@ -308,37 +334,46 @@ impl McpManager {
     pub async fn start_all(
         &mut self,
         configs: &HashMap<String, McpServerConfig>,
-    ) -> Result<Vec<Value>, String> {
+    ) -> McpStartReport {
         let mut all_tools = Vec::new();
+        let mut statuses = Vec::with_capacity(configs.len());
 
         for (name, config) in configs {
             match McpServer::start(config).await {
                 Ok(server) => {
                     let tools = server.tool_definitions().to_vec();
+                    let tool_names = tools
+                        .iter()
+                        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    statuses.push(McpServerStatus {
+                        name: name.clone(),
+                        status: "started".to_string(),
+                        tool_count: tools.len(),
+                        tool_names,
+                        error: None,
+                    });
                     all_tools.extend(tools);
                     self.servers.insert(name.clone(), server);
                 }
                 Err(e) => {
                     eprintln!("Failed to start MCP server '{}': {}", name, e);
+                    statuses.push(McpServerStatus {
+                        name: name.clone(),
+                        status: "error".to_string(),
+                        tool_count: 0,
+                        tool_names: Vec::new(),
+                        error: Some(e),
+                    });
                 }
             }
         }
 
-        Ok(all_tools)
-    }
-
-    /// Route a tool call to the appropriate MCP server
-    pub async fn call_tool(
-        &mut self,
-        server_name: &str,
-        tool_name: &str,
-        arguments: Value,
-    ) -> Result<String, String> {
-        let server = self
-            .servers
-            .get(server_name)
-            .ok_or_else(|| format!("MCP server '{}' not found", server_name))?;
-        server.call_tool(tool_name, arguments).await
+        McpStartReport {
+            tool_definitions: all_tools,
+            servers: statuses,
+        }
     }
 
     /// Route a tool call by tool name — searches all servers for the tool
@@ -360,20 +395,40 @@ impl McpManager {
         Err(format!("Unknown tool: {}", tool_name))
     }
 
-    /// Get all tool definitions from all servers
-    pub fn get_all_tool_definitions(&self) -> Vec<Value> {
-        self.servers
-            .values()
-            .flat_map(|s| s.tool_definitions().to_vec())
-            .collect()
-    }
-
     /// Shutdown all servers
     pub async fn shutdown(&mut self) {
         for (_, server) in self.servers.iter_mut() {
             server.kill().await;
         }
         self.servers.clear();
+    }
+}
+
+pub async fn test_server(name: String, config: McpServerConfig) -> McpServerStatus {
+    match McpServer::start(&config).await {
+        Ok(mut server) => {
+            let tool_names = server
+                .tool_definitions()
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            server.kill().await;
+            McpServerStatus {
+                name,
+                status: "ready".to_string(),
+                tool_count: tool_names.len(),
+                tool_names,
+                error: None,
+            }
+        }
+        Err(error) => McpServerStatus {
+            name,
+            status: "error".to_string(),
+            tool_count: 0,
+            tool_names: Vec::new(),
+            error: Some(error),
+        },
     }
 }
 
