@@ -3,56 +3,169 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, ParamsBuilder, PasswordHasher};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const V1_PREFIX: &str = "enc:v1:";
 const V2_PREFIX: &str = "enc:v2:";
 const V3_PREFIX: &str = "enc:v3:"; // New secure version
+static MACHINE_SALT: OnceLock<[u8; 32]> = OnceLock::new();
 
 /// Get the machine-specific salt file path
-fn get_salt_file_path() -> PathBuf {
+fn get_salt_file_path() -> io::Result<PathBuf> {
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("gxAgent")
-        .join(".salt")
+        .map(|directory| directory.join("gxAgent").join(".salt"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Config directory is unavailable"))
 }
 
-/// Load or generate a persistent salt for this machine
-fn get_or_create_machine_salt() -> [u8; 32] {
-    let salt_path = get_salt_file_path();
-
-    // Try to load existing salt
-    if let Ok(content) = std::fs::read_to_string(&salt_path) {
-        if let Ok(bytes) = hex::decode(content.trim()) {
-            if bytes.len() == 32 {
-                let mut salt = [0u8; 32];
-                salt.copy_from_slice(&bytes);
-                return salt;
-            }
+fn read_machine_salt(path: &Path) -> io::Result<Option<[u8; 32]>> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("Failed to read encryption salt {}: {error}", path.display()),
+            ))
         }
-    }
+    };
 
-    // Generate new salt
+    let bytes = hex::decode(content.trim()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Encryption salt {} is not valid hexadecimal: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    let salt: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Encryption salt {} has {} bytes; expected 32",
+                path.display(),
+                bytes.len()
+            ),
+        )
+    })?;
+    Ok(Some(salt))
+}
+
+fn generate_machine_salt() -> io::Result<[u8; 32]> {
     let mut salt = [0u8; 32];
-    getrandom::getrandom(&mut salt).unwrap_or_else(|_| {
-        // Fallback to timestamp-based if getrandom fails
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        for (i, chunk) in now.to_le_bytes().iter().enumerate() {
-            salt[i % 32] ^= chunk;
-        }
-    });
+    getrandom::getrandom(&mut salt).map_err(|error| {
+        io::Error::other(format!("Failed to generate encryption salt: {error}"))
+    })?;
+    Ok(salt)
+}
 
-    // Save salt
-    if let Some(parent) = salt_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+/// Publish a fully written salt without ever replacing an existing winner.
+/// The temporary file lives beside the target so the hard-link operation is
+/// same-volume and atomically exposes complete contents to other processes.
+fn publish_machine_salt(path: &Path, candidate: [u8; 32]) -> io::Result<[u8; 32]> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Encryption salt path has no parent: {}", path.display()),
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Failed to create encryption salt directory {}: {error}",
+                parent.display()
+            ),
+        )
+    })?;
+
+    let temp_path = parent.join(format!(
+        ".salt.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut temp_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "Failed to create temporary encryption salt {}: {error}",
+                    temp_path.display()
+                ),
+            )
+        })?;
+
+    let encoded = hex::encode(candidate);
+    let write_result = temp_file
+        .write_all(encoded.as_bytes())
+        .and_then(|_| temp_file.sync_all());
+    drop(temp_file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "Failed to persist temporary encryption salt {}: {error}",
+                temp_path.display()
+            ),
+        ));
     }
-    let _ = std::fs::write(&salt_path, hex::encode(salt));
 
-    salt
+    let publish_result = fs::hard_link(&temp_path, path);
+    let _ = fs::remove_file(&temp_path);
+    match publish_result {
+        Ok(()) => Ok(candidate),
+        Err(publish_error) => match read_machine_salt(path) {
+            // Another process won the no-clobber publish race.
+            Ok(Some(winner)) => Ok(winner),
+            Ok(None) => Err(io::Error::new(
+                publish_error.kind(),
+                format!(
+                    "Failed to atomically publish encryption salt {}: {publish_error}; target is still missing",
+                    path.display()
+                ),
+            )),
+            Err(read_error) => Err(io::Error::new(
+                publish_error.kind(),
+                format!(
+                    "Failed to atomically publish encryption salt {}: {publish_error}; target could not be read: {read_error}",
+                    path.display()
+                ),
+            )),
+        },
+    }
+}
+
+fn load_or_create_machine_salt_at<F>(path: &Path, generate: F) -> io::Result<[u8; 32]>
+where
+    F: FnOnce() -> io::Result<[u8; 32]>,
+{
+    if let Some(existing) = read_machine_salt(path)? {
+        return Ok(existing);
+    }
+
+    publish_machine_salt(path, generate()?)
+}
+
+/// Load or generate a persistent salt once per process. Initialization errors
+/// are fatal instead of producing ciphertext that cannot be decrypted later.
+fn get_or_create_machine_salt() -> [u8; 32] {
+    *MACHINE_SALT.get_or_init(|| {
+        let salt_path = get_salt_file_path()
+            .unwrap_or_else(|error| panic!("Failed to locate gxAgent encryption salt: {error}"));
+        load_or_create_machine_salt_at(&salt_path, generate_machine_salt).unwrap_or_else(|error| {
+            panic!(
+                "Failed to initialize gxAgent encryption salt {}: {error}",
+                salt_path.display()
+            )
+        })
+    })
 }
 
 /// Derive a 32-byte encryption key from machine-specific info using Argon2
@@ -251,6 +364,91 @@ fn decrypt_v1(ciphertext: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("gxagent-crypto-test-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&path).expect("create crypto test directory");
+            Self { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn concurrent_first_run_salt_initialization_uses_one_winner() {
+        const WORKERS: usize = 16;
+        let directory = TestDir::new();
+        let salt_path = Arc::new(directory.path.join(".salt"));
+        let generation_barrier = Arc::new(Barrier::new(WORKERS));
+
+        let handles: Vec<_> = (0..WORKERS)
+            .map(|index| {
+                let salt_path = Arc::clone(&salt_path);
+                let generation_barrier = Arc::clone(&generation_barrier);
+                std::thread::spawn(move || {
+                    load_or_create_machine_salt_at(&salt_path, || {
+                        // Every worker has already observed the missing file
+                        // before any candidate can be published.
+                        generation_barrier.wait();
+                        Ok([(index + 1) as u8; 32])
+                    })
+                    .expect("initialize salt concurrently")
+                })
+            })
+            .collect();
+
+        let salts: Vec<[u8; 32]> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("salt worker panicked"))
+            .collect();
+        assert!(salts.iter().all(|salt| salt == &salts[0]));
+        assert_eq!(
+            read_machine_salt(&salt_path).expect("read persisted salt"),
+            Some(salts[0])
+        );
+
+        let reused = load_or_create_machine_salt_at(&salt_path, || {
+            panic!("an existing salt must not be regenerated")
+        })
+        .expect("reuse existing salt");
+        assert_eq!(reused, salts[0]);
+        assert_eq!(
+            fs::read_dir(&directory.path)
+                .expect("read crypto test directory")
+                .count(),
+            1,
+            "temporary salt files should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn invalid_existing_salt_is_not_silently_replaced() {
+        let directory = TestDir::new();
+        let salt_path = directory.path.join(".salt");
+        fs::write(&salt_path, "not-a-valid-salt").expect("write invalid salt");
+
+        let error = load_or_create_machine_salt_at(&salt_path, || {
+            panic!("invalid existing salt must not be replaced")
+        })
+        .expect_err("invalid salt should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            fs::read_to_string(&salt_path).expect("read invalid salt"),
+            "not-a-valid-salt"
+        );
+    }
 
     #[test]
     fn test_v3_encrypt_decrypt() {
