@@ -15,16 +15,16 @@
   line-height: 1.6;
   font-weight: 400;
 
-  /* Modern Card Style - Light */
-  --bg-main: #f7f7f8;
-  --bg-sidebar: #f0f0f0;
+  /* Modern Card Style - Light (warm white, matches the sandy palette) */
+  --bg-main: #f8f7f4;
+  --bg-sidebar: #f1efea;
   --bg-card: #ffffff;
-  --bg-card-hover: #f2f2f4;
+  --bg-card-hover: #f4f2ee;
   --bg-input: #ffffff;
-  --bg-code: #f4f4f4;
+  --bg-code: #f5f3ef;
   --bg-primary: var(--bg-card);
   --bg-overlay: rgba(0, 0, 0, 0.4);
-  --bg-user-bubble: #f0f0f2;
+  --bg-user-bubble: #f1efea;
   --bg-assistant-bubble: transparent;
 
   /* B-system aliases so component styles that use --bg-surface / --border-medium
@@ -41,8 +41,8 @@
   --warning-light: var(--warning-subtle);
   --error-light: var(--error-subtle);
 
-  --border-default: #dcdce0;
-  --border-focus: #c4c4cc;
+  --border-default: #e2ded6;
+  --border-focus: #ccc6ba;
 
   --text-primary: #0d0d0d;
   --text-secondary: #565656;
@@ -50,14 +50,14 @@
   --text-inverse: #ffffff;
   --text-code: #24292e;
 
-  --accent: #10a37f; /* ChatGPT Green */
-  --accent-hover: #1a7f64;
-  --accent-subtle: rgba(16, 163, 127, 0.1);
-  --accent-border: rgba(16, 163, 127, 0.2);
+  --accent: #2f9e6f; /* warm green — matches the sandy palette */
+  --accent-hover: #268560;
+  --accent-subtle: rgba(47, 158, 111, 0.1);
+  --accent-border: rgba(47, 158, 111, 0.2);
 
-  --success: #10a37f;
-  --success-subtle: rgba(16, 163, 127, 0.1);
-  --success-border: rgba(16, 163, 127, 0.2);
+  --success: #2f9e6f;
+  --success-subtle: rgba(47, 158, 111, 0.1);
+  --success-border: rgba(47, 158, 111, 0.2);
 
   --warning: #f59e0b;
   --warning-subtle: rgba(245, 158, 11, 0.1);
@@ -120,14 +120,14 @@
   --text-inverse: #ffffff;
   --text-code: #ececec;
 
-  --accent: #10a37f;
-  --accent-hover: #1a7f64;
-  --accent-subtle: rgba(16, 163, 127, 0.15);
-  --accent-border: rgba(16, 163, 127, 0.3);
+  --accent: #45b385;
+  --accent-hover: #5ac298;
+  --accent-subtle: rgba(69, 179, 133, 0.15);
+  --accent-border: rgba(69, 179, 133, 0.3);
 
-  --success: #10a37f;
-  --success-subtle: rgba(16, 163, 127, 0.15);
-  --success-border: rgba(16, 163, 127, 0.3);
+  --success: #45b385;
+  --success-subtle: rgba(69, 179, 133, 0.15);
+  --success-border: rgba(69, 179, 133, 0.3);
 
   --warning: #f59e0b;
   --warning-subtle: rgba(245, 158, 11, 0.15);
@@ -863,7 +863,7 @@ select.input-text {
   padding: 6px 8px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
 }
 
 .history-list::-webkit-scrollbar {
@@ -899,11 +899,34 @@ select.input-text {
   justify-content: space-between;
   gap: 6px;
   color: var(--text-secondary);
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease,
+    box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
   font-size: 0.8rem;
   flex: 0 0 auto;
   min-height: 50px;
   box-sizing: border-box;
+}
+
+/* Hairline separator between adjacent conversations. Inset from the edges so
+   it reads as a divider, not a full-width rule. Hidden under the raised card
+   whenever an item (or the one above it) is hovered/active. */
+.history-item::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -1px;
+  height: 1px;
+  background: var(--border-light);
+  transition: opacity 0.15s ease;
+}
+
+.history-item:last-child::after,
+.history-item:hover::after,
+.history-item.active::after,
+.history-item:has(+ .history-item:hover)::after,
+.history-item:has(+ .history-item.active)::after {
+  opacity: 0;
 }
 
 .history-item.pinned {
@@ -931,6 +954,7 @@ select.input-text {
   background: var(--bg-card);
   color: var(--text-primary);
   box-shadow: var(--shadow-card);
+  transform: translateX(2px);
 }
 
 .history-item.active {
@@ -938,6 +962,23 @@ select.input-text {
   border-color: var(--border-default);
   color: var(--text-primary);
   box-shadow: var(--shadow-soft);
+}
+
+/* Accent rail on the active conversation — a clearer "you are here" marker
+   than the card alone. Reuses the pinned rail geometry. */
+.history-item.active::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+
+.history-item.active.pinned::before {
+  box-shadow: 0 0 0 1px var(--accent-subtle);
 }
 
 .history-delete-btn {
@@ -4502,12 +4543,24 @@ select.input-text {
 }
 
 .activity-item {
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-default);
+  padding: 5px 8px 5px 10px;
+  border-radius: 5px;
+  background: transparent;
+  border: none;
+  border-left: 2px solid var(--border-default);
   font-size: 0.72rem;
+  transition: background 0.12s;
 }
+
+.activity-item:hover {
+  background: var(--bg-surface-hover);
+}
+
+.activity-item.done { border-left-color: var(--success); }
+.activity-item.error { border-left-color: var(--error); }
+.activity-item.executing { border-left-color: var(--accent); }
+.activity-item.blocked { border-left-color: var(--warning); }
+.activity-item.pending_approval { border-left-color: var(--accent); }
 
 .activity-item-header {
   display: flex;
@@ -4525,18 +4578,18 @@ select.input-text {
 
 .activity-item-badge {
   font-size: 0.58rem;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
 }
 
-.activity-item-badge.done { background: var(--success-subtle); color: var(--success); }
-.activity-item-badge.error { background: var(--error-subtle); color: var(--error); }
-.activity-item-badge.executing { background: var(--accent-subtle); color: var(--accent); }
-.activity-item-badge.blocked { background: var(--warning-subtle); color: var(--warning); }
-.activity-item-badge.pending_approval { background: var(--accent-subtle); color: var(--accent); }
-.activity-item-badge.drafting { background: var(--bg-card-hover); color: var(--text-tertiary); }
+.activity-item-badge.done { color: var(--success); }
+.activity-item-badge.error { color: var(--error); }
+.activity-item-badge.executing { color: var(--accent); }
+.activity-item-badge.blocked { color: var(--warning); }
+.activity-item-badge.pending_approval { color: var(--accent); }
+.activity-item-badge.drafting { color: var(--text-tertiary); }
 
 .activity-item-output {
   margin-top: 4px;

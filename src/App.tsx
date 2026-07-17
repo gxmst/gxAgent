@@ -2,7 +2,6 @@ import { Fragment, useState, useEffect, useLayoutEffect, useRef, useCallback, us
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import * as Diff from "diff";
 import {
   Send,
   Settings,
@@ -34,7 +33,6 @@ import {
   CircleStop,
   X,
   Eye,
-  EyeOff,
   Monitor,
   Smartphone,
   Download,
@@ -61,6 +59,11 @@ import { countTokens, parseCommand, sessionToMarkdown } from "./utils/helpers";
 import { CommandSuggestions, useGlobalHotkeys } from "./components/shared/CommandSuggestions";
 import { exportAllSessions, importSessions, getToolStats } from "./utils/sessionHelpers";
 import { ContextMenu, useContextMenu } from "./components/shared/ContextMenu";
+import { SecretInput } from "./components/shared/SecretInput";
+import { DiffView } from "./components/shared/DiffView";
+import { PositionedContextMenu } from "./components/shared/PositionedContextMenu";
+import { CustomPresetForm } from "./components/CustomPresetForm";
+import { McpAddForm } from "./components/mcp/McpAddForm";
 import { useSessionStorage } from "./hooks/useSessionStorage";
 import { resolveRequestConfig } from "./utils/requestConfig";
 import { compareSidebarSessions, moveSessionInSidebar } from "./utils/sessionOrder";
@@ -1145,8 +1148,8 @@ const THEME_OPTIONS: {
   label: string;
   swatch: { bg: string; border: string; accent: string };
 }[] = [
-  { value: "light", mode: "light", labelZh: "浅色", label: "Light", swatch: { bg: "#ffffff", border: "#e5e5e5", accent: "#10a37f" } },
-  { value: "dark", mode: "dark", labelZh: "深色", label: "Dark", swatch: { bg: "#2f2f2f", border: "#424242", accent: "#10a37f" } },
+  { value: "light", mode: "light", labelZh: "浅色", label: "Light", swatch: { bg: "#ffffff", border: "#e5e5e5", accent: "#2f9e6f" } },
+  { value: "dark", mode: "dark", labelZh: "深色", label: "Dark", swatch: { bg: "#2f2f2f", border: "#424242", accent: "#45b385" } },
   { value: "yuzu", mode: "light", labelZh: "柚木书房", label: "Yuzu Study", swatch: { bg: "#f3e8d6", border: "#d8c4a0", accent: "#a9743f" } },
   { value: "ember", mode: "dark", labelZh: "炭火终端", label: "Ember Terminal", swatch: { bg: "#1b1d19", border: "#3a3f33", accent: "#9bcf5f" } },
   { value: "grape", mode: "dark", labelZh: "午夜葡萄", label: "Midnight Grape", swatch: { bg: "#221631", border: "#3e2a52", accent: "#c084fc" } },
@@ -1166,292 +1169,6 @@ const modelContextLimit = (modelId: string) => {
   if (id.includes("llama")) return 128000;
   return 128000;
 };
-
-function DiffView({ oldContent, newContent }: { oldContent: string; newContent: string }) {
-  const changes = Diff.diffLines(oldContent, newContent);
-  return (
-    <div className="diff-view">
-      {changes.map((part, i) => {
-        const cls = part.added ? "diff-add" : part.removed ? "diff-remove" : "diff-unchanged";
-        return (
-          <pre key={i} className={`diff-line ${cls}`}>
-            <span className="diff-prefix">{part.added ? "+" : part.removed ? "-" : " "}</span>
-            {part.value}
-          </pre>
-        );
-      })}
-    </div>
-  );
-}
-
-/**
- * A masked text field with a reveal toggle. Hidden by default (guards against
- * shoulder-surfing); the user clicks the eye to reveal the value when they need
- * to verify it. The secret itself is kept in app state as usual — this only
- * controls on-screen display.
- */
-function SecretInput({
-  value,
-  onChange,
-  placeholder,
-  revealLabel,
-  hideLabel,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  placeholder?: string;
-  revealLabel: string;
-  hideLabel: string;
-}) {
-  const [revealed, setRevealed] = useState(false);
-  return (
-    <div className="secret-input">
-      <input
-        type={revealed ? "text" : "password"}
-        className={`input-text${revealed ? "" : " is-masked"}`}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        autoComplete="off"
-        spellCheck={false}
-      />
-      <button
-        type="button"
-        className="secret-input-toggle"
-        onClick={() => setRevealed((v) => !v)}
-        title={revealed ? hideLabel : revealLabel}
-        aria-label={revealed ? hideLabel : revealLabel}
-        aria-pressed={revealed}
-      >
-        {revealed ? <EyeOff size={15} /> : <Eye size={15} />}
-      </button>
-    </div>
-  );
-}
-
-/**
- * Positions a context menu near (x, y) but flips/clamps so it never gets
- * clipped by the viewport edges. Measures its own rendered size first.
- */
-function PositionedContextMenu({
-  x,
-  y,
-  className,
-  children,
-}: {
-  x: number;
-  y: number;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number; visible: boolean }>({
-    left: x,
-    top: y,
-    visible: false,
-  });
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    // offsetWidth/Height ignore CSS transforms, so the entry animation's
-    // scale() doesn't skew the measurement.
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    const margin = 8;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-
-    let left = x;
-    let top = y;
-
-    // Horizontal: flip to the left of the cursor if it would overflow right.
-    if (left + w + margin > vw) {
-      left = Math.max(margin, x - w);
-    }
-    left = Math.min(left, vw - w - margin);
-    left = Math.max(margin, left);
-
-    // Vertical: flip above the cursor if it would overflow the bottom.
-    if (top + h + margin > vh) {
-      top = Math.max(margin, y - h);
-    }
-    // If still taller than viewport, pin to top and let it scroll.
-    top = Math.min(top, vh - h - margin);
-    top = Math.max(margin, top);
-
-    setPos({ left, top, visible: true });
-  }, [x, y, children]);
-
-  return (
-    <div
-      ref={ref}
-      className={className}
-      style={{
-        left: pos.left,
-        top: pos.top,
-        visibility: pos.visible ? "visible" : "hidden",
-        maxHeight: "calc(100vh - 16px)",
-        overflowY: "auto",
-      }}
-      onClick={(e) => e.stopPropagation()}
-    >
-      {children}
-    </div>
-  );
-}
-
-function CustomPresetForm({ lang, onSave, t, editingPreset }: { lang: string; onSave: (preset: RolePreset) => void; t: (key: string, lang: string) => string; editingPreset?: RolePreset | null }) {
-  const [emoji, setEmoji] = useState(editingPreset?.emoji || "🤖");
-  const [name, setName] = useState(editingPreset?.name || "");
-  const [prompt, setPrompt] = useState(editingPreset?.prompt || "");
-  const [temp, setTemp] = useState(editingPreset?.temperature ?? 0.5);
-
-  useEffect(() => {
-    if (editingPreset) {
-      setEmoji(editingPreset.emoji || "🤖");
-      setName(editingPreset.name || "");
-      setPrompt(editingPreset.prompt || "");
-      setTemp(editingPreset.temperature ?? 0.5);
-    }
-  }, [editingPreset]);
-
-  return (
-    <div className="role-preset-form-inner">
-      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-        <input
-          className="role-preset-form-input"
-          placeholder={t("role.customEmoji", lang)}
-          value={emoji}
-          onChange={(e) => setEmoji(e.target.value)}
-          style={{ width: 40, textAlign: "center" }}
-        />
-        <input
-          className="role-preset-form-input"
-          placeholder={t("role.customName", lang)}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          style={{ flex: 1 }}
-        />
-      </div>
-      <textarea
-        className="role-preset-form-textarea"
-        placeholder={t("role.customPrompt", lang)}
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        rows={3}
-      />
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: "0.7rem", opacity: 0.7 }}>{t("role.customTemp", lang)}: {temp}</span>
-        <input type="range" min={0} max={2} step={0.1} value={temp} onChange={(e) => setTemp(parseFloat(e.target.value))} style={{ flex: 1 }} />
-      </div>
-      <button
-        className="btn btn-primary"
-        style={{ fontSize: "0.72rem", padding: "4px 12px", width: "100%" }}
-        disabled={!name.trim() || !prompt.trim()}
-        onClick={() => {
-          onSave({
-            id: editingPreset?.id || `custom-${Date.now()}`,
-            emoji: emoji || "🤖",
-            name: name.trim(),
-            nameZh: name.trim(),
-            description: "",
-            descriptionZh: "",
-            prompt: prompt.trim(),
-            temperature: temp,
-            category: "Custom",
-          });
-        }}
-      >
-        {t("role.customSave", lang)}
-      </button>
-    </div>
-  );
-}
-
-function McpAddForm({ setConfig, addLog, lang, t, config }: {
-  setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
-  addLog: (text: string, type: "info" | "success" | "error" | "cmd") => void;
-  lang: string;
-  t: (key: string, lang: string, vars?: Record<string, string>) => string;
-  config: AppConfig;
-}) {
-  const [name, setName] = useState("");
-  const [command, setCommand] = useState("");
-  const [args, setArgs] = useState("");
-  const [envText, setEnvText] = useState("");
-
-  const handleAdd = async () => {
-    if (!name.trim() || !command.trim()) return;
-    const env: Record<string, string> = {};
-    if (envText.trim()) {
-      for (const line of envText.split("\n")) {
-        const eq = line.indexOf("=");
-        if (eq > 0) {
-          env[line.substring(0, eq).trim()] = line.substring(eq + 1).trim();
-        }
-      }
-    }
-    try {
-      const updated = await invoke<AppConfig>("save_mcp_server", {
-        currentConfig: config,
-        name: name.trim(),
-        command: command.trim(),
-        args: args.trim() ? args.split(",").map(a => a.trim()) : [],
-        env,
-      });
-      setConfig(updated);
-      setName("");
-      setCommand("");
-      setArgs("");
-      setEnvText("");
-      addLog(`MCP server "${name}" added`, "success");
-    } catch (e) {
-      addLog(String(e), "error");
-    }
-  };
-
-  return (
-    <div className="mcp-add-form">
-      <input
-        type="text"
-        className="input-text mcp-input"
-        placeholder={t("mcp.serverName", lang)}
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-      />
-      <input
-        type="text"
-        className="input-text mcp-input"
-        placeholder={t("mcp.command", lang)}
-        value={command}
-        onChange={(e) => setCommand(e.target.value)}
-      />
-      <input
-        type="text"
-        className="input-text mcp-input"
-        placeholder={t("mcp.args", lang)}
-        value={args}
-        onChange={(e) => setArgs(e.target.value)}
-      />
-      <textarea
-        className="input-text mcp-textarea"
-        placeholder={t("mcp.envVars", lang)}
-        value={envText}
-        onChange={(e) => setEnvText(e.target.value)}
-        rows={2}
-      />
-      <button
-        className="btn btn-secondary"
-        style={{ fontSize: "0.72rem", width: "100%" }}
-        onClick={handleAdd}
-        disabled={!name.trim() || !command.trim()}
-      >
-        <PlusCircle size={12} /> {t("mcp.addServer", lang)}
-      </button>
-    </div>
-  );
-}
 
 function App() {
   // ==========================================
