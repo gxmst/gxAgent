@@ -105,13 +105,17 @@ fn has_compound_syntax(cmd: &str) -> bool {
                 }
             }
 
-            // Pipe operator (| but not ||)
+            // Pipe (|) and OR chain (||). PowerShell 7+ supports `||`, so it
+            // must count as compound syntax too — don't rely on the host
+            // being PowerShell 5.1.
             if c == '|' {
-                let next_is_pipe = i + 1 < chars.len() && chars[i + 1] == '|';
-                let prev_is_pipe = i > 0 && chars[i - 1] == '|';
-                if !next_is_pipe && !prev_is_pipe {
-                    return true;
-                }
+                return true;
+            }
+
+            // AND chain (&&): `git status && Remove-Item x` would otherwise
+            // pass whitelist prefix matching.
+            if c == '&' && i + 1 < chars.len() && chars[i + 1] == '&' {
+                return true;
             }
 
             // Backtick (PowerShell escape/continuation)
@@ -240,19 +244,10 @@ pub fn check_approval(
         return ApprovalLevel::NeedsConfirmation;
     }
 
-    // 5. Relaxed policy: only untrusted writes need confirmation
-    if approval_policy == "relaxed" {
-        if tool_name == "write_file"
-            || tool_name == "edit_file"
-            || tool_name == "execute_command"
-            || tool_name == "run_python"
-        {
-            return ApprovalLevel::NeedsConfirmation;
-        }
-        return ApprovalLevel::AutoApprove;
-    }
-
-    // 6. Standard policy: writes and commands need confirmation
+    // 5. Everything reaching this point is a write, a command, or an MCP
+    // tool (any name that isn't a builtin). MCP tools can execute arbitrary
+    // code, so even the relaxed policy must not blanket-approve them — they
+    // are treated at the same level as execute_command.
     ApprovalLevel::NeedsConfirmation
 }
 
@@ -516,8 +511,29 @@ mod tests {
         assert!(has_compound_syntax("$cmd = 'Remove-Item'; & $cmd"));
         assert!(has_compound_syntax("echo $(Get-Date)"));
         assert!(has_compound_syntax("& { Remove-Item x }"));
+        assert!(has_compound_syntax("git status && Remove-Item x"));
+        assert!(has_compound_syntax("git status || Remove-Item x"));
+        assert!(has_compound_syntax("git status | Out-Null"));
         assert!(!has_compound_syntax("git status"));
         assert!(!has_compound_syntax("echo 'test;test'"));
+        assert!(!has_compound_syntax("echo 'a && b'"));
+    }
+
+    #[test]
+    fn test_relaxed_policy_does_not_auto_approve_mcp_tools() {
+        // Any tool name that is not a builtin is an MCP tool; MCP tools can be
+        // arbitrary code execution and must require confirmation even under
+        // the relaxed policy.
+        let level = check_approval("mcp_query_db", "{}", "relaxed", &[]);
+        assert!(matches!(level, ApprovalLevel::NeedsConfirmation));
+
+        let level = check_approval(
+            "execute_command",
+            "{\"command\":\"npm install\"}",
+            "relaxed",
+            &[],
+        );
+        assert!(matches!(level, ApprovalLevel::NeedsConfirmation));
     }
 
     #[test]

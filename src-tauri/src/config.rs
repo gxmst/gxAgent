@@ -209,10 +209,11 @@ pub fn default_trusted_patterns() -> Vec<TrustedPattern> {
         ("execute_command", "dir"),
         ("execute_command", "ls"),
         ("execute_command", "tree"),
-        // --- File reading ---
-        ("execute_command", "Get-Content"),
-        ("execute_command", "type "),
-        ("execute_command", "cat "),
+        // NOTE: file-content reads (Get-Content/type/cat/Select-String/findstr)
+        // and network probes (ping/nslookup) are deliberately NOT trusted by
+        // default: unrestricted reads reach outside the workspace sandbox
+        // (e.g. ~\.ssh\id_rsa), and DNS lookups give an exfiltration channel.
+        // Users can still trust them explicitly per their own risk tolerance.
         // --- System information ---
         ("execute_command", "Get-Process"),
         ("execute_command", "systeminfo"),
@@ -227,13 +228,8 @@ pub fn default_trusted_patterns() -> Vec<TrustedPattern> {
         ("execute_command", "echo "),
         ("execute_command", "Write-Output"),
         ("execute_command", "Write-Host"),
-        // --- Search ---
-        ("execute_command", "Select-String"),
-        ("execute_command", "findstr"),
-        // --- Network info ---
+        // --- Network info (local only; probes like ping/nslookup excluded) ---
         ("execute_command", "ipconfig"),
-        ("execute_command", "ping "),
-        ("execute_command", "nslookup"),
         // --- Date ---
         ("execute_command", "Get-Date"),
         // --- Version checks ---

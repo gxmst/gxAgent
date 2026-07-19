@@ -418,7 +418,13 @@ fn compact_messages(messages: &mut Vec<Value>, context_limit: usize) {
         total_tokens += estimate_message_tokens(msg);
     }
 
-    let limit_tokens = context_limit as u64 * 4;
+    // `context_limit` is a message-count setting (see the history slicing in
+    // run_chat_mode and the auto-compact trigger). Convert it into a token
+    // budget by allowing a generous average per kept message; only when the
+    // conversation blows past that do we char-truncate the middle. With the
+    // default of 50 this is ~20k estimated tokens (~80KB of content).
+    const TOKENS_PER_MESSAGE_BUDGET: u64 = 400;
+    let limit_tokens = (context_limit as u64).max(1) * TOKENS_PER_MESSAGE_BUDGET;
     if total_tokens < limit_tokens {
         return;
     }
@@ -592,9 +598,13 @@ pub async fn start_agent_loop(
     search_mode: String,
     image_attachments: Vec<ImageAttachment>,
 ) -> Result<(), String> {
+    // No total-request timeout: reqwest's `timeout` covers the entire body,
+    // which would cut off long streaming (SSE) responses mid-flight. Instead,
+    // bound connection setup and per-read stalls; an actively streaming
+    // response can run as long as it keeps producing data.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
         .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
     let cancel_rx = register_cancellation(&request_id).await;
@@ -2662,6 +2672,43 @@ mod role_prompt_tests {
 
         assert_eq!(twice, once);
         assert_eq!(twice.matches(ROLE_PRESET_BEGIN_MARKER).count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+
+    fn tool_msg(len: usize) -> Value {
+        json!({ "role": "tool", "tool_call_id": "t", "content": "x".repeat(len) })
+    }
+
+    #[test]
+    fn normal_conversations_are_left_untouched() {
+        // ~10 messages of 1000 chars each ≈ 2.5k estimated tokens — far below
+        // the default budget (50 * 400 = 20k). The old `context_limit * 4`
+        // unit bug would have truncated this at 800 total chars.
+        let mut messages: Vec<Value> = (0..10).map(|_| tool_msg(1000)).collect();
+        let original = messages.clone();
+        compact_messages(&mut messages, 50);
+        assert_eq!(messages, original);
+    }
+
+    #[test]
+    fn oversized_middle_tool_outputs_are_truncated_and_edges_protected() {
+        // 12 messages of 8000 chars ≈ 24k estimated tokens — above the budget.
+        let mut messages: Vec<Value> = (0..12).map(|_| tool_msg(8000)).collect();
+        compact_messages(&mut messages, 50);
+
+        // First message and the last 4 stay intact.
+        assert_eq!(messages[0]["content"].as_str().unwrap().len(), 8000);
+        for msg in messages.iter().rev().take(4) {
+            assert_eq!(msg["content"].as_str().unwrap().len(), 8000);
+        }
+        // Middle tool outputs are truncated.
+        let middle = messages[3]["content"].as_str().unwrap();
+        assert!(middle.len() < 8000);
+        assert!(middle.contains("Tool output truncated"));
     }
 }
 

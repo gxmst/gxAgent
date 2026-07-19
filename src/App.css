@@ -1006,7 +1006,7 @@ select.input-text {
 }
 
 .sidebar-tools-label {
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   font-weight: 600;
   text-transform: uppercase;
@@ -1020,7 +1020,7 @@ select.input-text {
   justify-content: space-between;
   gap: 8px;
   padding: 0 2px;
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   font-weight: 700;
   text-transform: uppercase;
@@ -1056,7 +1056,7 @@ select.input-text {
   border: 1px solid var(--border-default);
   background: transparent;
   color: var(--text-tertiary);
-  font-size: 0.64rem;
+  font-size: var(--font-caption);
   font-weight: 700;
   cursor: pointer;
   transition: all 0.12s;
@@ -1074,7 +1074,7 @@ select.input-text {
 }
 
 .sidebar-tools-empty {
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   padding: 3px 2px;
 }
@@ -1092,7 +1092,7 @@ select.input-text {
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   text-align: left;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
@@ -1129,14 +1129,14 @@ select.input-text {
   background: var(--bg-surface-hover);
   color: var(--text-primary);
   font-family: 'JetBrains Mono', 'Consolas', monospace;
-  font-size: 0.64rem;
+  font-size: var(--font-caption);
   line-height: 1.35;
   text-align: center;
 }
 
 .tool-toggle {
   padding: 4px 5px;
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   border-radius: 6px;
   border: 1px solid transparent;
@@ -1635,7 +1635,7 @@ select.input-text {
   border-radius: 6px;
   background: var(--bg-card);
   border: 1px solid var(--border-default);
-  font-size: 0.62rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   font-weight: 500;
   font-family: 'JetBrains Mono', 'Consolas', monospace;
@@ -1655,7 +1655,7 @@ select.input-text {
   align-items: center;
   gap: 4px;
   padding-top: 6px;
-  font-size: 0.62rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   font-family: 'JetBrains Mono', 'Consolas', monospace;
 }
@@ -1677,7 +1677,7 @@ select.input-text {
   border-radius: var(--radius-full);
   background: transparent;
   color: var(--text-tertiary);
-  font-size: 0.62rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   cursor: default;
   white-space: nowrap;
@@ -1720,7 +1720,7 @@ select.input-text {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   line-height: 1.5;
 }
 
@@ -1756,7 +1756,7 @@ select.input-text {
   border-radius: 6px;
   background: var(--bg-main);
   color: var(--text-secondary);
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   cursor: pointer;
 }
 
@@ -1826,7 +1826,7 @@ select.input-text {
 }
 
 .session-label {
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   color: var(--text-secondary);
 }
@@ -1969,7 +1969,7 @@ select.input-text {
   border-radius: var(--radius-full);
   background: var(--accent-subtle);
   color: var(--accent);
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   font-weight: 650;
   line-height: 1;
   box-sizing: border-box;
@@ -2230,7 +2230,7 @@ select.input-text {
   padding: 4px 10px;
   background: var(--bg-code);
   border-bottom: 1px solid var(--border-default);
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   color: var(--text-code);
   font-weight: 600;
   text-transform: uppercase;
@@ -2330,7 +2330,7 @@ select.input-text {
 
 .agent-action-badge {
   padding: 1px 7px;
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   border-radius: var(--radius-full);
   font-weight: 600;
   text-transform: uppercase;
@@ -2593,7 +2593,7 @@ select.input-text {
 
 .reasoning-chain-summary::before {
   content: ">";
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   transition: transform 0.15s;
 }
 
@@ -2611,7 +2611,7 @@ select.input-text {
   border-radius: var(--radius-full);
   background: var(--accent-subtle);
   color: var(--accent);
-  font-size: 0.58rem;
+  font-size: var(--font-caption);
   font-weight: 800;
   letter-spacing: 0;
 }
@@ -2677,7 +2677,7 @@ select.input-text {
 }
 
 .profile-meta {
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   color: var(--text-secondary);
 }
 
@@ -2688,7 +2688,7 @@ select.input-text {
 }
 
 .profile-active-badge {
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   color: var(--accent);
   padding: 2px 6px;
@@ -2759,7 +2759,7 @@ select.input-text {
 }
 
 .file-modified-badge {
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   color: var(--warning);
   background: var(--warning-subtle);
@@ -2820,7 +2820,7 @@ select.input-text {
   flex: 1;
   color: var(--text-secondary);
   font-family: 'Cascadia Code', 'Fira Code', monospace;
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3004,7 +3004,7 @@ select.input-text {
   align-items: center;
   gap: 5px;
   padding: 5px 10px;
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   color: var(--text-secondary);
   font-weight: 600;
   background: var(--bg-card);
@@ -3420,7 +3420,7 @@ select.input-text {
   justify-content: space-between;
   gap: 8px;
   color: var(--text-secondary);
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -3471,7 +3471,7 @@ select.input-text {
 }
 
 .form-label {
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   color: var(--text-secondary);
   font-weight: 600;
   text-transform: uppercase;
@@ -3581,7 +3581,7 @@ select.input-text {
 }
 
 .tool-card-desc {
-  font-size: 0.64rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3592,7 +3592,7 @@ select.input-text {
   align-self: start;
   padding: 1px 5px;
   border-radius: var(--radius-full);
-  font-size: 0.56rem;
+  font-size: var(--font-caption);
   font-weight: 800;
   text-transform: uppercase;
   color: var(--text-tertiary);
@@ -3621,7 +3621,7 @@ select.input-text {
   border-radius: 8px;
   background: var(--bg-card);
   color: var(--text-tertiary);
-  font-size: 0.66rem;
+  font-size: var(--font-caption);
   line-height: 1.5;
 }
 
@@ -3728,7 +3728,7 @@ select.input-text {
 }
 
 .theme-chip-label {
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   font-weight: 500;
   line-height: 1.2;
   text-align: center;
@@ -3906,7 +3906,7 @@ select.input-text {
 }
 
 .sidebar-profile-meta {
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3918,7 +3918,7 @@ select.input-text {
    ======================================================== */
 
 .panel-subtitle {
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   margin-top: 1px;
   overflow: hidden;
@@ -3927,7 +3927,7 @@ select.input-text {
 }
 
 .model-indicator {
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   display: flex;
   align-items: center;
@@ -4015,7 +4015,7 @@ select.input-text {
   border-radius: 6px;
   background: transparent;
   color: var(--text-tertiary);
-  font-size: 0.62rem;
+  font-size: var(--font-caption);
   font-weight: 700;
   cursor: pointer;
   transition: all 0.15s;
@@ -4052,7 +4052,7 @@ select.input-text {
   border-radius: 5px;
   background: transparent;
   color: var(--text-tertiary);
-  font-size: 0.62rem;
+  font-size: var(--font-caption);
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s;
@@ -4174,7 +4174,7 @@ select.input-text {
 
 .mcp-server-meta {
   color: var(--text-tertiary);
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   font-family: 'Cascadia Code', 'Fira Code', monospace;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4214,7 +4214,7 @@ select.input-text {
   border-top: 1px solid var(--border-default);
   background: var(--bg-code);
   font-family: 'JetBrains Mono', 'Consolas', monospace;
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   max-height: 120px;
   overflow-y: auto;
   padding: 6px 10px;
@@ -4260,7 +4260,7 @@ select.input-text {
   border-radius: 6px;
   background: var(--bg-card);
   color: var(--text-tertiary);
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   letter-spacing: 0.02em;
   pointer-events: none;
@@ -4292,7 +4292,7 @@ select.input-text {
 }
 
 .history-meta {
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   opacity: 0.6;
   display: block;
@@ -4456,7 +4456,7 @@ select.input-text {
 }
 
 .settings-section-title {
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -4478,7 +4478,7 @@ select.input-text {
   border-radius: 4px;
   background: var(--success-subtle);
   color: var(--success);
-  font-size: 0.62rem;
+  font-size: var(--font-caption);
   font-weight: 600;
 }
 
@@ -4515,7 +4515,7 @@ select.input-text {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   font-weight: 700;
   color: var(--accent);
   text-transform: uppercase;
@@ -4573,11 +4573,11 @@ select.input-text {
   font-weight: 600;
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
 }
 
 .activity-item-badge {
-  font-size: 0.58rem;
+  font-size: var(--font-caption);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -4593,7 +4593,7 @@ select.input-text {
 
 .activity-item-output {
   margin-top: 4px;
-  font-size: 0.66rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   font-family: var(--font-mono);
   line-height: 1.4;
@@ -4610,7 +4610,7 @@ select.input-text {
 }
 
 .activity-source-title {
-  font-size: 0.7rem;
+  font-size: var(--font-caption);
   font-weight: 600;
 }
 
@@ -4624,7 +4624,7 @@ select.input-text {
 }
 
 .activity-source-snippet {
-  font-size: 0.64rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   line-height: 1.4;
   display: -webkit-box;
@@ -4679,7 +4679,7 @@ select.input-text {
   gap: 3px;
   min-width: 0;
   max-width: 100%;
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
   opacity: 0.6;
   padding-left: 2px;
@@ -4740,7 +4740,7 @@ select.input-text {
   border-radius: 50%;
   background: var(--warning);
   color: #fff;
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   font-weight: 700;
   cursor: help;
   flex-shrink: 0;
@@ -4839,7 +4839,7 @@ select.input-text {
   border-radius: 4px;
   background: var(--bg-card-hover);
   color: var(--text-tertiary);
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -4850,7 +4850,7 @@ select.input-text {
   background: var(--bg-code);
   color: var(--text-secondary);
   font-family: inherit;
-  font-size: 0.58rem;
+  font-size: var(--font-caption);
 }
 
 /* ========================================================
@@ -4865,7 +4865,7 @@ select.input-text {
   padding: 2px 6px;
   border-radius: 6px;
   background: var(--bg-code);
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   color: var(--text-tertiary);
 }
 
@@ -4959,7 +4959,7 @@ select.input-text {
 }
 
 .role-presets-category {
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   color: var(--text-tertiary);
   text-transform: uppercase;
@@ -4985,7 +4985,7 @@ select.input-text {
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.12s;
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
 }
 
 .role-preset-card:hover {
@@ -5025,7 +5025,7 @@ select.input-text {
 }
 
 .context-divider-label {
-  font-size: 0.65rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   color: var(--text-tertiary);
   letter-spacing: 0.04em;
@@ -5104,7 +5104,7 @@ select.input-text {
 }
 
 .model-picker-tag {
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   color: var(--text-tertiary);
   background: var(--bg-code);
@@ -5118,7 +5118,7 @@ select.input-text {
 }
 
 .model-picker-divider {
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   color: var(--text-tertiary);
   padding: 4px 10px 2px;

@@ -115,8 +115,9 @@ impl McpServer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .creation_flags(0x08000000); // CREATE_NO_WINDOW on Windows
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
         let mut child = cmd
             .spawn()
@@ -318,6 +319,30 @@ impl McpServer {
     }
 }
 
+/// Convert an MCP-native tool definition (`{name, description, inputSchema}`)
+/// into the canonical OpenAI function shape the rest of the agent (and the
+/// provider adapters) expect. Servers keep the native shape internally for
+/// `tools/call` routing; only the definitions handed to the LLM are converted.
+fn mcp_tool_to_openai(tool: &Value) -> Value {
+    let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+    let description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let parameters = tool
+        .get("inputSchema")
+        .cloned()
+        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        }
+    })
+}
+
 /// Manager for all MCP server connections
 pub struct McpManager {
     servers: HashMap<String, McpServer>,
@@ -354,7 +379,7 @@ impl McpManager {
                         tool_names,
                         error: None,
                     });
-                    all_tools.extend(tools);
+                    all_tools.extend(tools.iter().map(mcp_tool_to_openai));
                     self.servers.insert(name.clone(), server);
                 }
                 Err(e) => {
@@ -429,6 +454,40 @@ pub async fn test_server(name: String, config: McpServerConfig) -> McpServerStat
             tool_names: Vec::new(),
             error: Some(error),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_tool_definitions_convert_to_openai_function_shape() {
+        let native = json!({
+            "name": "query_db",
+            "description": "Run a read-only SQL query",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sql": { "type": "string" } },
+                "required": ["sql"]
+            }
+        });
+        let converted = mcp_tool_to_openai(&native);
+        assert_eq!(converted["type"], "function");
+        assert_eq!(converted["function"]["name"], "query_db");
+        assert_eq!(
+            converted["function"]["description"],
+            "Run a read-only SQL query"
+        );
+        assert_eq!(converted["function"]["parameters"], native["inputSchema"]);
+    }
+
+    #[test]
+    fn mcp_tool_without_schema_gets_empty_object_parameters() {
+        let native = json!({ "name": "no_args_tool" });
+        let converted = mcp_tool_to_openai(&native);
+        assert_eq!(converted["function"]["name"], "no_args_tool");
+        assert_eq!(converted["function"]["parameters"]["type"], "object");
     }
 }
 

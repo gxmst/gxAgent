@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import * as Diff from "diff";
 
 /**
@@ -5,7 +6,9 @@ import * as Diff from "diff";
  * lines. Purely presentational — the caller owns the before/after content.
  */
 export function DiffView({ oldContent, newContent }: { oldContent: string; newContent: string }) {
-  const changes = Diff.diffLines(oldContent, newContent);
+  // diffLines is O(n·d) on line count — memoize so parent re-renders (e.g.
+  // every streaming frame) don't recompute an unchanged diff.
+  const changes = useMemo(() => Diff.diffLines(oldContent, newContent), [oldContent, newContent]);
   return (
     <div className="diff-view">
       {changes.map((part, i) => {

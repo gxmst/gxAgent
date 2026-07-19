@@ -5,6 +5,22 @@
     <link rel="icon" type="image/png" href="/src/assets/logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gxAgent Studio</title>
+    <script>
+      // Apply the last-known theme before first paint so dark themes don't
+      // flash a white frame while the async Rust config loads (which then
+      // re-applies the authoritative value).
+      (function () {
+        try {
+          var theme = localStorage.getItem("gx_theme") || "light";
+          var mode = localStorage.getItem("gx_theme_mode") || "light";
+          document.documentElement.setAttribute("data-theme", theme);
+          document.documentElement.setAttribute("data-mode", mode);
+          if (mode === "dark") {
+            document.documentElement.style.backgroundColor = "#1f1f1f";
+          }
+        } catch (e) { /* first run: defaults are fine */ }
+      })();
+    </script>
   </head>
 
   <body>

@@ -1159,6 +1159,30 @@ const THEME_OPTIONS: {
 const themeMode = (theme: string): "light" | "dark" =>
   THEME_OPTIONS.find((t) => t.value === theme)?.mode ?? "light";
 
+// "Assistant is thinking" placeholder bubble, shared by the plain and
+// virtualized message lists.
+const ThinkingBubble = ({ lang }: { lang: string }) => (
+  <div className="chat-bubble-container assistant is-streaming" aria-busy="true">
+    <div className="chat-bubble" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div className="loading-indicator">
+        <span className="loading-dot" />
+        <span className="loading-dot" />
+        <span className="loading-dot" />
+      </div>
+      <span style={{ fontSize: "0.8rem", color: "var(--accent)" }}>{t("thinking", lang)}</span>
+    </div>
+  </div>
+);
+
+// Module-level Virtuoso components: an inline `Footer: () => …` closure is a
+// new component type on every render, which makes Virtuoso unmount and
+// remount the footer each frame while streaming. State flows in via the
+// `context` prop instead.
+type ChatListContext = { showThinking: boolean; lang: string };
+const ChatListFooter = ({ context }: { context?: ChatListContext }) =>
+  context?.showThinking ? <ThinkingBubble lang={context.lang} /> : null;
+const CHAT_VIRTUOSO_COMPONENTS = { Footer: ChatListFooter };
+
 const modelContextLimit = (modelId: string) => {
   const id = modelId.toLowerCase();
   if (id.includes("gpt-4o") || id.includes("gpt-4.1") || id.includes("gpt-5")) return 128000;
@@ -1390,6 +1414,10 @@ function App() {
   const langRef = useRef("zh");
   const selectedFileRef = useRef<string | null>(null);
   const switchSidebarModeRef = useRef<(mode: SessionConfig["mode"]) => void>(() => {});
+  // Same latest-value pattern as switchSidebarModeRef: the window keydown
+  // effect's dependency array only tracks modal state, so calling
+  // createNewSession directly there captures a stale sidebarNav/session list.
+  const createNewSessionRef = useRef<() => void>(() => {});
   const lastPersistedSessionsRef = useRef<Record<string, string>>({});
   const sessionPersistenceEpochRef = useRef(0);
   // Stream token batching: accumulate chunks and flush once per animation frame
@@ -1673,7 +1701,7 @@ function App() {
       }
       if (ctrl && !e.shiftKey && e.key === "n") {
         e.preventDefault();
-        createNewSession();
+        createNewSessionRef.current();
       }
       if (ctrl && e.key === ",") {
         e.preventDefault();
@@ -1704,6 +1732,13 @@ function App() {
     // data-mode drives the light/dark component tweaks so any dark-family theme
     // inherits them without duplicating every override per theme.
     document.documentElement.setAttribute("data-mode", mode);
+    // Mirror for the pre-paint inline script in index.html: the real config
+    // lives in Rust and loads asynchronously, so without this mirror dark
+    // themes flash a white frame on every cold start.
+    try {
+      localStorage.setItem("gx_theme", theme);
+      localStorage.setItem("gx_theme_mode", mode);
+    } catch { /* ignore */ }
   }, [config.theme]);
 
   useEffect(() => {
@@ -4084,6 +4119,7 @@ function App() {
   const createNewSession = () => {
     createNewSessionInMode(sidebarNav);
   };
+  createNewSessionRef.current = createNewSession;
 
   const switchSidebarMode = (mode: SessionConfig["mode"]) => {
     setSidebarNav(mode);
@@ -4350,11 +4386,15 @@ function App() {
   // every keystroke — the counter is an approximation and this meta line is
   // hidden by default (show_advanced_reply_info). The live input's contribution
   // is added back where a keystroke-accurate figure is actually needed.
-  const currentContextTokensBase =
+  // Memoized: walking the entire history with regex-based estimation on every
+  // render is measurable during streaming (a render per frame).
+  const currentContextTokensBase = useMemo(() =>
     estimateTextTokens(resolvedCurrentConfig.system_prompt) +
     (resolvedCurrentConfig.role_prompt ? estimateTextTokens(resolvedCurrentConfig.role_prompt) + 24 : 0) +
     estimateMessagesTokens(currentSession.messages) +
-    currentInputAttachmentTokens;
+    currentInputAttachmentTokens,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [resolvedCurrentConfig.system_prompt, resolvedCurrentConfig.role_prompt, currentSession.messages, currentInputAttachmentTokens]);
   const currentModelLimit = modelContextLimit(activeModelId);
   const messageHasPendingApproval = (message: Message) => Boolean(
     pendingApprovals
@@ -5633,23 +5673,12 @@ function App() {
                 followOutput={(atBottom: boolean) => (atBottom ? "auto" : false)}
                 atBottomStateChange={(atBottom: boolean) => { isAtBottomRef.current = atBottom; }}
                 itemContent={(mIdx: number, msg: Message) => renderMessage(msg, mIdx)}
-                components={{
-                  Footer: () => (
-                    isStreaming &&
-                    currentSession.messages[currentSession.messages.length - 1]?.role !== "assistant" ? (
-                      <div className="chat-bubble-container assistant is-streaming" aria-busy="true">
-                        <div className="chat-bubble" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <div className="loading-indicator">
-                            <span className="loading-dot" />
-                            <span className="loading-dot" />
-                            <span className="loading-dot" />
-                          </div>
-                          <span style={{ fontSize: "0.8rem", color: "var(--accent)" }}>{t("thinking", lang)}</span>
-                        </div>
-                      </div>
-                    ) : null
-                  ),
+                context={{
+                  showThinking: isStreaming &&
+                    currentSession.messages[currentSession.messages.length - 1]?.role !== "assistant",
+                  lang,
                 }}
+                components={CHAT_VIRTUOSO_COMPONENTS}
               />
             ) : (
               <div className="chat-messages" ref={chatContainerRef} onScroll={() => {
@@ -5661,16 +5690,7 @@ function App() {
 
                 {isStreaming &&
                   currentSession.messages[currentSession.messages.length - 1]?.role !== "assistant" && (
-                    <div className="chat-bubble-container assistant is-streaming" aria-busy="true">
-                      <div className="chat-bubble" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <div className="loading-indicator">
-                          <span className="loading-dot" />
-                          <span className="loading-dot" />
-                          <span className="loading-dot" />
-                        </div>
-                        <span style={{ fontSize: "0.8rem", color: "var(--accent)" }}>{t("thinking", lang)}</span>
-                      </div>
-                    </div>
+                    <ThinkingBubble lang={lang} />
                   )}
 
                 <div ref={chatEndRef} />
