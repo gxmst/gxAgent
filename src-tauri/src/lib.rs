@@ -210,16 +210,33 @@ fn load_config() -> Result<AppConfig, String> {
     // append broadly; edit_file follows the user's existing write_file choice.
     let mut config_changed = false;
     if config.tools_migration_version < config::CURRENT_TOOLS_MIGRATION_VERSION {
-        const NEW_READ_ONLY_TOOLS: &[&str] = &["grep", "glob", "todo_write"];
-        for tool in NEW_READ_ONLY_TOOLS {
-            if !config.tools_enabled.iter().any(|t| t == tool) {
-                config.tools_enabled.push((*tool).to_string());
+        // Each step is gated on the version it introduced, so a step never
+        // re-runs for users who already passed it (re-running would undo
+        // their later manual choices, e.g. re-enabling a disabled tool).
+        if config.tools_migration_version < 1 {
+            const NEW_READ_ONLY_TOOLS: &[&str] = &["grep", "glob", "todo_write"];
+            for tool in NEW_READ_ONLY_TOOLS {
+                if !config.tools_enabled.iter().any(|t| t == tool) {
+                    config.tools_enabled.push((*tool).to_string());
+                }
+            }
+            if config.tools_enabled.iter().any(|t| t == "write_file")
+                && !config.tools_enabled.iter().any(|t| t == "edit_file")
+            {
+                config.tools_enabled.push("edit_file".to_string());
             }
         }
-        if config.tools_enabled.iter().any(|t| t == "write_file")
-            && !config.tools_enabled.iter().any(|t| t == "edit_file")
-        {
-            config.tools_enabled.push("edit_file".to_string());
+        if config.tools_migration_version < 2 {
+            // v2: the old loop/tool-call defaults (10/30) stopped real coding
+            // tasks mid-flight. Raise them to the new defaults, but only when
+            // the stored value is exactly the old default — a deliberate
+            // custom limit is kept as-is.
+            if config.max_agent_loops == config::LEGACY_DEFAULT_MAX_AGENT_LOOPS {
+                config.max_agent_loops = AppConfig::default().max_agent_loops;
+            }
+            if config.max_tool_calls_per_request == config::LEGACY_DEFAULT_MAX_TOOL_CALLS {
+                config.max_tool_calls_per_request = AppConfig::default().max_tool_calls_per_request;
+            }
         }
         config.tools_migration_version = config::CURRENT_TOOLS_MIGRATION_VERSION;
         config_changed = true;

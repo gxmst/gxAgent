@@ -103,11 +103,11 @@ fn default_command_timeout() -> u64 {
 }
 
 fn default_max_agent_loops() -> u32 {
-    10
+    30
 }
 
 fn default_max_tool_calls_per_request() -> u32 {
-    30
+    120
 }
 
 fn default_preview_sandbox() -> bool {
@@ -119,7 +119,13 @@ fn default_preview_sandbox() -> bool {
 /// (the `#[serde(default)]` on the field) and are migrated on load; after
 /// migration the version is stored, so a tool the user later disables stays
 /// disabled instead of being re-enabled on every launch.
-pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 1;
+pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 2;
+
+/// Pre-v2 defaults for the agent limits, used by the one-time migration in
+/// load_config to tell "user never touched this" (exact old default) apart
+/// from a deliberate custom value.
+pub const LEGACY_DEFAULT_MAX_AGENT_LOOPS: u32 = 10;
+pub const LEGACY_DEFAULT_MAX_TOOL_CALLS: u32 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedPattern {
@@ -322,8 +328,8 @@ impl Default for AppConfig {
             font_family: "system".into(),
             show_advanced_reply_info: false,
             command_timeout: 300,
-            max_agent_loops: 10,
-            max_tool_calls_per_request: 30,
+            max_agent_loops: 30,
+            max_tool_calls_per_request: 120,
             preview_sandbox: true,
             tools_migration_version: CURRENT_TOOLS_MIGRATION_VERSION,
         }

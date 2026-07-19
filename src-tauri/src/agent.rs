@@ -69,8 +69,12 @@ fn parse_search_sources(tool_output: &str) -> Vec<Value> {
         .collect()
 }
 
-const MAX_LOOPS: u32 = 20;
-const ABSOLUTE_MAX_TOOL_CALLS_PER_REQUEST: u32 = 100;
+// Hard ceilings for the user-configurable limits. These are runaway
+// protection, not pacing: stopping an agent mid-task to ask "continue?" is
+// worse UX than letting a healthy loop finish, so they are set well above
+// what a normal engineering task needs.
+const MAX_LOOPS: u32 = 100;
+const ABSOLUTE_MAX_TOOL_CALLS_PER_REQUEST: u32 = 500;
 
 const SEARCH_FOLLOWUP_INSTRUCTION: &str = "You have just received web search results. You MUST base your answer on these search results. Cite the sources by mentioning the title and link when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing and what you could find. Do not make up information not present in the search results.";
 const GENERAL_ASSISTANT_INSTRUCTION: &str = "Assistant behavior: Be helpful, careful, and honest. Answer in the user's language when practical. If information is uncertain, outdated, or unavailable, say so clearly. Do not invent facts, citations, files, command results, or tool output. Ask for clarification when the user's goal is ambiguous and a wrong assumption would be risky.";
@@ -118,7 +122,7 @@ const CODE_MODE_INSTRUCTION: &str = "Code mode workflow — follow this loop for
 1. Explore before acting. Understand the existing code before changing it. Use grep to find symbols/usages, glob to discover files, and read_file to inspect them. Do not guess at file contents or APIs — verify them.\n\
 2. Plan for non-trivial work. For any task beyond a one-line change, briefly outline the steps first. Use the todo_write tool to track multi-step tasks so progress stays visible; mark each step in_progress before starting it and completed when done.\n\
 3. Prefer precise edits. Use edit_file for modifying existing files (exact string replacement) instead of rewriting whole files with write_file. Reserve write_file for creating new files. Match existing code style, naming, and libraries.\n\
-4. Prefer dedicated tools over shell. Use read_file/grep/glob/edit_file rather than running cat/findstr/Select-String through execute_command — they are faster and safer.\n\
+4. Prefer dedicated tools over shell. Use read_file/grep/glob/edit_file rather than running cat/findstr/Select-String through execute_command — they are faster, workspace-sandboxed, and never interrupt the user with approval prompts.\n\
 5. Verify your work. After changes, run the project's build/test/lint where possible and fix what you broke before reporting done. State what you verified and what you could not.\n\
 6. Be honest about outcomes. If a command fails or a step is skipped, say so with the evidence. Do not claim success you did not confirm. When an action is destructive or hard to undo, confirm with the user first.";
 
@@ -141,7 +145,7 @@ fn configured_max_tool_calls(config: &AppConfig) -> u32 {
 /// correct command syntax for the machine the app is actually running on.
 fn shell_guidance() -> &'static str {
     if cfg!(target_os = "windows") {
-        "Shell environment: the execute_command tool runs in Windows PowerShell. Use PowerShell syntax, not Unix/bash. Chain commands with ; (not && or ||). Use cmdlets: Get-ChildItem (not ls), Get-Content (not cat), Select-String (not grep), Remove-Item (not rm). Redirect errors with 2>$null. Use Windows-style paths with backslashes."
+        "Shell environment: the execute_command tool runs in Windows PowerShell. Use PowerShell syntax, not Unix/bash. Chain commands with ; (not && or ||). Use cmdlets: Get-ChildItem (not ls), Remove-Item (not rm), Copy-Item (not cp). For reading or searching files, prefer the read_file/grep/glob tools over Get-Content/Select-String — the builtin tools never require user approval. Suppress noisy errors with 2>$null. Use Windows-style paths with backslashes."
     } else if cfg!(target_os = "macos") {
         "Shell environment: the execute_command tool runs in a POSIX shell (sh/bash/zsh) on macOS. Use standard Unix syntax: chain commands with && or ;, and use ls, cat, grep, rm, find. Use forward-slash paths."
     } else {
@@ -2089,6 +2093,7 @@ async fn process_tool_calls(
             &tc.arguments,
             &config.approval_policy,
             &config.trusted_patterns,
+            &config.default_work_dir,
         );
 
         match level {
@@ -2348,13 +2353,16 @@ static PENDING_APPROVALS: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<ApprovalM
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(ApprovalMap::new())));
 
 /// Wait for frontend to resolve a tool approval request.
-/// Includes a 5-minute timeout to prevent orphaned approvals from leaking memory.
+/// The timeout is a leak backstop, not a UX pace-setter: killing a whole run
+/// because the user stepped away for ten minutes is far worse than a stale
+/// approval card, so it is deliberately generous. Cancellation (stop button,
+/// closing the session) still tears the wait down immediately.
 async fn wait_for_approval(
     _window: &Window,
     request_id: &str,
     cancel_rx: &watch::Receiver<bool>,
 ) -> Result<Vec<(String, bool)>, String> {
-    const APPROVAL_TIMEOUT_SECS: u64 = 300; // 5 minutes
+    const APPROVAL_TIMEOUT_SECS: u64 = 3600; // 1 hour
 
     let rx = {
         let mut pending = PENDING_APPROVALS.lock().await;

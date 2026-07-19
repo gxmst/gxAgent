@@ -67,6 +67,7 @@ import { McpAddForm } from "./components/mcp/McpAddForm";
 import { useSessionStorage } from "./hooks/useSessionStorage";
 import { resolveRequestConfig } from "./utils/requestConfig";
 import { compareSidebarSessions, moveSessionInSidebar } from "./utils/sessionOrder";
+import { suggestTrustPatterns } from "./utils/trustPatterns";
 import { TaskProgress } from "./components/shared/TaskProgress";
 import { ConnectionStatus } from "./components/shared/ConnectionStatus";
 import { McpServerManager, type McpServerView } from "./components/mcp/McpServerManager";
@@ -116,7 +117,7 @@ const i18n: Record<string, Record<string, string>> = {
     "settings.approvalPolicy": "审批策略",
     "settings.approval.standard": "标准 — 确认写入和命令",
     "settings.approval.strict": "严格 — 除读取外均需确认",
-    "settings.approval.relaxed": "宽松 — 仅确认未信任的写入",
+    "settings.approval.relaxed": "宽松 — 自动批准工作区内文件编辑，命令仍需确认",
     "settings.workDir": "默认工作目录",
     "settings.tools": "启用工具",
     "welcome.title": "有什么可以帮你的？",
@@ -228,6 +229,7 @@ const i18n: Record<string, Record<string, string>> = {
     "msg.copied": "已复制",
     "approval.approveAndTrust": "批准并信任",
     "approval.trustHint": "将此命令加入白名单，以后自动批准",
+    "approval.trustPreview": "「批准并信任」将白名单：{patterns}",
     "whitelist.title": "白名单管理",
     "whitelist.empty": "暂无白名单规则",
     "whitelist.toolName": "工具名",
@@ -316,7 +318,7 @@ const i18n: Record<string, Record<string, string>> = {
     "settings.approvalPolicy": "Approval Policy",
     "settings.approval.standard": "Standard — confirm writes & commands",
     "settings.approval.strict": "Strict — confirm everything except reads",
-    "settings.approval.relaxed": "Relaxed — confirm only untrusted writes",
+    "settings.approval.relaxed": "Relaxed — auto-approve workspace file edits; commands still confirm",
     "settings.workDir": "Default Work Directory",
     "settings.tools": "Enabled Tools",
     "welcome.title": "How can I help you?",
@@ -428,6 +430,7 @@ const i18n: Record<string, Record<string, string>> = {
     "msg.copied": "Copied",
     "approval.approveAndTrust": "Approve & Trust",
     "approval.trustHint": "Add this command to whitelist for auto-approval",
+    "approval.trustPreview": "\"Approve & Trust\" whitelists: {patterns}",
     "whitelist.title": "Whitelist Management",
     "whitelist.empty": "No whitelist rules yet",
     "whitelist.toolName": "Tool Name",
@@ -853,8 +856,8 @@ const DEFAULT_CONFIG: AppConfig = {
   font_family: "system",
   show_advanced_reply_info: false,
   command_timeout: 30,
-  max_agent_loops: 10,
-  max_tool_calls_per_request: 30,
+  max_agent_loops: 30,
+  max_tool_calls_per_request: 120,
   preview_sandbox: true,
   tools_migration_version: 1,
 };
@@ -4024,39 +4027,22 @@ function App() {
       });
       setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: null }));
 
-      // If approved with trust, add each tool call to the whitelist
+      // If approved with trust, add each tool call's suggested patterns to
+      // the whitelist. Compound commands contribute one pattern per segment
+      // so the backend's per-segment matching approves them next time.
       if (approved && trustPattern) {
         const now = Math.floor(Date.now() / 1000);
-        const newPatterns: TrustedPattern[] = pendingApprovals.tool_calls.map((tc) => {
-          let pattern = tc.name; // default: trust the whole tool
-          if (tc.name === "execute_command") {
-            // Extract the command prefix for more specific matching
-            try {
-              const args = JSON.parse(tc.arguments);
-              const cmd = (args.command || "").trim();
-              // Take the first token as the pattern
-              const firstToken = cmd.split(/\s+/)[0] || cmd;
-              pattern = firstToken;
-            } catch {
-              pattern = tc.name;
-            }
-          } else if (tc.name === "write_file" || tc.name === "edit_file") {
-            try {
-              const args = JSON.parse(tc.arguments);
-              const path = (args.path || "").trim();
-              // Trust the directory prefix
-              const dir = path.replace(/[^/\\]+$/, "");
-              pattern = dir || path;
-            } catch {
-              pattern = tc.name;
-            }
-          }
-          return {
-            tool_name: tc.name,
-            pattern,
-            created_at: now,
-          };
-        });
+        const seen = new Set<string>();
+        const newPatterns: TrustedPattern[] = pendingApprovals.tool_calls.flatMap((tc) =>
+          suggestTrustPatterns(tc.name, tc.arguments)
+            .filter((pattern) => {
+              const key = `${tc.name} ${pattern}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            })
+            .map((pattern) => ({ tool_name: tc.name, pattern, created_at: now })),
+        );
 
         try {
           const updatedConfig = await invoke<AppConfig>("add_trusted_patterns", {
@@ -4078,6 +4064,9 @@ function App() {
 
   const renderApprovalCard = (className = "") => {
     if (!pendingApprovals) return null;
+    const trustPreview = [...new Set(
+      pendingApprovals.tool_calls.flatMap((tc) => suggestTrustPatterns(tc.name, tc.arguments)),
+    )].join(", ");
     return (
       <div className={`approval-card ${className}`.trim()}>
         <div className="approval-card-header">
@@ -4092,6 +4081,9 @@ function App() {
             </pre>
           </div>
         ))}
+        <div className="approval-trust-preview">
+          {t("approval.trustPreview", lang, { patterns: trustPreview })}
+        </div>
         <div className="approval-actions">
           <button className="btn btn-approve" disabled={approvalSubmitting} onClick={() => handleApproval(true)}>
             <CheckCircle2 size={13} /> {t("approval.approve", lang)}
@@ -6868,9 +6860,9 @@ function App() {
                   type="number"
                   className="input-text"
                   min={1}
-                  max={20}
+                  max={100}
                   value={config.max_agent_loops}
-                  onChange={(e) => setConfig((prev) => ({ ...prev, max_agent_loops: parseInt(e.target.value) || 10 }))}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, max_agent_loops: parseInt(e.target.value) || 30 }))}
                 />
               </div>
 
@@ -6880,9 +6872,9 @@ function App() {
                   type="number"
                   className="input-text"
                   min={1}
-                  max={100}
+                  max={500}
                   value={config.max_tool_calls_per_request}
-                  onChange={(e) => setConfig((prev) => ({ ...prev, max_tool_calls_per_request: parseInt(e.target.value) || 30 }))}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, max_tool_calls_per_request: parseInt(e.target.value) || 120 }))}
                 />
               </div>
               </section>

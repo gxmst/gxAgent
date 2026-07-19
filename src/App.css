@@ -2464,6 +2464,15 @@ select.input-text {
   background: var(--bg-card);
 }
 
+/* Shows exactly which whitelist patterns "Approve & Trust" would add, so the
+   trust button is predictable instead of a leap of faith. */
+.approval-trust-preview {
+  padding: 8px 12px 0;
+  font-size: var(--font-caption);
+  color: var(--text-tertiary, var(--text-secondary));
+  overflow-wrap: anywhere;
+}
+
 .btn-approve-trust {
   background: var(--warning-subtle) !important;
   color: var(--warning) !important;
