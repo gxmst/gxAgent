@@ -648,8 +648,18 @@ import {
   PendingApproval,
   SearchStatus,
   Message,
-  Attachment
+  Attachment,
+  ContextSummary
 } from "./types";
+
+// Stable message identity: React keys and context-boundary bookkeeping both
+// need messages to survive reordering/insertion without index drift.
+function newMessageId(): string {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch { /* fall through */ }
+  return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 type ToastNotice = {
   id: number;
@@ -1007,6 +1017,7 @@ function normalizeMessage(raw: unknown): Message | null {
     : undefined;
 
   return {
+    id: typeof input.id === "string" && input.id ? input.id : newMessageId(),
     role: input.role,
     content: input.role === "context_divider" ? "" : typeof input.content === "string" ? input.content : "",
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
@@ -1018,6 +1029,20 @@ function normalizeMessage(raw: unknown): Message | null {
     ...(typeof input.timestamp === "number" && Number.isFinite(input.timestamp) ? { timestamp: input.timestamp } : {}),
     ...(searchStatus && searchStatus.length > 0 ? { searchStatus } : {}),
     ...(input.usage && typeof input.usage === "object" ? { usage: input.usage } : {}),
+  };
+}
+
+function normalizeContextSummary(raw: unknown, messages: Message[]): ContextSummary | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const input = raw as Partial<ContextSummary>;
+  if (typeof input.summary !== "string" || !input.summary.trim()) return undefined;
+  if (typeof input.dividerId !== "string" || !input.dividerId) return undefined;
+  // A summary is only meaningful while its divider still exists in the session.
+  if (!messages.some((message) => message.id === input.dividerId)) return undefined;
+  return {
+    summary: input.summary,
+    dividerId: input.dividerId,
+    createdAt: typeof input.createdAt === "number" && Number.isFinite(input.createdAt) ? input.createdAt : Date.now(),
   };
 }
 
@@ -1062,6 +1087,7 @@ function normalizeSessions(raw: unknown): ChatSession[] {
         createdAt,
         updatedAt,
         compactBackup: Array.isArray(item.compactBackup) ? item.compactBackup : undefined,
+        contextSummary: normalizeContextSummary(item.contextSummary, messages),
       };
     });
 
@@ -1422,6 +1448,13 @@ function App() {
   // createNewSession directly there captures a stale sidebarNav/session list.
   const createNewSessionRef = useRef<() => void>(() => {});
   const lastPersistedSessionsRef = useRef<Record<string, string>>({});
+  // Incremental persistence caches: last-seen object identity and its JSON.
+  // Identity mismatch marks a session dirty; only dirty sessions re-serialize.
+  const sessionObjCacheRef = useRef<Record<string, ChatSession>>({});
+  const sessionJsonCacheRef = useRef<Record<string, string>>({});
+  // Set when the localStorage mirror write was skipped mid-stream, so the
+  // next idle persist refreshes it even if nothing else changed.
+  const mirrorPendingRef = useRef(false);
   const sessionPersistenceEpochRef = useRef(0);
   // Stream token batching: accumulate chunks and flush once per animation frame
   // so a burst of tokens triggers one setSessions/render instead of one per token.
@@ -1656,6 +1689,7 @@ function App() {
     const next = [...messages];
     if (next.length === 0 || next[next.length - 1].role !== "assistant") {
       next.push({
+        id: newMessageId(),
         role: "assistant",
         content: "",
         actions: incoming,
@@ -1919,6 +1953,10 @@ function App() {
         lastPersistedSessionsRef.current = Object.fromEntries(
           storedSessions.map((session) => [session.id, JSON.stringify(session)]),
         );
+        sessionJsonCacheRef.current = { ...lastPersistedSessionsRef.current };
+        sessionObjCacheRef.current = Object.fromEntries(
+          storedSessions.map((session) => [session.id, session]),
+        );
         setSessions(storedSessions);
         setCurrentSessionId((prev) =>
           storedSessions.some((session) => session.id === prev) ? prev : storedSessions[0].id
@@ -1943,33 +1981,63 @@ function App() {
     const persistenceEpoch = sessionPersistenceEpochRef.current;
     const persist = async () => {
       if (persistenceEpoch !== sessionPersistenceEpochRef.current) return;
-      const data = JSON.stringify(sessions);
 
-      try {
-        if (data.length > 4 * 1024 * 1024) {
-          const trimmed = sessions.map((s: ChatSession) => ({
-            ...s,
-            messages: s.messages.slice(-20).map((m) => (
-              m.attachments
-                ? {
-                    ...m,
-                    attachments: m.attachments.map((att) =>
-                      att.type === "image" ? { ...att, data: "" } : att
-                    ),
-                  }
-                : m
-            )),
-          }));
-          localStorage.setItem("gx_sessions", JSON.stringify(trimmed));
-        } else {
-          localStorage.setItem("gx_sessions", data);
-        }
-      } catch {
-        try { localStorage.removeItem("gx_sessions"); } catch { /* quota exceeded, nothing to do */ }
+      // Incremental change detection: session objects are immutable-per-change
+      // (setSessions only replaces the sessions it touches), so an identity
+      // check finds the dirty ones for free. Only those get re-serialized —
+      // stringifying the whole store on every change was a main-thread stall
+      // that grew linearly with total history size.
+      const dirty = sessions.filter((session) => sessionObjCacheRef.current[session.id] !== session);
+      if (dirty.length === 0 && !mirrorPendingRef.current) return;
+      for (const session of dirty) {
+        sessionJsonCacheRef.current[session.id] = JSON.stringify(session);
+        sessionObjCacheRef.current[session.id] = session;
       }
 
+      // localStorage mirror (startup cache only; the backend is authoritative).
+      // Assembled from the per-session cache and skipped entirely while a
+      // request is streaming — the post-stream persist writes it once.
+      if (hasActiveRequest) {
+        if (dirty.length > 0) mirrorPendingRef.current = true;
+      } else {
+        mirrorPendingRef.current = false;
+        try {
+          const parts = sessions.map((session) =>
+            sessionJsonCacheRef.current[session.id]
+            ?? (sessionJsonCacheRef.current[session.id] = JSON.stringify(session)));
+          const data = `[${parts.join(",")}]`;
+          if (data.length > 4 * 1024 * 1024) {
+            const trimmed = sessions.map((s: ChatSession) => ({
+              ...s,
+              messages: s.messages.slice(-20).map((m) => (
+                m.attachments
+                  ? {
+                      ...m,
+                      attachments: m.attachments.map((att) =>
+                        att.type === "image" ? { ...att, data: "" } : att
+                      ),
+                    }
+                  : m
+              )),
+            }));
+            localStorage.setItem("gx_sessions", JSON.stringify(trimmed));
+          } else {
+            localStorage.setItem("gx_sessions", data);
+          }
+        } catch {
+          try { localStorage.removeItem("gx_sessions"); } catch { /* quota exceeded, nothing to do */ }
+        }
+      }
+
+      // Scan all sessions (cached strings, so this is cheap) rather than just
+      // the dirty ones, so a previously failed save retries on the next
+      // persist instead of waiting for that session to change again.
       const changed = sessions
-        .map((session) => ({ session, serialized: JSON.stringify(session) }))
+        .map((session) => ({
+          session,
+          serialized: sessionJsonCacheRef.current[session.id]
+            ?? (sessionJsonCacheRef.current[session.id] = JSON.stringify(session)),
+        }))
         .filter(({ session, serialized }) => lastPersistedSessionsRef.current[session.id] !== serialized);
       if (changed.length === 0) return;
 
@@ -2912,8 +2980,9 @@ function App() {
             ...s,
             compactBackup: messages,
             messages: [
-              { role: "assistant" as const, content: result, actions: [], timestamp: Date.now() },
+              { id: newMessageId(), role: "assistant" as const, content: result, actions: [], timestamp: Date.now() },
             ],
+            contextSummary: undefined,
             updatedAt: Date.now(),
           };
         })
@@ -2983,6 +3052,7 @@ function App() {
             messages[messages.length - 1].role !== "assistant"
           ) {
             messages.push({
+              id: newMessageId(),
               role: "assistant",
               content: buffered.text,
               actions: [],
@@ -3063,6 +3133,7 @@ function App() {
                 }
                 // Create assistant message now that we have results or error
                 const assistantMsg: Message = {
+                  id: newMessageId(),
                   role: "assistant",
                   content: "",
                   searchStatus: [status],
@@ -3107,6 +3178,7 @@ function App() {
                 messages[messages.length - 1].role !== "assistant"
               ) {
                 messages.push({
+                  id: newMessageId(),
                   role: "assistant",
                   content: "",
                   actions: [],
@@ -3180,6 +3252,7 @@ function App() {
                 const messages = [...s.messages];
                 if (messages.length === 0 || messages[messages.length - 1].role !== "assistant") {
                   messages.push({
+                    id: newMessageId(),
                     role: "assistant",
                     content: "",
                     actions: [],
@@ -3599,7 +3672,10 @@ function App() {
   // Actions
   // ==========================================
 
-  const serializeSessionHistory = (messages: Message[]) => {
+  // Outbound history is everything after the last context divider. Each
+  // serialized message keeps a reference to its source so the auto-compact
+  // boundary can be mapped back to a concrete message id.
+  const activeHistoryPairs = (messages: Message[]) => {
     let lastDividerIdx = -1;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (messages[index].role === "context_divider") {
@@ -3607,12 +3683,21 @@ function App() {
         break;
       }
     }
-    const activeMessages = lastDividerIdx >= 0 ? messages.slice(lastDividerIdx + 1) : messages;
-    return activeMessages.flatMap((message) => {
+    return messages.slice(lastDividerIdx + 1).flatMap((message) => {
       const serialized = serializeMessageForApi(message);
-      return serialized ? [serialized] : [];
+      return serialized ? [{ serialized, source: message }] : [];
     });
   };
+
+  const lastContextDivider = (messages: Message[]) =>
+    [...messages].reverse().find((message) => message.role === "context_divider") ?? null;
+
+  const summaryAsOutboundMessage = (summary: ContextSummary) => ({
+    role: "user" as const,
+    content: `${lang === "zh"
+      ? "[前情提要——更早的对话已压缩为以下摘要]"
+      : "[Earlier conversation, compacted into this summary]"}\n${summary.summary}`,
+  });
 
   const resolveSessionRequest = (sessionConfig: SessionConfig) => {
     const sessionSearchMode = config.tools_enabled.includes("web_search")
@@ -3656,19 +3741,122 @@ function App() {
     }
 
     const requestId = createRequestId();
-    const sessionMessages = serializeSessionHistory(history);
     const finalMessage = buildPromptWithAttachments(userMessage, requestAttachments);
     const imageAttachments = imageAttachmentsForApi(requestAttachments);
     const instructionTokens = estimateTextTokens(requestConfig.system_prompt)
       + (requestConfig.role_prompt ? estimateTextTokens(requestConfig.role_prompt) + 24 : 0);
-    const estimatedRequestTokens = sessionMessages.reduce((sum, message) => (
+    const requestContextLimit = modelContextLimit(requestConfig.model);
+
+    // Outbound history: messages after the last divider, with the persisted
+    // rolling summary standing in for everything that divider hides. The
+    // summary only applies while its own divider is still the latest one.
+    const targetSession = sessions.find((session) => session.id === targetSessionId);
+    const historyDivider = lastContextDivider(history);
+    const activeSummary = targetSession?.contextSummary
+      && historyDivider?.id === targetSession.contextSummary.dividerId
+      ? targetSession.contextSummary
+      : null;
+    const outboundPairs = activeHistoryPairs(history);
+    let sessionMessages = [
+      ...(activeSummary ? [summaryAsOutboundMessage(activeSummary)] : []),
+      ...outboundPairs.map((pair) => pair.serialized),
+    ];
+    const estimateOutboundTokens = (outbound: typeof sessionMessages) => outbound.reduce((sum, message) => (
       sum
       + estimateTextTokens(String(message.content || ""))
       + ((message as { attachments?: Attachment[] }).attachments || []).length * 1100
       + 6
     ), instructionTokens) + estimateTextTokens(finalMessage) + imageAttachments.length * 1100;
-    const requestContextLimit = modelContextLimit(requestConfig.model);
+    let estimatedRequestTokens = estimateOutboundTokens(sessionMessages);
+
+    requestStartingRef.current = true;
+    setPreparingRequestSessionId(targetSessionId);
+    const finishPreparingRequest = () => {
+      requestStartingRef.current = false;
+      setPreparingRequestSessionId((current) => current === targetSessionId ? null : current);
+    };
+
+    // Rolling auto-compact, Claude Code style: past half the model window,
+    // fold everything but a recent tail into an LLM summary. The summary is
+    // persisted on the session (keyed to a context divider), so it is paid
+    // for once and rolls forward as the conversation keeps growing.
+    const AUTO_COMPACT_TRIGGER_RATIO = 0.5;
+    const AUTO_COMPACT_KEEP_TAIL = 8;
+    if (
+      estimatedRequestTokens > requestContextLimit * AUTO_COMPACT_TRIGGER_RATIO
+      && sessionMessages.length > AUTO_COMPACT_KEEP_TAIL + 4
+    ) {
+      const cutOutbound = sessionMessages.length - AUTO_COMPACT_KEEP_TAIL;
+      // Last source-backed message inside the folded range — the new divider
+      // lands right after it. (Index shifts by one when a previous summary
+      // occupies slot 0 of the outbound array.)
+      const coveredPairs = outboundPairs.slice(0, cutOutbound - (activeSummary ? 1 : 0));
+      const boundarySource = coveredPairs[coveredPairs.length - 1]?.source;
+      if (boundarySource?.id) {
+        addLog(
+          lang === "zh"
+            ? `上下文约 ${formatTokenCount(estimatedRequestTokens)} tokens，自动压缩 ${cutOutbound} 条早期消息…`
+            : `Context is ~${formatTokenCount(estimatedRequestTokens)} tokens; auto-compacting ${cutOutbound} earlier messages…`,
+          "info",
+          false,
+          targetSessionId,
+        );
+        try {
+          const summaryText = await invoke<string>("compact_history", {
+            currentConfig: requestConfig,
+            requestId: `autocompact-${requestId}`,
+            contextTokenLimit: requestContextLimit,
+            messages: sessionMessages.slice(0, cutOutbound).map((message) => ({
+              role: message.role,
+              content: message.content,
+            })),
+          });
+          if (summaryText && summaryText.trim()) {
+            const dividerId = newMessageId();
+            const supersededDividerId = activeSummary ? targetSession?.contextSummary?.dividerId ?? null : null;
+            const nextSummary: ContextSummary = {
+              summary: summaryText.trim(),
+              dividerId,
+              createdAt: Date.now(),
+            };
+            setSessions((previous) => previous.map((session) => {
+              if (session.id !== targetSessionId) return session;
+              const kept = session.messages.filter((message) => message.id !== supersededDividerId);
+              const boundaryIdx = kept.findIndex((message) => message.id === boundarySource.id);
+              if (boundaryIdx < 0) return session;
+              const nextMessages = [
+                ...kept.slice(0, boundaryIdx + 1),
+                { id: dividerId, role: "context_divider" as const, content: "" },
+                ...kept.slice(boundaryIdx + 1),
+              ];
+              return { ...session, messages: nextMessages, contextSummary: nextSummary, updatedAt: Date.now() };
+            }));
+            sessionMessages = [summaryAsOutboundMessage(nextSummary), ...sessionMessages.slice(cutOutbound)];
+            estimatedRequestTokens = estimateOutboundTokens(sessionMessages);
+            addLog(
+              lang === "zh"
+                ? `已压缩为摘要，当前上下文约 ${formatTokenCount(estimatedRequestTokens)} tokens。`
+                : `Compacted into a summary; context is now ~${formatTokenCount(estimatedRequestTokens)} tokens.`,
+              "success",
+              false,
+              targetSessionId,
+            );
+          }
+        } catch (error) {
+          addLog(
+            lang === "zh"
+              ? `自动压缩失败（继续使用完整历史）：${error}`
+              : `Auto-compact failed (continuing with full history): ${error}`,
+            "error",
+            false,
+            targetSessionId,
+          );
+        }
+      }
+    }
+
     if (estimatedRequestTokens > requestContextLimit * 0.9) {
+      finishPreparingRequest();
       addLog(
         lang === "zh"
           ? `预计上下文 ${formatTokenCount(estimatedRequestTokens)} tokens，接近或超过模型上限 ${formatTokenCount(requestContextLimit)}。请先压缩上下文或移除附件。`
@@ -3679,13 +3867,6 @@ function App() {
       );
       return false;
     }
-
-    requestStartingRef.current = true;
-    setPreparingRequestSessionId(targetSessionId);
-    const finishPreparingRequest = () => {
-      requestStartingRef.current = false;
-      setPreparingRequestSessionId((current) => current === targetSessionId ? null : current);
-    };
 
     // Only consume the previous restore point after every pure validation has
     // passed. A rejected oversized request must not destroy the user's ability
@@ -3757,7 +3938,7 @@ function App() {
         ...session,
         messages: [
           ...session.messages,
-          { role: "assistant", content: `Error: ${error}`, actions: [], timestamp: Date.now() },
+          { id: newMessageId(), role: "assistant", content: `Error: ${error}`, actions: [], timestamp: Date.now() },
         ],
         updatedAt: Date.now(),
       } : session));
@@ -3788,7 +3969,7 @@ function App() {
       if (command === "clear") {
         setSessions(prev => prev.map(s => s.id === currentSessionId ? {
           ...s,
-          messages: [...s.messages, { role: "context_divider" as const, content: "" }]
+          messages: [...s.messages, { id: newMessageId(), role: "context_divider" as const, content: "" }]
         } : s));
         return;
       }
@@ -3832,7 +4013,7 @@ function App() {
       setPrompt("");
       setSessions(prev => prev.map(s => s.id === currentSessionId ? {
         ...s,
-        messages: [...s.messages, { role: "context_divider" as const, content: "" }]
+        messages: [...s.messages, { id: newMessageId(), role: "context_divider" as const, content: "" }]
       } : s));
       return;
     }
@@ -3871,6 +4052,7 @@ function App() {
               messages: [
                 ...s.messages,
                 {
+                  id: newMessageId(),
                   role: "user" as const,
                   content: userMessage,
                   attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
@@ -3918,7 +4100,7 @@ function App() {
       await invoke("push_steering_message", { requestId, message });
       setSessions(prev => prev.map(s => s.id === sessionId ? {
         ...s,
-        messages: [...s.messages, { role: "user" as const, content: `[Steering] ${message}`, timestamp: Date.now() }],
+        messages: [...s.messages, { id: newMessageId(), role: "user" as const, content: `[Steering] ${message}`, timestamp: Date.now() }],
         updatedAt: Date.now(),
       } : s));
       setPrompt("");
@@ -4211,6 +4393,10 @@ function App() {
     lastPersistedSessionsRef.current = Object.fromEntries(
       nextSessions.map((session) => [session.id, JSON.stringify(session)]),
     );
+    sessionJsonCacheRef.current = { ...lastPersistedSessionsRef.current };
+    sessionObjCacheRef.current = Object.fromEntries(
+      nextSessions.map((session) => [session.id, session]),
+    );
     setSessions(nextSessions);
     const nextId = preferredSessionId && nextSessions.some((session) => session.id === preferredSessionId)
       ? preferredSessionId
@@ -4251,6 +4437,8 @@ function App() {
       setSessions(remaining);
       dropSessionUiState(id);
       delete lastPersistedSessionsRef.current[id];
+      delete sessionObjCacheRef.current[id];
+      delete sessionJsonCacheRef.current[id];
     } catch (error) {
       addLog(`${lang === "zh" ? "删除失败" : "Delete failed"}: ${error}`, "error", true);
       return;
@@ -4400,9 +4588,13 @@ function App() {
   // and the virtualized list (long sessions).
   const renderMessage = (msg: Message, mIdx: number) => (
     msg.role === "context_divider" ? (
-      <div key={mIdx} className="context-divider">
+      <div key={msg.id ?? mIdx} className="context-divider">
         <div className="context-divider-line" />
-        <span className="context-divider-label">{lang === "zh" ? "上方上下文已忽略" : "Context Ignored Above"}</span>
+        <span className="context-divider-label">{
+          currentSession.contextSummary?.dividerId === msg.id
+            ? (lang === "zh" ? "已压缩为摘要 · 模型可见摘要与后续消息" : "Compacted to summary · model sees summary + newer messages")
+            : (lang === "zh" ? "上方上下文已忽略" : "Context Ignored Above")
+        }</span>
         <div className="context-divider-line" />
         <button
           className="context-divider-remove"
@@ -4411,7 +4603,10 @@ function App() {
           onClick={() => {
             setSessions(prev => prev.map(s => s.id === currentSessionId ? {
               ...s,
-              messages: s.messages.filter((_, i) => i !== mIdx)
+              messages: s.messages.filter((_, i) => i !== mIdx),
+              // Removing the summary's own boundary discards the summary too:
+              // the full history becomes visible to the model again.
+              ...(s.contextSummary?.dividerId === msg.id ? { contextSummary: undefined } : {}),
             } : s));
           }}
         >
@@ -4420,7 +4615,7 @@ function App() {
       </div>
     ) : (
     <div
-      key={mIdx}
+      key={msg.id ?? mIdx}
       className={`chat-bubble-container ${msg.role} ${isStreaming && mIdx === currentSession.messages.length - 1 && msg.role === "assistant" ? "is-streaming" : ""}`}
       aria-busy={isStreaming && mIdx === currentSession.messages.length - 1 && msg.role === "assistant" ? true : undefined}
     >
@@ -5149,13 +5344,13 @@ function App() {
                           }
                         } else {
                           const sections = text.split(/\n\n---\n\n/);
-                          const msgs: { role: "user" | "assistant"; content: string; timestamp?: number }[] = [];
+                          const msgs: Message[] = [];
                           for (const section of sections) {
                             const lines = section.trim();
                             if (lines.startsWith("## User")) {
-                              msgs.push({ role: "user", content: lines.replace(/^## User\n\n/, ""), timestamp: Date.now() });
+                              msgs.push({ id: newMessageId(), role: "user", content: lines.replace(/^## User\n\n/, ""), timestamp: Date.now() });
                             } else if (lines.startsWith("## Assistant")) {
-                              msgs.push({ role: "assistant", content: lines.replace(/^## Assistant\n\n/, ""), timestamp: Date.now() });
+                              msgs.push({ id: newMessageId(), role: "assistant", content: lines.replace(/^## Assistant\n\n/, ""), timestamp: Date.now() });
                             }
                           }
                           if (msgs.length > 0) {
@@ -5665,6 +5860,7 @@ function App() {
                 followOutput={(atBottom: boolean) => (atBottom ? "auto" : false)}
                 atBottomStateChange={(atBottom: boolean) => { isAtBottomRef.current = atBottom; }}
                 itemContent={(mIdx: number, msg: Message) => renderMessage(msg, mIdx)}
+                computeItemKey={(_mIdx: number, msg: Message) => msg.id ?? _mIdx}
                 context={{
                   showThinking: isStreaming &&
                     currentSession.messages[currentSession.messages.length - 1]?.role !== "assistant",
@@ -5948,7 +6144,7 @@ function App() {
                     onClick={() => {
                       setSessions(prev => prev.map(s => s.id === currentSessionId ? {
                         ...s,
-                        messages: [...s.messages, { role: "context_divider" as const, content: "" }]
+                        messages: [...s.messages, { id: newMessageId(), role: "context_divider" as const, content: "" }]
                       } : s));
                     }}
                   >

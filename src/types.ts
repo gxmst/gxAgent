@@ -103,6 +103,9 @@ export interface Attachment {
 }
 
 export interface Message {
+  /** Stable identity for React keys and context-boundary bookkeeping.
+   *  Backfilled on load for legacy messages. */
+  id?: string;
   role: "user" | "assistant" | "system" | "context_divider";
   content: string;
   attachments?: Attachment[];
@@ -127,6 +130,16 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   compactBackup?: Message[];
+  /** Rolling auto-compact state: `summary` stands in for everything before
+   *  the context divider whose message id is `dividerId`. Cleared implicitly
+   *  when a newer divider supersedes that boundary. */
+  contextSummary?: ContextSummary | null;
+}
+
+export interface ContextSummary {
+  summary: string;
+  dividerId: string;
+  createdAt: number;
 }
 
 export interface SessionConfig {
