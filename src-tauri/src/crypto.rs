@@ -224,8 +224,8 @@ fn derive_key_v2() -> [u8; 32] {
     );
 
     let mut key = [0u8; 32];
-    for i in 0..32 {
-        key[i] = ((i as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 24) as u8;
+    for (i, slot) in key.iter_mut().enumerate() {
+        *slot = ((i as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 24) as u8;
     }
 
     for (i, &b) in seed.as_bytes().iter().enumerate() {

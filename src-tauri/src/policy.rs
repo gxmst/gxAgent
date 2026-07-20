@@ -58,7 +58,7 @@ fn extract_command_name(cmd: &str) -> String {
 
     let name = if first_cmd_clean.contains('\\') || first_cmd_clean.contains('/') {
         first_cmd_clean
-            .rsplit(|c| c == '\\' || c == '/')
+            .rsplit(['\\', '/'])
             .next()
             .unwrap_or(first_cmd_clean)
     } else {

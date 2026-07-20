@@ -1554,9 +1554,7 @@ fn parse_duckduckgo_results(html: &str) -> Result<String, String> {
         } else if raw_link.contains("duckduckgo.com/y.js")
             || raw_link.contains("duckduckgo.com/d.js")
             || raw_link.contains("duckduckgo.com/l/")
-        {
-            String::new()
-        } else if raw_link.starts_with("/")
+            || raw_link.starts_with("/")
             || (raw_link.contains("duckduckgo.com") && !raw_link.starts_with("http"))
         {
             String::new()

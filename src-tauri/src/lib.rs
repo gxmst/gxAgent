@@ -23,6 +23,8 @@ use tauri_plugin_dialog::DialogExt;
 // ==========================================
 
 /// Start an agent session with the given config and prompt
+// Tauri command: the parameter list is the frontend invoke contract.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn start_agent_session(
     window: tauri::Window,
@@ -340,7 +342,7 @@ async fn save_code_file(
     dialog
         .file()
         .add_filter("Code File", &[ext])
-        .set_file_name(&format!("untitled.{}", ext))
+        .set_file_name(format!("untitled.{}", ext))
         .save_file(move |path| {
             let _ = tx.send(path);
         });
@@ -1218,14 +1220,12 @@ fn clear_all_sessions() -> Result<(), String> {
     let data_dir = dirs::data_dir().unwrap_or_default().join("gxAgent");
     if data_dir.exists() {
         let entries = fs::read_dir(&data_dir).map_err(|e| e.to_string())?;
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                    if name.starts_with("session_") {
-                        let _ = fs::remove_file(&path);
-                    }
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if name.starts_with("session_") {
+                    let _ = fs::remove_file(&path);
                 }
             }
         }

@@ -229,11 +229,10 @@ impl McpServer {
             map.insert(id, tx);
         }
 
-        self.write_message(&request).await.map_err(|e| {
+        self.write_message(&request).await.inspect_err(|_e| {
             if let Ok(mut map) = self.pending.try_lock() {
                 map.remove(&id);
             }
-            e
         })?;
 
         // Wait for the reader task to deliver the response
@@ -457,40 +456,6 @@ pub async fn test_server(name: String, config: McpServerConfig) -> McpServerStat
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mcp_tool_definitions_convert_to_openai_function_shape() {
-        let native = json!({
-            "name": "query_db",
-            "description": "Run a read-only SQL query",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "sql": { "type": "string" } },
-                "required": ["sql"]
-            }
-        });
-        let converted = mcp_tool_to_openai(&native);
-        assert_eq!(converted["type"], "function");
-        assert_eq!(converted["function"]["name"], "query_db");
-        assert_eq!(
-            converted["function"]["description"],
-            "Run a read-only SQL query"
-        );
-        assert_eq!(converted["function"]["parameters"], native["inputSchema"]);
-    }
-
-    #[test]
-    fn mcp_tool_without_schema_gets_empty_object_parameters() {
-        let native = json!({ "name": "no_args_tool" });
-        let converted = mcp_tool_to_openai(&native);
-        assert_eq!(converted["function"]["name"], "no_args_tool");
-        assert_eq!(converted["function"]["parameters"]["type"], "object");
-    }
-}
-
 /// Fetch available models from a local Ollama instance
 pub async fn fetch_ollama_models(base_url: &str) -> Result<Vec<Value>, String> {
     let client = reqwest::Client::new();
@@ -529,4 +494,38 @@ pub async fn fetch_ollama_models(base_url: &str) -> Result<Vec<Value>, String> {
         .collect();
 
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_tool_definitions_convert_to_openai_function_shape() {
+        let native = json!({
+            "name": "query_db",
+            "description": "Run a read-only SQL query",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sql": { "type": "string" } },
+                "required": ["sql"]
+            }
+        });
+        let converted = mcp_tool_to_openai(&native);
+        assert_eq!(converted["type"], "function");
+        assert_eq!(converted["function"]["name"], "query_db");
+        assert_eq!(
+            converted["function"]["description"],
+            "Run a read-only SQL query"
+        );
+        assert_eq!(converted["function"]["parameters"], native["inputSchema"]);
+    }
+
+    #[test]
+    fn mcp_tool_without_schema_gets_empty_object_parameters() {
+        let native = json!({ "name": "no_args_tool" });
+        let converted = mcp_tool_to_openai(&native);
+        assert_eq!(converted["function"]["name"], "no_args_tool");
+        assert_eq!(converted["function"]["parameters"]["type"], "object");
+    }
 }

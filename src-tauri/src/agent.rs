@@ -160,11 +160,10 @@ fn append_shell_guidance(system_prompt: &mut String) {
 
 // Steering messages are keyed by request_id so concurrent sessions/requests
 // never cross-contaminate each other's intervention queues.
-static STEERING_QUEUE: once_cell::sync::Lazy<
-    Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>,
-> = once_cell::sync::Lazy::new(|| {
-    Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
-});
+type SteeringQueue = std::collections::HashMap<String, Vec<String>>;
+
+static STEERING_QUEUE: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<SteeringQueue>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(SteeringQueue::new())));
 
 const AGENT_CANCELLED_ERROR: &str = "__GX_AGENT_CANCELLED__";
 
@@ -367,7 +366,7 @@ pub async fn push_steering_message(request_id: String, msg: String) {
 async fn drain_steering_messages(request_id: &str) -> Vec<String> {
     let mut queue = STEERING_QUEUE.lock().await;
     match queue.get_mut(request_id) {
-        Some(msgs) => msgs.drain(..).collect(),
+        Some(msgs) => std::mem::take(msgs),
         None => Vec::new(),
     }
 }
@@ -404,7 +403,7 @@ fn estimate_message_tokens(msg: &Value) -> u64 {
     (content.len() as u64) / 4
 }
 
-fn compact_messages(messages: &mut Vec<Value>, context_limit: usize) {
+fn compact_messages(messages: &mut [Value], context_limit: usize) {
     if messages.len() <= 6 {
         return;
     }
@@ -433,8 +432,11 @@ fn compact_messages(messages: &mut Vec<Value>, context_limit: usize) {
         return;
     }
 
-    for i in protect_first..(total_len - protect_last) {
-        let msg = &mut messages[i];
+    for msg in messages
+        .iter_mut()
+        .take(total_len - protect_last)
+        .skip(protect_first)
+    {
         if msg["role"] == "tool" {
             if let Some(content) = msg["content"].as_str() {
                 if content.len() > 800 {
@@ -592,6 +594,9 @@ fn normalize_session_messages(messages: Vec<Value>, is_ollama: bool) -> Vec<Valu
 }
 
 /// Core agent loop with streaming and human-in-the-loop approval
+// Threads window handle, config, and protocol state through the agent loop; a
+// context struct is the eventual fix (tracked as a larger refactor).
+#[allow(clippy::too_many_arguments)]
 pub async fn start_agent_loop(
     window: Window,
     request_id: String,
@@ -1044,6 +1049,7 @@ async fn chat_turn(
 /// events, and append the assistant + tool-result messages to `messages` so the
 /// next turn can answer from the observations. Returns false only if nothing was
 /// appended for the model to inspect.
+#[allow(clippy::too_many_arguments)]
 async fn run_chat_search_tools(
     window: &Window,
     request_id: &str,
@@ -1173,6 +1179,7 @@ async fn run_chat_search_tools(
     Ok(ran_search || has_observations)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_chat_mode(
     window: Window,
     request_id: String,
@@ -1528,6 +1535,7 @@ async fn maybe_auto_compact(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_agent_loop_inner(
     window: Window,
     request_id: String,
@@ -1883,6 +1891,7 @@ async fn git_checkpoint(window: &Window, request_id: &str, work_dir: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_with_mcp(
     window: &Window,
     request_id: &str,
@@ -2039,6 +2048,7 @@ async fn tool_output_payload(
 /// Process accumulated tool calls with human-in-the-loop approval.
 /// Returns Ok(true) if the agent should stop (no more tool calls needed),
 /// Ok(false) if the loop should continue.
+#[allow(clippy::too_many_arguments)]
 async fn process_tool_calls(
     window: &Window,
     request_id: &str,
@@ -2204,7 +2214,7 @@ async fn process_tool_calls(
         });
         let outputs = futures_util::future::join_all(futures).await;
 
-        for (tc, output) in parallel_reads.iter().zip(outputs.into_iter()) {
+        for (tc, output) in parallel_reads.iter().zip(outputs) {
             if output == TOOL_CANCELLED_ERROR {
                 return Err(AGENT_CANCELLED_ERROR.to_string());
             }
@@ -2594,15 +2604,11 @@ fn strip_dsml_tags(content: &str) -> String {
     // Remove complete DSML tag blocks: <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls>
     let tc_open = format!("<{}tool_calls>", dsml_close);
     let tc_close = format!("</{}tool_calls>", dsml_close);
-    loop {
-        if let Some(start) = result.find(&tc_open) {
-            if let Some(end) = result[start..].find(&tc_close) {
-                result.replace_range(start..start + end + tc_close.len(), "");
-            } else {
-                result.replace_range(start.., "");
-                break;
-            }
+    while let Some(start) = result.find(&tc_open) {
+        if let Some(end) = result[start..].find(&tc_close) {
+            result.replace_range(start..start + end + tc_close.len(), "");
         } else {
+            result.replace_range(start.., "");
             break;
         }
     }
