@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::workspace;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiProfile {
     pub name: String,
@@ -25,6 +27,10 @@ pub struct AppConfig {
     pub top_p: f32,
     pub max_tokens: Option<u32>,
     pub system_prompt: String,
+    /// Active role text duplicated into the current user request for gateways
+    /// that ignore OpenAI/Anthropic system prompts. This field is request-only.
+    #[serde(default, skip_serializing)]
+    pub role_prompt: Option<String>,
     pub streaming: bool,
     #[serde(default = "default_thinking_level")]
     pub thinking_level: String,
@@ -97,11 +103,11 @@ fn default_command_timeout() -> u64 {
 }
 
 fn default_max_agent_loops() -> u32 {
-    10
+    30
 }
 
 fn default_max_tool_calls_per_request() -> u32 {
-    30
+    120
 }
 
 fn default_preview_sandbox() -> bool {
@@ -113,7 +119,13 @@ fn default_preview_sandbox() -> bool {
 /// (the `#[serde(default)]` on the field) and are migrated on load; after
 /// migration the version is stored, so a tool the user later disables stays
 /// disabled instead of being re-enabled on every launch.
-pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 1;
+pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 2;
+
+/// Pre-v2 defaults for the agent limits, used by the one-time migration in
+/// load_config to tell "user never touched this" (exact old default) apart
+/// from a deliberate custom value.
+pub const LEGACY_DEFAULT_MAX_AGENT_LOOPS: u32 = 10;
+pub const LEGACY_DEFAULT_MAX_TOOL_CALLS: u32 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedPattern {
@@ -203,10 +215,11 @@ pub fn default_trusted_patterns() -> Vec<TrustedPattern> {
         ("execute_command", "dir"),
         ("execute_command", "ls"),
         ("execute_command", "tree"),
-        // --- File reading ---
-        ("execute_command", "Get-Content"),
-        ("execute_command", "type "),
-        ("execute_command", "cat "),
+        // NOTE: file-content reads (Get-Content/type/cat/Select-String/findstr)
+        // and network probes (ping/nslookup) are deliberately NOT trusted by
+        // default: unrestricted reads reach outside the workspace sandbox
+        // (e.g. ~\.ssh\id_rsa), and DNS lookups give an exfiltration channel.
+        // Users can still trust them explicitly per their own risk tolerance.
         // --- System information ---
         ("execute_command", "Get-Process"),
         ("execute_command", "systeminfo"),
@@ -221,13 +234,8 @@ pub fn default_trusted_patterns() -> Vec<TrustedPattern> {
         ("execute_command", "echo "),
         ("execute_command", "Write-Output"),
         ("execute_command", "Write-Host"),
-        // --- Search ---
-        ("execute_command", "Select-String"),
-        ("execute_command", "findstr"),
-        // --- Network info ---
+        // --- Network info (local only; probes like ping/nslookup excluded) ---
         ("execute_command", "ipconfig"),
-        ("execute_command", "ping "),
-        ("execute_command", "nslookup"),
         // --- Date ---
         ("execute_command", "Get-Date"),
         // --- Version checks ---
@@ -287,6 +295,7 @@ impl Default for AppConfig {
             top_p: 1.0,
             max_tokens: None,
             system_prompt: "You are a capable AI assistant with access to local tools (running commands, reading and writing files, searching the web). Help the user accomplish their task by using the available tools when they are needed, and answering directly when they are not. Be careful, honest, and direct. Prefer concrete actions over lengthy explanations. If you are unsure or lack enough information, say so instead of guessing, and do not invent facts, files, command results, or tool output. When a task could be destructive or hard to undo, confirm with the user before proceeding.".into(),
+            role_prompt: None,
             streaming: true,
             thinking_level: "medium".into(),
             context_limit: 50,
@@ -304,9 +313,9 @@ impl Default for AppConfig {
             ],
             approval_policy: "standard".into(),
             trusted_patterns: default_trusted_patterns(),
-            default_work_dir: dirs::home_dir()
-                .map(|h| h.join("gxAgent-workspace").to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string()),
+            default_work_dir: workspace::default_workspace_path()
+                .to_string_lossy()
+                .to_string(),
             persist_trust: false,
             theme: "light".into(),
             language: "zh".into(),
@@ -319,10 +328,28 @@ impl Default for AppConfig {
             font_family: "system".into(),
             show_advanced_reply_info: false,
             command_timeout: 300,
-            max_agent_loops: 10,
-            max_tool_calls_per_request: 30,
+            max_agent_loops: 30,
+            max_tool_calls_per_request: 120,
             preview_sandbox: true,
             tools_migration_version: CURRENT_TOOLS_MIGRATION_VERSION,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_prompt_is_accepted_from_requests_but_never_serialized() {
+        let mut request_value = serde_json::to_value(AppConfig::default()).unwrap();
+        assert!(request_value.get("role_prompt").is_none());
+        request_value["role_prompt"] = serde_json::json!("active role");
+
+        let request_config: AppConfig = serde_json::from_value(request_value).unwrap();
+        assert_eq!(request_config.role_prompt.as_deref(), Some("active role"));
+
+        let persisted_value = serde_json::to_value(request_config).unwrap();
+        assert!(persisted_value.get("role_prompt").is_none());
     }
 }

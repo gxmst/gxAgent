@@ -1,13 +1,26 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/png" href="/src/assets/logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gxAgent Studio</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      // Apply the last-known theme before first paint so dark themes don't
+      // flash a white frame while the async Rust config loads (which then
+      // re-applies the authoritative value).
+      (function () {
+        try {
+          var theme = localStorage.getItem("gx_theme") || "light";
+          var mode = localStorage.getItem("gx_theme_mode") || "light";
+          document.documentElement.setAttribute("data-theme", theme);
+          document.documentElement.setAttribute("data-mode", mode);
+          if (mode === "dark") {
+            document.documentElement.style.backgroundColor = "#1f1f1f";
+          }
+        } catch (e) { /* first run: defaults are fine */ }
+      })();
+    </script>
   </head>
 
   <body>

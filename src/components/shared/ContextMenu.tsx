@@ -21,6 +21,7 @@ interface ContextMenuProps {
 
 export function ContextMenu({ x, y, labels, onClose, onExport, onImport, onClearAll, onShowStats, onSettings }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number; visible: boolean }>({
     left: x,
     top: y,
@@ -28,9 +29,13 @@ export function ContextMenu({ x, y, labels, onClose, onExport, onImport, onClear
   });
 
   useEffect(() => {
+    previousFocus.current = document.activeElement as HTMLElement | null;
     const handleClick = () => onClose();
     document.addEventListener('click', handleClick);
-    return () => document.removeEventListener('click', handleClick);
+    return () => {
+      document.removeEventListener('click', handleClick);
+      previousFocus.current?.focus({ preventScroll: true });
+    };
   }, [onClose]);
 
   // Measure the rendered menu and flip/clamp it so it never gets clipped.
@@ -53,12 +58,37 @@ export function ContextMenu({ x, y, labels, onClose, onExport, onImport, onClear
     top = Math.max(margin, Math.min(top, vh - h - margin));
 
     setPos({ left, top, visible: true });
+    requestAnimationFrame(() => {
+      el.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
+    });
   }, [x, y]);
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const buttons = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') || []);
+    const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    if (event.key === 'Home') buttons[0]?.focus();
+    else if (event.key === 'End') buttons[buttons.length - 1]?.focus();
+    else {
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      const next = (Math.max(currentIndex, 0) + delta + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    }
+  };
 
   return (
     <div
       ref={ref}
       className="context-menu"
+      role="menu"
+      aria-label={labels.settings}
+      onKeyDown={handleKeyDown}
       style={{
         left: pos.left,
         top: pos.top,
@@ -67,21 +97,21 @@ export function ContextMenu({ x, y, labels, onClose, onExport, onImport, onClear
         overflowY: 'auto',
       }}
     >
-      <button onClick={onExport}>
+      <button role="menuitem" onClick={onExport}>
         <Download size={14} /> {labels.exportAll}
       </button>
-      <button onClick={onImport}>
+      <button role="menuitem" onClick={onImport}>
         <Upload size={14} /> {labels.importSessions}
       </button>
       <div className="context-menu-divider" />
-      <button onClick={onShowStats}>
+      <button role="menuitem" onClick={onShowStats}>
         <BarChart3 size={14} /> {labels.toolStats}
       </button>
-      <button onClick={onSettings}>
+      <button role="menuitem" onClick={onSettings}>
         <SettingsIcon size={14} /> {labels.settings}
       </button>
       <div className="context-menu-divider" />
-      <button onClick={onClearAll} className="danger">
+      <button role="menuitem" onClick={onClearAll} className="danger">
         <Trash size={14} /> {labels.clearAll}
       </button>
     </div>

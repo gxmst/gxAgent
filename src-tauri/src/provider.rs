@@ -133,7 +133,7 @@ pub fn build_body(
     streaming: bool,
 ) -> Value {
     match wire {
-        Wire::Ollama => build_ollama_body(model, messages, config, streaming),
+        Wire::Ollama => build_ollama_body(model, messages, tools, config, streaming),
         Wire::OpenAI => build_openai_body(model, messages, tools, config, streaming),
         Wire::Anthropic => build_anthropic_body(model, messages, tools, config, streaming),
         Wire::Gemini => build_gemini_body(messages, tools, config),
@@ -170,6 +170,7 @@ fn build_openai_body(
 fn build_ollama_body(
     model: &str,
     messages: &[Value],
+    tools: &[Value],
     config: &AppConfig,
     streaming: bool,
 ) -> Value {
@@ -184,6 +185,11 @@ fn build_ollama_body(
     });
     if let Some(max_tokens) = config.max_tokens {
         body["options"]["num_predict"] = json!(max_tokens);
+    }
+    // Ollama's /api/chat accepts OpenAI-shaped tool definitions as-is. The
+    // response side (parse_ollama_line) already handles message.tool_calls.
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
     }
     body
 }

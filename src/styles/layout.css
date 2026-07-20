@@ -34,26 +34,6 @@
   color: var(--text-secondary);
 }
 
-/* Responsive */
-@media (max-width: 768px) {
-  .sidebar {
-    position: fixed;
-    left: -260px;
-    top: 0;
-    bottom: 0;
-    z-index: 100;
-    transition: left 0.3s;
-  }
-
-  .sidebar.open {
-    left: 0;
-  }
-
-  .message-list {
-    padding: var(--space-4);
-  }
-
-  .input-bar {
-    padding: var(--space-3);
-  }
-}
+/* Responsive behavior for the active shell lives next to the shell selectors
+   in App.css. Keeping it there prevents legacy class names from silently
+   drifting out of sync with the rendered layout. */

