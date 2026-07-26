@@ -57,7 +57,6 @@ import { resolveRequestConfig } from "./utils/requestConfig";
 import { compareSidebarSessions, moveSessionInSidebar } from "./utils/sessionOrder";
 import { suggestTrustPatterns } from "./utils/trustPatterns";
 import { TaskProgress } from "./components/shared/TaskProgress";
-import type { McpServerView } from "./components/mcp/McpServerManager";
 import type { DirectoryNode } from "./components/workspace/WorkspaceTree";
 import type { GitStatusEntry } from "./components/workspace/WorkspaceChanges";
 import { MarkdownContent } from "./components/markdown/MarkdownContent";
@@ -90,7 +89,6 @@ import {
   ToolAction,
   ChatSession,
   SessionConfig,
-  UsageStats,
   PendingApproval,
   SearchStatus,
   Message,
@@ -116,7 +114,6 @@ import {
   createDefaultSession,
   createSession,
   normalizeSessions,
-  readLocalSessions,
   TOOL_NAMES,
   LANGUAGE_OPTIONS,
   FONT_OPTIONS,
@@ -127,13 +124,13 @@ import {
   modelCatalogForConfig,
   modelCatalogKey,
   modelContextLimitForConfig,
-  type ToastNotice,
   type AgentEventPayload,
   type ToolStatsDialog,
-  type SessionRuntime,
   type RunCheckpoint,
   type WorkspaceViewState,
 } from "./appDefaults";
+
+import { useAppStore } from "./store/appStore";
 
 
 function App() {
@@ -160,9 +157,8 @@ function App() {
   });
   const onboardingValuesRef = useRef(onboardingValues);
   const onboardingTestSequenceRef = useRef(0);
-  const [currentSessionId, setCurrentSessionId] = useState(
-    () => localStorage.getItem("gx_current_session") || "default"
-  );
+  const currentSessionId = useAppStore((s) => s.currentSessionId);
+  const setCurrentSessionId = useAppStore((s) => s.setCurrentSessionId);
 
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>(() => {
     try {
@@ -227,12 +223,17 @@ function App() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [customGlobalContextBudget, setCustomGlobalContextBudget] = useState(false);
   const [customSessionContextBudget, setCustomSessionContextBudget] = useState<Record<string, boolean>>({});
-  const [mcpStatusByName, setMcpStatusByName] = useState<Record<string, Pick<McpServerView, "state" | "toolCount" | "message">>>({});
+  const mcpStatusByName = useAppStore((s) => s.mcpStatusByName);
+  const setMcpStatusByName = useAppStore((s) => s.setMcpStatusByName);
 
-  const [activeRunSessionId, setActiveRunSessionId] = useState<string | null>(null);
-  const [preparingRequestSessionId, setPreparingRequestSessionId] = useState<string | null>(null);
-  const [runtimeBySession, setRuntimeBySession] = useState<Record<string, SessionRuntime | null>>({});
-  const [checkpointBySession, setCheckpointBySession] = useState<Record<string, RunCheckpoint | null>>({});
+  const activeRunSessionId = useAppStore((s) => s.activeRunSessionId);
+  const setActiveRunSessionId = useAppStore((s) => s.setActiveRunSessionId);
+  const preparingRequestSessionId = useAppStore((s) => s.preparingRequestSessionId);
+  const setPreparingRequestSessionId = useAppStore((s) => s.setPreparingRequestSessionId);
+  const runtimeBySession = useAppStore((s) => s.runtimeBySession);
+  const setRuntimeBySession = useAppStore((s) => s.setRuntimeBySession);
+  const checkpointBySession = useAppStore((s) => s.checkpointBySession);
+  const setCheckpointBySession = useAppStore((s) => s.setCheckpointBySession);
   const isStreaming = activeRunSessionId === currentSessionId;
   const hasActiveRequest = activeRunSessionId !== null;
   const hasPendingRequest = hasActiveRequest || preparingRequestSessionId !== null;
@@ -240,7 +241,8 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const [activeTab, setActiveTab] = useState<"activity" | "files" | "preview">("activity");
-  const [previewBySession, setPreviewBySession] = useState<Record<string, string>>({});
+  const previewBySession = useAppStore((s) => s.previewBySession);
+  const setPreviewBySession = useAppStore((s) => s.setPreviewBySession);
   const previewSrc = previewBySession[currentSessionId] || "";
   const setPreviewSrc = useCallback((next: string | ((previous: string) => string)) => {
     setPreviewBySession((previous) => {
@@ -251,7 +253,8 @@ function App() {
   }, [currentSessionId]);
   const [previewDevice, setPreviewDevice] = useState<"desktop" | "mobile">("desktop");
   const [newProfileName, setNewProfileName] = useState("");
-  const [modifiedFilesBySession, setModifiedFilesBySession] = useState<Record<string, Record<string, { old: string; new: string }>>>({});
+  const modifiedFilesBySession = useAppStore((s) => s.modifiedFilesBySession);
+  const setModifiedFilesBySession = useAppStore((s) => s.setModifiedFilesBySession);
   const modifiedFiles = modifiedFilesBySession[currentSessionId] || {};
   const [diffView, setDiffView] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -277,7 +280,8 @@ function App() {
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [workspaceBySession, setWorkspaceBySession] = useState<Record<string, WorkspaceViewState>>({});
-  const [terminalLogsBySession, setTerminalLogsBySession] = useState<Record<string, { text: string; type: "info" | "success" | "error" | "cmd" }[]>>({});
+  const terminalLogsBySession = useAppStore((s) => s.terminalLogsBySession);
+  const setTerminalLogsBySession = useAppStore((s) => s.setTerminalLogsBySession);
   const terminalLogs = terminalLogsBySession[currentSessionId] || [];
   const [previewConsoleLogsBySession, setPreviewConsoleLogsBySession] = useState<Record<string, { text: string; type: "log" | "error" | "warn" | "info" }[]>>({});
   const previewConsoleLogs = previewConsoleLogsBySession[currentSessionId] || [];
@@ -288,7 +292,8 @@ function App() {
       return { ...previous, [currentSessionId]: value };
     });
   }, [currentSessionId]);
-  const [toasts, setToasts] = useState<ToastNotice[]>([]);
+  const toasts = useAppStore((s) => s.toasts);
+  const setToasts = useAppStore((s) => s.setToasts);
   const [confirmation, setConfirmation] = useState<ConfirmationOptions | null>(null);
   const confirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
   const confirmationReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -317,18 +322,22 @@ function App() {
     deleteSession: deleteStoredSession,
   } = useSessionStorage();
 
-  const [sessions, setSessions] = useState<ChatSession[]>(readLocalSessions);
+  const sessions = useAppStore((s) => s.sessions);
+  const setSessions = useAppStore((s) => s.setSessions);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const [sessionStorageReady, setSessionStorageReady] = useState(false);
   const sessionMutationLocked = !sessionStorageReady || hasPendingRequest;
   const [sessionSaveStatus, setSessionSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [expandedActions, setExpandedActions] = useState<Record<string, boolean>>({});
-  const [pendingApprovalsBySession, setPendingApprovalsBySession] = useState<Record<string, PendingApproval | null>>({});
+  const pendingApprovalsBySession = useAppStore((s) => s.pendingApprovalsBySession);
+  const setPendingApprovalsBySession = useAppStore((s) => s.setPendingApprovalsBySession);
   const pendingApprovals = pendingApprovalsBySession[currentSessionId] || null;
-  const [approvalSubmittingBySession, setApprovalSubmittingBySession] = useState<Record<string, boolean>>({});
+  const approvalSubmittingBySession = useAppStore((s) => s.approvalSubmittingBySession);
+  const setApprovalSubmittingBySession = useAppStore((s) => s.setApprovalSubmittingBySession);
   const approvalSubmitting = Boolean(approvalSubmittingBySession[currentSessionId]);
-  const [usageStatsBySession, setUsageStatsBySession] = useState<Record<string, UsageStats | null>>({});
+  const usageStatsBySession = useAppStore((s) => s.usageStatsBySession);
+  const setUsageStatsBySession = useAppStore((s) => s.setUsageStatsBySession);
   const usageStats = usageStatsBySession[currentSessionId] || null;
   const [sessionSettingsOpen, setSessionSettingsOpen] = useState(false);
   const [toolStatsDialog, setToolStatsDialog] = useState<ToolStatsDialog | null>(null);
