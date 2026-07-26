@@ -38,6 +38,7 @@ import {
   type ToolStatsDialog,
 } from "../../appDefaults";
 import { getToolStats } from "../../utils/sessionHelpers";
+import type { SearchSnippet } from "../../utils/sessionSearch";
 import { PositionedContextMenu } from "../shared/PositionedContextMenu";
 import { ConnectionStatus } from "../shared/ConnectionStatus";
 
@@ -49,6 +50,9 @@ export interface SidebarProps {
   sessions: ChatSession[];
   visibleSessions: ChatSession[];
   archivedSessions: ChatSession[];
+  /** Per-session snippet around the first full-text hit while a search query
+   *  is active; null means the title matched (no snippet needed). */
+  searchSnippets: Record<string, SearchSnippet | null>;
   currentSessionId: string;
   tabbableSessionId: string | null;
   sidebarNav: SessionConfig["mode"];
@@ -80,8 +84,8 @@ export interface SidebarProps {
 
 export function Sidebar(props: SidebarProps) {
   const {
-    lang, config, sessions, visibleSessions, archivedSessions, currentSessionId,
-    tabbableSessionId, sidebarNav, sidebarWidth, sessionSearch,
+    lang, config, sessions, visibleSessions, archivedSessions, searchSnippets,
+    currentSessionId, tabbableSessionId, sidebarNav, sidebarWidth, sessionSearch,
     setSessionSearch, debouncedSearch, sessionStorageReady, historyListRef,
     runtimeBySession, pendingApprovalsBySession, contextMenu, setContextMenu,
     allPresets: ALL_PRESETS, addLog, getModelDisplayName, switchSidebarMode,
@@ -150,6 +154,8 @@ export function Sidebar(props: SidebarProps) {
         const activePreset = ALL_PRESETS.find(p => p.id === s.sessionConfig.activeRolePresetId);
         const runtime = runtimeBySession[s.id];
         const awaitingApproval = Boolean(pendingApprovalsBySession[s.id]);
+        const searchActive = Boolean(debouncedSearch.trim());
+        const snippet = searchActive ? searchSnippets[s.id] : null;
         const openSession = () => {
           setCurrentSessionId(s.id);
         };
@@ -199,7 +205,15 @@ export function Sidebar(props: SidebarProps) {
           <div style={{ minWidth: 0, flex: 1 }}>
             <span className="truncate" style={{ fontSize: "var(--font-small)", display: "block" }}>
               {s.title || t("session.new", lang)}
+              {searchActive && s.archived && (
+                <span className="history-archived-tag">{t("ui.archived-tag", lang)}</span>
+              )}
             </span>
+            {snippet && (
+              <span className="history-search-snippet">
+                {snippet.before}<mark>{snippet.hit}</mark>{snippet.after}
+              </span>
+            )}
             <span className="history-meta">
               {s.messages.filter(m => m.role !== "context_divider").length}{t("ui.msgs", lang)}
               {runtime && <> · {runtime.status === "stopping" ? (t("ui.stopping-2", lang)) : (t("ui.running", lang))}</>}

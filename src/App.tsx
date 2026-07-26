@@ -17,6 +17,7 @@ import { ContextMenu, useContextMenu } from "./components/shared/ContextMenu";
 import { useSessionStorage } from "./hooks/useSessionStorage";
 import { resolveRequestConfig } from "./utils/requestConfig";
 import { compareSidebarSessions, moveSessionInSidebar } from "./utils/sessionOrder";
+import { searchSessions, type SearchSnippet } from "./utils/sessionSearch";
 import { SettingsModal } from "./components/settings/SettingsModal";
 import { SessionSettingsPanel } from "./components/settings/SessionSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
@@ -350,22 +351,28 @@ function App() {
     lastSessionByModeRef.current[currentMode] = currentSession.id;
   }, [currentMode, currentSession.id]);
 
-  const visibleSessions = useMemo(() => {
-    const query = debouncedSearch.trim().toLowerCase();
-    return sessions
-      .filter((session) => (session.sessionConfig.mode || "chat") === sidebarNav && !session.archived)
-      .filter((session) => {
-        if (!query) return true;
-        if ((session.title || "").toLowerCase().includes(query)) return true;
-        return session.messages
-          .slice(-10)
-          .some((message) => message.content.toLowerCase().includes(query));
-      })
-      .sort(compareSidebarSessions);
+  // Sidebar list state. Without a query: the normal list plus the collapsed
+  // archived section. With a query: full-text matches across ALL messages of
+  // every session — archived matches surface directly in the results (tagged)
+  // and the separate archived section disappears for the duration.
+  const { visibleSessions, archivedSessions, searchSnippets } = useMemo(() => {
+    const query = debouncedSearch.trim();
+    const modeSessions = sessions
+      .filter((session) => (session.sessionConfig.mode || "chat") === sidebarNav);
+    if (!query) {
+      return {
+        visibleSessions: modeSessions.filter((session) => !session.archived).sort(compareSidebarSessions),
+        archivedSessions: modeSessions.filter((session) => session.archived).sort(compareSidebarSessions),
+        searchSnippets: {} as Record<string, SearchSnippet | null>,
+      };
+    }
+    const matches = searchSessions(modeSessions, query);
+    return {
+      visibleSessions: matches.map((match) => match.session).sort(compareSidebarSessions),
+      archivedSessions: [] as ChatSession[],
+      searchSnippets: Object.fromEntries(matches.map((match) => [match.session.id, match.snippet])),
+    };
   }, [debouncedSearch, sessions, sidebarNav]);
-  const archivedSessions = useMemo(() => sessions
-    .filter((session) => (session.sessionConfig.mode || "chat") === sidebarNav && session.archived)
-    .sort(compareSidebarSessions), [sessions, sidebarNav]);
   const tabbableSessionId = visibleSessions.some((session) => session.id === currentSessionId)
     ? currentSessionId
     : visibleSessions[0]?.id;
@@ -1134,6 +1141,7 @@ function App() {
         sessions={sessions}
         visibleSessions={visibleSessions}
         archivedSessions={archivedSessions}
+        searchSnippets={searchSnippets}
         currentSessionId={currentSessionId}
         tabbableSessionId={tabbableSessionId}
         sidebarNav={sidebarNav}

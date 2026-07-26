@@ -502,6 +502,41 @@ select.input-text {
   box-shadow: 0 0 0 1px var(--accent-subtle);
 }
 
+/* Full-text search result extras: one-line snippet with the hit highlighted,
+   and an inline "archived" tag on rows surfaced from the archive. */
+.history-search-snippet {
+  display: block;
+  font-size: var(--font-caption);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+  animation: archived-list-in var(--transition-fast);
+}
+
+.history-search-snippet mark {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-radius: var(--radius-xs);
+  padding: 0 1px;
+  font-weight: 600;
+}
+
+.history-archived-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  font-size: var(--font-caption);
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: 1px;
+}
+
 /* ========================================================
    Archived section — collapsed group at the bottom of the list
    ======================================================== */
