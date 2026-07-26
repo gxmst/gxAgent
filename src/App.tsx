@@ -32,11 +32,8 @@ import { ToastStack } from "./components/shared/ToastStack";
 import { ToolStatsModal } from "./components/shared/ToolStatsModal";
 import { useAttachments } from "./hooks/useAttachments";
 import { useWorkspaceActions } from "./hooks/useWorkspaceActions";
-import {
-  OnboardingWizard,
-  type ConnectionCheck,
-  type OnboardingValues,
-} from "./components/onboarding/OnboardingWizard";
+import { useOnboarding } from "./hooks/useOnboarding";
+import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 
 const SETTINGS_TAB_ORDER = ["model", "chat", "agent", "search", "data"] as const;
 type SettingsTab = (typeof SETTINGS_TAB_ORDER)[number];
@@ -99,21 +96,6 @@ function App() {
   const [configReady, setConfigReady] = useState(false);
   const [configSaveStatus, setConfigSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const lastSavedConfigRef = useRef("");
-  const onboardingInitializedRef = useRef(false);
-  const [onboardingOpen, setOnboardingOpen] = useState(false);
-  const [onboardingConnection, setOnboardingConnection] = useState<ConnectionCheck>({ state: "idle" });
-  const [onboardingValues, setOnboardingValues] = useState<OnboardingValues>({
-    mode: "chat",
-    profileId: null,
-    provider: DEFAULT_CONFIG.provider,
-    wireFormat: DEFAULT_CONFIG.wire_format,
-    baseUrl: DEFAULT_CONFIG.base_url,
-    apiKey: DEFAULT_CONFIG.api_key,
-    model: DEFAULT_CONFIG.model,
-    workDir: DEFAULT_CONFIG.default_work_dir,
-  });
-  const onboardingValuesRef = useRef(onboardingValues);
-  const onboardingTestSequenceRef = useRef(0);
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setCurrentSessionId = useAppStore((s) => s.setCurrentSessionId);
 
@@ -439,48 +421,8 @@ function App() {
   );
   const modelsForCurrentConfig = modelCatalogForConfig(models, modelCatalogSourceKey, resolvedCurrentConfig);
   const modelsForGlobalConfig = modelCatalogForConfig(models, modelCatalogSourceKey, config);
-  const modelsForOnboarding = modelCatalogForConfig(models, modelCatalogSourceKey, {
-    wire_format: onboardingValues.wireFormat,
-    base_url: onboardingValues.baseUrl,
-  });
   const effectiveWorkDir = resolvedCurrentConfig.default_work_dir;
   const currentWorkspace = workspaceBySession[currentSessionId] || createEmptyWorkspaceState();
-
-  useEffect(() => {
-    if (!configReady || onboardingInitializedRef.current) return;
-    onboardingInitializedRef.current = true;
-
-    const initialOnboardingValues: OnboardingValues = {
-      mode: currentMode,
-      profileId: currentSession.sessionConfig.profileId,
-      provider: resolvedCurrentConfig.provider,
-      wireFormat: resolvedCurrentConfig.wire_format,
-      baseUrl: resolvedCurrentConfig.base_url,
-      apiKey: resolvedCurrentConfig.api_key,
-      model: resolvedCurrentConfig.model,
-      workDir: effectiveWorkDir,
-    };
-    onboardingValuesRef.current = initialOnboardingValues;
-    setOnboardingValues(initialOnboardingValues);
-
-    let onboardingHandled = false;
-    try {
-      onboardingHandled = localStorage.getItem("gx_onboarding_v1") === "complete"
-        || sessionStorage.getItem("gx_onboarding_v1_dismissed") === "true";
-    } catch { /* ignore unavailable local storage */ }
-
-    const customConnection = config.base_url !== DEFAULT_CONFIG.base_url
-      || config.model !== DEFAULT_CONFIG.model;
-    const existingSetup = Object.keys(config.profiles).length > 0
-      || config.provider === "ollama"
-      || Boolean(config.api_key.trim())
-      || customConnection;
-
-    if (existingSetup && !onboardingHandled) {
-      try { localStorage.setItem("gx_onboarding_v1", "complete"); } catch { /* ignore */ }
-    }
-    setOnboardingOpen(!existingSetup && !onboardingHandled);
-  }, [configReady, config, currentMode, currentSession.sessionConfig.profileId, effectiveWorkDir, resolvedCurrentConfig]);
 
   const createRequestId = () => `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -993,105 +935,6 @@ function App() {
     setAttachmentLoadingBySession,
     reportAttachmentFit,
   });
-
-  const updateOnboardingValues = (patch: Partial<OnboardingValues>) => {
-    const next = { ...onboardingValuesRef.current, ...patch };
-    onboardingValuesRef.current = next;
-    setOnboardingValues(next);
-    onboardingTestSequenceRef.current += 1;
-    const connectionChanged = ["profileId", "provider", "wireFormat", "baseUrl", "apiKey", "model"]
-      .some((key) => Object.prototype.hasOwnProperty.call(patch, key));
-    if (connectionChanged || onboardingConnection.state === "testing") {
-      setOnboardingConnection({ state: "idle" });
-    }
-  };
-
-  const pickOnboardingWorkspace = async () => {
-    try {
-      const selected = await invoke<string | null>("pick_workspace_directory");
-      if (selected) updateOnboardingValues({ workDir: selected });
-    } catch (error) {
-      notify(`${t("ui.could-not-open-the-folder", lang)}: ${error}`, "error");
-    }
-  };
-
-  const testOnboardingConnection = async () => {
-    const sequence = onboardingTestSequenceRef.current + 1;
-    onboardingTestSequenceRef.current = sequence;
-    const snapshot = onboardingValuesRef.current;
-    setOnboardingConnection({ state: "testing" });
-    try {
-      const list = snapshot.wireFormat === "ollama"
-        ? await invoke<ModelInfo[]>("fetch_ollama_models", { baseUrl: snapshot.baseUrl })
-        : await invoke<ModelInfo[]>("fetch_models", {
-            wireFormat: snapshot.wireFormat,
-            baseUrl: snapshot.baseUrl,
-            apiKey: snapshot.apiKey,
-          });
-      if (onboardingTestSequenceRef.current !== sequence || onboardingValuesRef.current !== snapshot) return;
-      setModels(list);
-      setModelCatalogSourceKey(modelCatalogKey({
-        wire_format: snapshot.wireFormat,
-        base_url: snapshot.baseUrl,
-      }));
-      const selectedModelExists = list.length === 0
-        || list.some((model) => model.id === snapshot.model);
-      if (!selectedModelExists) {
-        setOnboardingConnection({
-          state: "error",
-          message: t("ui.model-not-in-list", lang, { model: snapshot.model }),
-        });
-        return;
-      }
-      setOnboardingConnection({
-        state: "success",
-        message: list.length > 0
-          ? t("ui.endpoint-found-models", lang, { count: String(list.length) })
-          : (t("ui.endpoint-ready-the-model-list", lang)),
-      });
-    } catch (error) {
-      if (onboardingTestSequenceRef.current !== sequence || onboardingValuesRef.current !== snapshot) return;
-      setOnboardingConnection({ state: "error", message: String(error) });
-    }
-  };
-
-  const completeOnboarding = async () => {
-    if (onboardingConnection.state !== "success") return;
-    try {
-      if (onboardingValues.mode === "code") {
-        await invoke("validate_workspace", { path: onboardingValues.workDir, create: false });
-      }
-
-      const nextConfig: AppConfig = {
-        ...config,
-        provider: onboardingValues.provider,
-        wire_format: onboardingValues.wireFormat,
-        base_url: onboardingValues.baseUrl.trim(),
-        api_key: onboardingValues.apiKey.trim(),
-        model: onboardingValues.model.trim(),
-        active_profile: onboardingValues.profileId,
-        default_work_dir: onboardingValues.mode === "code"
-          ? onboardingValues.workDir.trim()
-          : config.default_work_dir,
-      };
-      await invoke("save_config", { config: nextConfig });
-      lastSavedConfigRef.current = JSON.stringify(nextConfig);
-      setConfig(nextConfig);
-      patchSessionConfig({ mode: onboardingValues.mode, profileId: onboardingValues.profileId, model: null, workDir: onboardingValues.mode === "code" ? onboardingValues.workDir.trim() : null });
-      setSidebarNav(onboardingValues.mode);
-      try { localStorage.setItem("gx_onboarding_v1", "complete"); } catch { /* ignore */ }
-      try { sessionStorage.removeItem("gx_onboarding_v1_dismissed"); } catch { /* ignore */ }
-      setOnboardingOpen(false);
-      notify(t("ui.setup-saved", lang), "success");
-    } catch (error) {
-      notify(`${t("ui.could-not-save-setup", lang)}: ${error}`, "error");
-    }
-  };
-
-  const dismissOnboarding = () => {
-    try { sessionStorage.setItem("gx_onboarding_v1_dismissed", "true"); } catch { /* ignore */ }
-    setOnboardingOpen(false);
-  };
 
   const fetchModelList = async () => {
     if (!config.base_url) return;
@@ -2134,6 +1977,34 @@ function App() {
         : session
     )));
   };
+
+  const {
+    onboardingOpen,
+    onboardingConnection,
+    onboardingValues,
+    updateOnboardingValues,
+    pickOnboardingWorkspace,
+    testOnboardingConnection,
+    completeOnboarding,
+    dismissOnboarding,
+  } = useOnboarding({
+    lang,
+    config,
+    setConfig,
+    configReady,
+    lastSavedConfigRef,
+    currentSession,
+    resolvedCurrentConfig,
+    effectiveWorkDir,
+    setModels,
+    setModelCatalogSourceKey,
+    patchSessionConfig,
+    setSidebarNav,
+  });
+  const modelsForOnboarding = modelCatalogForConfig(models, modelCatalogSourceKey, {
+    wire_format: onboardingValues.wireFormat,
+    base_url: onboardingValues.baseUrl,
+  });
 
   const statusLabel = (status: ToolAction["status"]) => {
     switch (status) {
