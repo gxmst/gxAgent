@@ -2529,7 +2529,14 @@ pub async fn fetch_models(
                     // Strip the "models/" prefix so the id matches what the user types.
                     let name = m["name"].as_str()?;
                     let id = name.strip_prefix("models/").unwrap_or(name);
-                    Some(json!({ "id": id }))
+                    // Gemini reports the context window as inputTokenLimit;
+                    // surface it under the same key OpenAI-compatible lists use
+                    // so the frontend has one field to read.
+                    let mut model = json!({ "id": id });
+                    if let Some(limit) = m["inputTokenLimit"].as_u64() {
+                        model["context_length"] = json!(limit);
+                    }
+                    Some(model)
                 })
                 .collect();
             Ok(models)

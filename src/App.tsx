@@ -1865,7 +1865,7 @@ function App() {
       const result = await invoke<string>("compact_history", {
         currentConfig: resolvedCurrentConfig,
         requestId,
-      contextTokenLimit: Math.min(modelContextLimit(resolvedCurrentConfig.model), resolvedCurrentConfig.context_limit),
+      contextTokenLimit: Math.min(modelContextLimit(resolvedCurrentConfig.model, models), resolvedCurrentConfig.context_limit),
         messages: messages.flatMap((message) => {
           const serialized = serializeMessageForApi(message);
           return serialized ? [{ role: serialized.role, content: serialized.content }] : [];
@@ -2661,8 +2661,8 @@ function App() {
     const instructionTokens = estimateTextTokens(requestConfig.system_prompt)
       + (requestConfig.role_prompt ? estimateTextTokens(requestConfig.role_prompt) + 24 : 0);
     const requestContextLimit = Math.min(
-      modelContextLimit(requestConfig.model),
-      Math.max(1_000, requestConfig.context_limit || modelContextLimit(requestConfig.model)),
+      modelContextLimit(requestConfig.model, models),
+      Math.max(1_000, requestConfig.context_limit || modelContextLimit(requestConfig.model, models)),
     );
     requestConfig.context_limit = requestContextLimit;
 
@@ -2927,23 +2927,6 @@ function App() {
         notify("快捷命令：/clear /compact /export /help", "info");
         return;
       }
-    }
-
-    // Slash command: /compact — compress conversation history
-    if (sendableAttachments.length === 0 && prompt.trim().toLowerCase() === "/compact") {
-      setPrompt("");
-      await handleCompact();
-      return;
-    }
-
-    // Slash command: /clear — insert context divider
-    if (sendableAttachments.length === 0 && prompt.trim().toLowerCase() === "/clear") {
-      setPrompt("");
-      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-        ...s,
-        messages: [...s.messages, { id: newMessageId(), role: "context_divider" as const, content: "" }]
-      } : s));
-      return;
     }
 
     const { requestConfig } = resolveSessionRequest(currentSession.sessionConfig);
@@ -3514,7 +3497,7 @@ function App() {
     currentInputAttachmentTokens,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   [resolvedCurrentConfig.system_prompt, resolvedCurrentConfig.role_prompt, currentSession.messages, currentInputAttachmentTokens]);
-  const currentModelLimit = modelContextLimit(activeModelId);
+  const currentModelLimit = modelContextLimit(activeModelId, models);
   const messageHasPendingApproval = (message: Message) => Boolean(
     pendingApprovals
     && message.actions?.some((action) => pendingApprovals.tool_calls.some((tc) => tc.id === action.id)),
@@ -3854,9 +3837,9 @@ function App() {
                       <span className="bubble-meta-sep">·</span>
                       <span>{getModelDisplayName(msg.model || activeRequestModelRef.current || currentSession.sessionConfig.model || config.model)}</span>
                       <span className="bubble-meta-sep">·</span>
-                      <span>输入 {formatTokenCount(msg.usage?.promptTokens || msg.contextTokens || 0)} / 输出 {formatTokenCount(msg.usage?.completionTokens || estimateTextTokens(msg.content))}</span>
+                      <span>{t("usage.prompt", lang)} {formatTokenCount(msg.usage?.promptTokens || msg.contextTokens || 0)} / {t("usage.completion", lang)} {formatTokenCount(msg.usage?.completionTokens || estimateTextTokens(msg.content))}</span>
                       <span className="bubble-meta-sep">·</span>
-                      <span>上下文 {formatTokenCount(currentContextTokensBase)} / {formatTokenCount(currentModelLimit)}</span>
+                      <span>{t("usage.context", lang)} {formatTokenCount(currentContextTokensBase)} / {formatTokenCount(currentModelLimit)}</span>
                       <span className="bubble-meta-sep">·</span>
                       <span>{formatDuration(msg.usage?.responseTimeMs)}</span>
                     </>

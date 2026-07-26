@@ -1016,3 +1016,231 @@ pub fn parse_full_response(
 pub fn is_jsonl(wire: Wire) -> bool {
     matches!(wire, Wire::Ollama)
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> AppConfig {
+        AppConfig {
+            temperature: 0.5,
+            top_p: 0.9,
+            max_tokens: Some(2048),
+            ..AppConfig::default()
+        }
+    }
+
+    fn msgs() -> Vec<Value> {
+        vec![
+            json!({ "role": "system", "content": "sys" }),
+            json!({ "role": "user", "content": "hi" }),
+            json!({ "role": "assistant", "content": "ok", "tool_calls": [
+                { "id": "call_1", "type": "function",
+                  "function": { "name": "read_file", "arguments": "{\"path\":\"a.txt\"}" } }
+            ]}),
+            json!({ "role": "tool", "tool_call_id": "call_1", "content": "file body" }),
+        ]
+    }
+
+    fn tools() -> Vec<Value> {
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "read",
+                "parameters": { "type": "object", "properties": { "path": { "type": "string" } } }
+            }
+        })]
+    }
+
+    #[test]
+    fn wire_from_str_resolves_aliases_and_defaults_to_openai() {
+        assert!(matches!(Wire::from_str("claude"), Wire::Anthropic));
+        assert!(matches!(Wire::from_str("Google"), Wire::Gemini));
+        assert!(matches!(Wire::from_str("OLLAMA"), Wire::Ollama));
+        assert!(matches!(Wire::from_str("anything-else"), Wire::OpenAI));
+    }
+
+    #[test]
+    fn wire_from_config_prefers_wire_format_over_provider() {
+        let mut config = cfg();
+        config.provider = "anthropic".into();
+        config.wire_format = "openai".into();
+        assert!(matches!(Wire::from_config(&config), Wire::OpenAI));
+        config.wire_format = String::new();
+        assert!(matches!(Wire::from_config(&config), Wire::Anthropic));
+    }
+
+    #[test]
+    fn build_url_avoids_duplicate_version_segments() {
+        assert_eq!(
+            build_url(Wire::Anthropic, "https://api.anthropic.com/v1", "m", true),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            build_url(Wire::Anthropic, "https://api.anthropic.com", "m", true),
+            "https://api.anthropic.com/v1/messages"
+        );
+        let gemini = build_url(
+            Wire::Gemini,
+            "https://generativelanguage.googleapis.com",
+            "models/gemini-2.0-flash",
+            true,
+        );
+        assert_eq!(
+            gemini,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse"
+        );
+        assert!(build_url(Wire::Gemini, "https://g/v1beta", "m", false).ends_with("/models/m:generateContent"));
+        assert_eq!(
+            build_url(Wire::Ollama, "http://localhost:11434/", "m", true),
+            "http://localhost:11434/api/chat"
+        );
+        assert_eq!(
+            build_url(Wire::OpenAI, "https://api.deepseek.com/v1", "m", true),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_body_carries_tools_usage_and_sampling() {
+        let body = build_body(Wire::OpenAI, "m", &msgs(), &tools(), &cfg(), true);
+        assert_eq!(body["stream"], json!(true));
+        assert_eq!(body["stream_options"]["include_usage"], json!(true));
+        assert_eq!(body["max_tokens"], json!(2048));
+        assert_eq!(body["tool_choice"], json!("auto"));
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ollama_body_passes_tools_through_and_maps_max_tokens() {
+        let body = build_body(Wire::Ollama, "m", &msgs(), &tools(), &cfg(), true);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["options"]["num_predict"], json!(2048));
+        assert_eq!(body["options"]["temperature"], json!(0.5));
+    }
+
+    #[test]
+    fn anthropic_body_moves_system_out_and_converts_tool_traffic() {
+        let body = build_body(Wire::Anthropic, "m", &msgs(), &tools(), &cfg(), false);
+        assert_eq!(body["system"], json!("sys"));
+        let conv = body["messages"].as_array().unwrap();
+        // system removed from messages; assistant tool_call became tool_use block;
+        // tool result became a user-role tool_result block
+        assert!(conv.iter().all(|m| m["role"] != "system"));
+        let assistant = &conv[1];
+        assert_eq!(assistant["content"][1]["type"], json!("tool_use"));
+        assert_eq!(assistant["content"][1]["id"], json!("call_1"));
+        let result_msg = &conv[2];
+        assert_eq!(result_msg["role"], json!("user"));
+        assert_eq!(result_msg["content"][0]["type"], json!("tool_result"));
+        assert_eq!(result_msg["content"][0]["tool_use_id"], json!("call_1"));
+        // Anthropic tool shape uses input_schema
+        assert!(body["tools"][0]["input_schema"].is_object());
+        // max_tokens is mandatory
+        assert_eq!(body["max_tokens"], json!(2048));
+    }
+
+    #[test]
+    fn gemini_body_converts_roles_tools_and_schema() {
+        let body = build_body(Wire::Gemini, "m", &msgs(), &tools(), &cfg(), true);
+        assert!(body["systemInstruction"]["parts"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("sys"));
+        let contents = body["contents"].as_array().unwrap();
+        // assistant -> model role
+        assert!(contents.iter().any(|c| c["role"] == "model"));
+        let decl = &body["tools"][0]["functionDeclarations"][0];
+        assert_eq!(decl["name"], json!("read_file"));
+    }
+
+    #[test]
+    fn parse_openai_sse_extracts_content_reasoning_tools_and_usage() {
+        let mut state = StreamState::default();
+        let line = r#"data: {"choices":[{"delta":{"content":"hey","reasoning_content":"think","tool_calls":[{"index":0,"id":"c1","function":{"name":"grep","arguments":"{\"pat"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":3}}"#;
+        let deltas = parse_stream_line(Wire::OpenAI, line, &mut state);
+        assert_eq!(deltas.len(), 1);
+        let d = &deltas[0];
+        assert_eq!(d.content.as_deref(), Some("hey"));
+        assert_eq!(d.reasoning.as_deref(), Some("think"));
+        assert_eq!(d.tool_calls[0].name.as_deref(), Some("grep"));
+        assert_eq!(d.prompt_tokens, Some(10));
+        assert!(!d.done);
+        let done = parse_stream_line(Wire::OpenAI, "data: [DONE]", &mut state);
+        assert!(done[0].done);
+    }
+
+    #[test]
+    fn parse_anthropic_sse_assigns_stable_tool_indices() {
+        let mut state = StreamState::default();
+        // text block at index 0, tool_use blocks at indexes 1 and 2
+        parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#, &mut state);
+        parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"a1","name":"grep"}}"#, &mut state);
+        let frag = parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}"#, &mut state);
+        assert_eq!(frag[0].tool_calls[0].index, 0);
+        assert_eq!(frag[0].tool_calls[0].arguments.as_deref(), Some("{\"x\":1}"));
+        parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"a2","name":"glob"}}"#, &mut state);
+        let frag2 = parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#, &mut state);
+        // second tool block gets the next tool index, not a restart at 0
+        assert_eq!(frag2[0].tool_calls[0].index, 1);
+    }
+
+    #[test]
+    fn parse_ollama_line_reads_message_and_done() {
+        let mut state = StreamState::default();
+        let line = r#"{"message":{"content":"hi","tool_calls":[{"function":{"name":"grep","arguments":{"p":"x"}}}]},"done":true,"prompt_eval_count":7,"eval_count":2}"#;
+        let deltas = parse_stream_line(Wire::Ollama, line, &mut state);
+        let d = &deltas[0];
+        assert_eq!(d.content.as_deref(), Some("hi"));
+        assert_eq!(d.tool_calls[0].name.as_deref(), Some("grep"));
+        assert!(d.done);
+        assert_eq!(d.prompt_tokens, Some(7));
+    }
+
+    #[test]
+    fn parse_gemini_sse_counts_tool_calls_across_chunks() {
+        let mut state = StreamState::default();
+        let one = parse_stream_line(Wire::Gemini, r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"grep","args":{"p":1}}}]}}]}"#, &mut state);
+        let two = parse_stream_line(Wire::Gemini, r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"glob","args":{}}}]}}]}"#, &mut state);
+        assert_eq!(one[0].tool_calls[0].index, 0);
+        assert_eq!(two[0].tool_calls[0].index, 1, "tool indices must not restart per chunk");
+    }
+
+    #[test]
+    fn parse_full_response_openai_and_anthropic() {
+        let openai = json!({ "choices": [{ "message": {
+            "content": "done", "reasoning_content": "r",
+            "tool_calls": [{ "id": "c9", "function": { "name": "grep", "arguments": { "p": "x" } } }]
+        }}], "usage": { "prompt_tokens": 5, "completion_tokens": 6 }});
+        let (content, reasoning, calls, pt, ct) = parse_full_response(Wire::OpenAI, &openai);
+        assert_eq!(content, "done");
+        assert_eq!(reasoning, "r");
+        assert_eq!(calls[0].id, "c9");
+        // non-string arguments objects are serialized, not dropped
+        assert!(calls[0].arguments.contains("\"p\""));
+        assert_eq!((pt, ct), (5, 6));
+
+        let anthropic = json!({ "content": [
+            { "type": "text", "text": "hello" },
+            { "type": "thinking", "thinking": "hmm" },
+            { "type": "tool_use", "id": "t1", "name": "grep", "input": { "p": 1 } }
+        ], "usage": { "input_tokens": 3, "output_tokens": 4 }});
+        let (content, reasoning, calls, pt, ct) = parse_full_response(Wire::Anthropic, &anthropic);
+        assert_eq!(content, "hello");
+        assert_eq!(reasoning, "hmm");
+        assert_eq!(calls[0].name, "grep");
+        assert_eq!((pt, ct), (3, 4));
+    }
+
+    #[test]
+    fn gemini_schema_sanitizer_strips_unsupported_keys() {
+        let dirty = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "x": { "type": "string", "default": "a" } }
+        });
+        let clean = sanitize_gemini_schema(&dirty);
+        assert!(clean.get("additionalProperties").is_none());
+        assert!(clean["properties"]["x"].get("default").is_none());
+    }
+}

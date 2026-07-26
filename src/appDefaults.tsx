@@ -16,6 +16,7 @@ import {
 import { t } from "./i18n";
 import {
   AppConfig,
+  ModelInfo,
   Attachment,
   ChatSession,
   ContextSummary,
@@ -601,7 +602,12 @@ export const CHAT_VIRTUOSO_COMPONENTS = { Footer: ChatListFooter };
 
 export const CONTEXT_BUDGET_OPTIONS = [128_000, 256_000, 500_000, 1_000_000] as const;
 export const MAX_CONTEXT_BUDGET = 1_000_000;
-export const modelContextLimit = (modelId: string) => {
+/** Best-effort model context window. The provider's own model list is the
+ *  authority when it reports one (context_length); the name-based table is
+ *  only the fallback for lists that don't. */
+export const modelContextLimit = (modelId: string, models?: ModelInfo[]) => {
+  const reported = models?.find((m) => m.id === modelId)?.context_length;
+  if (typeof reported === "number" && reported >= 1_000) return reported;
   const id = modelId.toLowerCase();
   if (id.includes("gpt-4o") || id.includes("gpt-4.1") || id.includes("gpt-5")) return 128000;
   if (id.includes("claude")) return 200000;

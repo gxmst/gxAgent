@@ -63,6 +63,9 @@ export interface ModelInfo {
   id: string;
   object?: string;
   owned_by?: string;
+  /** Context window in tokens, when the provider's model list reports it
+   *  (OpenRouter-style `context_length`, Gemini `inputTokenLimit`). */
+  context_length?: number;
 }
 
 export interface ToolAction {
