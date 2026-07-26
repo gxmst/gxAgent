@@ -499,6 +499,7 @@
   color: var(--text-secondary);
   text-align: left;
   cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
 }
 
 .onboarding-mode:hover {
@@ -515,6 +516,16 @@
 .onboarding-mode strong {
   color: var(--text-primary);
   font-size: var(--font-ui);
+}
+
+.onboarding-mode-text {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.onboarding-mode > svg {
+  flex-shrink: 0;
 }
 
 .onboarding-mode span {

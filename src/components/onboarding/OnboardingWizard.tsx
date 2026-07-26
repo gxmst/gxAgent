@@ -181,14 +181,20 @@ export function OnboardingWizard({
                   onClick={() => onChange({ mode: "chat" })}
                 >
                   <MessageSquare size={20} />
-                  <strong>{zh ? "对话" : "Chat"}</strong>
+                  <div className="onboarding-mode-text">
+                    <strong>{zh ? "对话" : "Chat"}</strong>
+                    <span>{zh ? "问答、写作与研究，随时调用工具" : "Q&A, writing and research, with tools on demand"}</span>
+                  </div>
                 </button>
                 <button
                   className={`onboarding-mode ${values.mode === "code" ? "active" : ""}`}
                   onClick={() => onChange({ mode: "code" })}
                 >
                   <Terminal size={20} />
-                  <strong>{zh ? "编程任务" : "Coding"}</strong>
+                  <div className="onboarding-mode-text">
+                    <strong>{zh ? "编程任务" : "Coding"}</strong>
+                    <span>{zh ? "在工作区里读写文件、跑命令" : "Read, edit and run commands in a workspace"}</span>
+                  </div>
                 </button>
               </div>
             </div>

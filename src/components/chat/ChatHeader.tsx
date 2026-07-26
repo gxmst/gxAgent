@@ -90,7 +90,7 @@ export function ChatHeader({
             className="panel-title"
             style={{ fontSize: "var(--font-ui)", cursor: "pointer" }}
             onDoubleClick={() => setEditingSessionTitle(true)}
-            title="双击编辑标题"
+            title={t("ui.rename-title-hint", lang)}
           >
             {currentSession.title || t("session.new", lang)}
           </span>
@@ -98,7 +98,9 @@ export function ChatHeader({
         <div className="panel-subtitle">
           {effectiveWorkDir || "."}
           {sessionSaveStatus === "saving" && ` · ${t("ui.saving", lang)}`}
-          {sessionSaveStatus === "error" && ` · ${t("ui.save-failed", lang)}`}
+          {sessionSaveStatus === "error" && (
+            <span className="panel-subtitle-error"> · {t("ui.save-failed", lang)}</span>
+          )}
         </div>
       </div>
       <div className="panel-header-controls">
@@ -112,7 +114,7 @@ export function ChatHeader({
           <button
             className="panel-toggle-btn"
             onClick={toggleTheme}
-            title="Toggle theme"
+            title={t("ui.toggle-theme", lang)}
             aria-label={t("ui.toggle-theme", lang)}
           >
             {config.theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
@@ -130,7 +132,7 @@ export function ChatHeader({
           <button
             className="panel-toggle-btn"
             onClick={() => setRightPanelOpen(!rightPanelOpen)}
-            title={rightPanelOpen ? "Close panel" : "Open panel"}
+            title={rightPanelOpen ? t("ui.close-workspace-panel", lang) : t("ui.open-right-panel", lang)}
             aria-expanded={rightPanelOpen}
           >
             {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}

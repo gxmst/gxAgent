@@ -218,21 +218,24 @@ export function SettingsModal(props: SettingsModalProps) {
             </div>
           </div>
 
-          {/* Provider Preset */}
-          <div className="form-group">
-            <label className="form-label">{t("settings.provider", lang)}</label>
-            <div className="preset-buttons">
-              {presets.map((p) => (
-                <button
-                  key={p.name}
-                  className={`preset-btn ${config.base_url === p.base_url ? "active" : ""}`}
-                  onClick={() => applyPreset(p)}
-                >
-                  {p.name}
-                </button>
-              ))}
+          {/* Provider Preset — hidden entirely when the preset catalog has
+              not loaded (e.g. backend unavailable) instead of an empty card. */}
+          {presets.length > 0 && (
+            <div className="form-group">
+              <label className="form-label">{t("settings.provider", lang)}</label>
+              <div className="preset-buttons">
+                {presets.map((p) => (
+                  <button
+                    key={p.name}
+                    className={`preset-btn ${config.base_url === p.base_url ? "active" : ""}`}
+                    onClick={() => applyPreset(p)}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Request format (wire protocol) — decoupled from the provider
               preset so a Claude model behind an OpenAI-compatible proxy can

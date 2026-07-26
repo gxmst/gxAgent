@@ -504,6 +504,20 @@ select.input-text {
 
 /* Full-text search result extras: one-line snippet with the hit highlighted,
    and an inline "archived" tag on rows surfaced from the archive. */
+/* Title + optional archived tag on one line. Flex (not inline append) so the
+   long-title ellipsis never pushes the tag outside the row. */
+.history-title-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: var(--font-small);
+}
+
+.history-title-row .truncate {
+  min-width: 0;
+}
+
 .history-search-snippet {
   display: block;
   font-size: var(--font-caption);
@@ -524,8 +538,7 @@ select.input-text {
 }
 
 .history-archived-tag {
-  display: inline-block;
-  margin-left: 5px;
+  flex-shrink: 0;
   padding: 0 5px;
   border-radius: var(--radius-full);
   border: 1px solid var(--border-default);
@@ -534,7 +547,6 @@ select.input-text {
   font-size: var(--font-caption);
   font-weight: 600;
   line-height: 1.5;
-  vertical-align: 1px;
 }
 
 /* ========================================================

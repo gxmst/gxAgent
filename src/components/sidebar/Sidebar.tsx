@@ -203,8 +203,8 @@ export function Sidebar(props: SidebarProps) {
             </span>
           )}
           <div style={{ minWidth: 0, flex: 1 }}>
-            <span className="truncate" style={{ fontSize: "var(--font-small)", display: "block" }}>
-              {s.title || t("session.new", lang)}
+            <span className="history-title-row">
+              <span className="truncate">{s.title || t("session.new", lang)}</span>
               {searchActive && s.archived && (
                 <span className="history-archived-tag">{t("ui.archived-tag", lang)}</span>
               )}

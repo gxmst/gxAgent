@@ -963,6 +963,12 @@
   white-space: nowrap;
 }
 
+/* Persistence failures should read as errors, not blend into the path. */
+.panel-subtitle-error {
+  color: var(--error);
+  font-weight: 600;
+}
+
 .model-indicator {
   font-size: var(--font-caption);
   color: var(--text-tertiary);
@@ -1682,13 +1688,22 @@
 }
 
 .session-search-box {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
+  min-height: 30px;
+  box-sizing: border-box;
   padding: 4px 8px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.session-search-box:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 
 .session-search-input {
@@ -1713,10 +1728,19 @@
   padding: 0;
   display: flex;
   align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  /* Absorb the a11y 30px hit target so the box height doesn't jump when the
+     button appears alongside typed text. */
+  margin-block: -5px;
+  margin-right: -4px;
+  border-radius: var(--radius-xs);
+  transition: color var(--transition-fast), background var(--transition-fast);
 }
 
 .session-search-clear:hover {
   color: var(--text-primary);
+  background: var(--bg-card-hover);
 }
 
 .bubble-timestamp {
