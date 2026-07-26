@@ -1,8 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  BarChart3,
-} from "lucide-react";
 // Order matters: tokens first, a11y last (it clamps/overrides earlier rules).
 import "./styles/tokens.css";
 import "./styles/components.css";
@@ -33,6 +30,8 @@ import { fallbackSessionTitle } from "./utils/sessionTitle";
 import { ChatMessageList } from "./components/chat/ChatMessageList";
 import { Composer } from "./components/chat/Composer";
 import { ChatHeader } from "./components/chat/ChatHeader";
+import { ToastStack } from "./components/shared/ToastStack";
+import { ToolStatsModal } from "./components/shared/ToolStatsModal";
 import {
   OnboardingWizard,
   type ConnectionCheck,
@@ -250,8 +249,6 @@ function App() {
       return { ...previous, [currentSessionId]: value };
     });
   }, [currentSessionId]);
-  const toasts = useAppStore((s) => s.toasts);
-  const setToasts = useAppStore((s) => s.setToasts);
   const [confirmation, setConfirmation] = useState<ConfirmationOptions | null>(null);
   const confirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
   const confirmationReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -2567,11 +2564,6 @@ function App() {
     setSessions((previous) => moveSessionInSidebar(previous, sessionId, direction));
   };
 
-  const toolStatsEntries = toolStatsDialog
-    ? Object.entries(toolStatsDialog.stats).sort((a, b) => b[1] - a[1])
-    : [];
-  const toolStatsTotal = toolStatsEntries.reduce((sum, [, count]) => sum + count, 0);
-  const toolStatsMax = toolStatsEntries[0]?.[1] || 0;
   const currentSettingsTabLabel = {
     model: t("settings.tab.model", lang),
     chat: t("settings.tab.chat", lang),
@@ -2602,22 +2594,7 @@ function App() {
         handleContextMenu(e);
       }
     }}>
-      <div className="toast-stack" aria-live="polite">
-        {toasts.map((toast) => (
-          <div key={toast.id} className={`toast-item ${toast.type === "cmd" ? "info" : toast.type}`}>
-            <span className="toast-dot" />
-            <span className="toast-text">{toast.text}</span>
-            {toast.actionLabel && toast.onAction && (
-              <button type="button" className="toast-action" onClick={() => {
-                setToasts((previous) => previous.filter((item) => item.id !== toast.id));
-                toast.onAction?.();
-              }}>
-                {toast.actionLabel}
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
+      <ToastStack />
 
       {/* ====== Sidebar ====== */}
       <Sidebar
@@ -2896,45 +2873,11 @@ function App() {
         />
       )}
       {toolStatsDialog && (
-        <div className="modal-overlay" onMouseDown={(e) => {
-          if (e.target === e.currentTarget) {
-            setToolStatsDialog(null);
-          }
-        }}>
-          <div className="modal-content stats-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 className="stats-modal-title">
-                <BarChart3 size={15} /> {t("stats.title", lang)}
-              </h3>
-              <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={() => setToolStatsDialog(null)}>
-                {t("settings.close", lang)}
-              </button>
-            </div>
-            <div className="modal-body stats-modal-body">
-              <div className="stats-summary">
-                <span>{toolStatsDialog.title}</span>
-                <strong>{t("stats.total", lang, { count: String(toolStatsTotal) })}</strong>
-              </div>
-              {toolStatsEntries.length > 0 ? (
-                <div className="stats-list">
-                  {toolStatsEntries.map(([name, count]) => (
-                    <div className="stats-row" key={name}>
-                      <div className="stats-row-header">
-                        <span className="stats-tool-name">{name}</span>
-                        <span className="stats-tool-count">{t("stats.count", lang, { count: String(count) })}</span>
-                      </div>
-                      <div className="stats-meter">
-                        <span style={{ width: `${Math.max(4, Math.round((count / toolStatsMax) * 100))}%` }} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="stats-empty">{t("stats.empty", lang)}</div>
-              )}
-            </div>
-          </div>
-        </div>
+        <ToolStatsModal
+          lang={lang}
+          toolStatsDialog={toolStatsDialog}
+          setToolStatsDialog={setToolStatsDialog}
+        />
       )}
       <OnboardingWizard
         open={onboardingOpen}
