@@ -12,6 +12,12 @@ import "@fontsource/jetbrains-mono/500.css";
 import "@fontsource/jetbrains-mono/700.css";
 import App from "./App";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
+import { initAgentEventListeners } from "./services/agentEvents";
+
+// Agent event listeners live for the app lifetime, outside React: streaming
+// events mutate the zustand store directly instead of re-registering through
+// component effects. (Guarded internally, so HMR re-imports are no-ops.)
+void initAgentEventListeners();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

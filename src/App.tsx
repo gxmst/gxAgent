@@ -1,6 +1,5 @@
 import { Fragment, useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, type ClipboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
   Send,
@@ -66,7 +65,7 @@ import { Sidebar } from "./components/sidebar/Sidebar";
 import { WorkspacePanel } from "./components/workspace/WorkspacePanel";
 import { ConfirmDialog, type ConfirmationOptions } from "./components/shared/ConfirmDialog";
 import { t } from "./i18n";
-import { fallbackSessionTitle, normalizeGeneratedTitle } from "./utils/sessionTitle";
+import { fallbackSessionTitle } from "./utils/sessionTitle";
 import {
   OnboardingWizard,
   type ConnectionCheck,
@@ -89,8 +88,6 @@ import {
   ToolAction,
   ChatSession,
   SessionConfig,
-  PendingApproval,
-  SearchStatus,
   Message,
   Attachment,
   ContextSummary
@@ -100,7 +97,7 @@ import {
   newMessageId,
   createEmptyWorkspaceState,
   resolveWorkspacePath,
-  comparableWorkspacePath,
+  estimateTextTokens,
   isSendableAttachment,
   MAX_ATTACHMENT_TEXT_PER_FILE,
   MAX_IMAGE_ATTACHMENT_BYTES,
@@ -124,13 +121,19 @@ import {
   modelCatalogForConfig,
   modelCatalogKey,
   modelContextLimitForConfig,
-  type AgentEventPayload,
   type ToolStatsDialog,
   type RunCheckpoint,
-  type WorkspaceViewState,
 } from "./appDefaults";
 
 import { useAppStore } from "./store/appStore";
+import { runtime, uiCallbacks } from "./services/agentRuntime";
+import {
+  addLog,
+  notify,
+  finishStreamingLocally,
+  refreshWorkspace,
+  discardStreamBuffer,
+} from "./services/agentEvents";
 
 
 function App() {
@@ -208,15 +211,6 @@ function App() {
     return () => clearTimeout(timer);
   }, [draftsBySession]);
 
-  // Listen for tray menu events
-  useEffect(() => {
-    const unlisten = listen<void>('open-settings', () => {
-      setSettingsOpen(true);
-    });
-    return () => {
-      unlisten.then(fn => fn());
-    };
-  }, []);
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelCatalogSourceKey, setModelCatalogSourceKey] = useState<string | null>(null);
@@ -238,9 +232,11 @@ function App() {
   const hasActiveRequest = activeRunSessionId !== null;
   const hasPendingRequest = hasActiveRequest || preparingRequestSessionId !== null;
   const currentRuntime = runtimeBySession[currentSessionId] || null;
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
-  const [activeTab, setActiveTab] = useState<"activity" | "files" | "preview">("activity");
+  const activeTab = useAppStore((s) => s.activeTab);
+  const setActiveTab = useAppStore((s) => s.setActiveTab);
   const previewBySession = useAppStore((s) => s.previewBySession);
   const setPreviewBySession = useAppStore((s) => s.setPreviewBySession);
   const previewSrc = previewBySession[currentSessionId] || "";
@@ -277,13 +273,17 @@ function App() {
   const [editingCustomPreset, setEditingCustomPreset] = useState<RolePreset | null>(null);
   const [sessionSearch, setSessionSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [fileContent, setFileContent] = useState<string | null>(null);
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [workspaceBySession, setWorkspaceBySession] = useState<Record<string, WorkspaceViewState>>({});
+  const fileContent = useAppStore((s) => s.fileContent);
+  const setFileContent = useAppStore((s) => s.setFileContent);
+  const selectedFile = useAppStore((s) => s.selectedFile);
+  const setSelectedFile = useAppStore((s) => s.setSelectedFile);
+  const workspaceBySession = useAppStore((s) => s.workspaceBySession);
+  const setWorkspaceBySession = useAppStore((s) => s.setWorkspaceBySession);
   const terminalLogsBySession = useAppStore((s) => s.terminalLogsBySession);
   const setTerminalLogsBySession = useAppStore((s) => s.setTerminalLogsBySession);
   const terminalLogs = terminalLogsBySession[currentSessionId] || [];
-  const [previewConsoleLogsBySession, setPreviewConsoleLogsBySession] = useState<Record<string, { text: string; type: "log" | "error" | "warn" | "info" }[]>>({});
+  const previewConsoleLogsBySession = useAppStore((s) => s.previewConsoleLogsBySession);
+  const setPreviewConsoleLogsBySession = useAppStore((s) => s.setPreviewConsoleLogsBySession);
   const previewConsoleLogs = previewConsoleLogsBySession[currentSessionId] || [];
   const setPreviewConsoleLogs = useCallback((next: { text: string; type: "log" | "error" | "warn" | "info" }[] | ((previous: { text: string; type: "log" | "error" | "warn" | "info" }[]) => { text: string; type: "log" | "error" | "warn" | "info" }[])) => {
     setPreviewConsoleLogsBySession((previous) => {
@@ -324,8 +324,6 @@ function App() {
 
   const sessions = useAppStore((s) => s.sessions);
   const setSessions = useAppStore((s) => s.setSessions);
-  const sessionsRef = useRef(sessions);
-  sessionsRef.current = sessions;
   const [sessionStorageReady, setSessionStorageReady] = useState(false);
   const sessionMutationLocked = !sessionStorageReady || hasPendingRequest;
   const [sessionSaveStatus, setSessionSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -373,24 +371,9 @@ function App() {
   const sessionSettingsToggleRef = useRef<HTMLButtonElement>(null);
   const isAtBottomRef = useRef(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
-  const currentSessionIdRef = useRef(currentSessionId);
   const sidebarNavRef = useRef(sidebarNav);
   const lastSessionByModeRef = useRef<Partial<Record<SessionConfig["mode"], string>>>({});
-  const isStreamingRef = useRef(false);
   const requestStartingRef = useRef(false);
-  const activeRequestIdRef = useRef("");
-  const activeRequestSessionIdRef = useRef("");
-  const activeRequestModelRef = useRef("");
-  const activeRequestContextTokensRef = useRef(0);
-  const activeRequestWorkDirRef = useRef("");
-  const requestSessionByIdRef = useRef<Record<string, string>>({});
-  const mcpRuntimeNamesByRequestRef = useRef<Record<string, string[]>>({});
-  const streamedToolOutputKeysRef = useRef<Set<string>>(new Set());
-  const workspaceRequestSequenceRef = useRef<Record<string, number>>({});
-  const fileRequestSequenceRef = useRef<Record<string, number>>({});
-  const effectiveWorkDirRef = useRef("");
-  const langRef = useRef("zh");
-  const selectedFileRef = useRef<string | null>(null);
   const switchSidebarModeRef = useRef<(mode: SessionConfig["mode"]) => void>(() => {});
   // Same latest-value pattern as switchSidebarModeRef: the window keydown
   // effect's dependency array only tracks modal state, so calling
@@ -405,23 +388,6 @@ function App() {
   // next idle persist refreshes it even if nothing else changed.
   const mirrorPendingRef = useRef(false);
   const sessionPersistenceEpochRef = useRef(0);
-  const pendingTitleBySessionRef = useRef<Record<string, {
-    userMessage: string;
-    fallbackTitle: string;
-    config: AppConfig;
-  }>>({});
-  const titleRequestInFlightRef = useRef<Set<string>>(new Set());
-  // Stream token batching: accumulate chunks and flush once per animation frame
-  // so a burst of tokens triggers one setSessions/render instead of one per token.
-  const streamBufferRef = useRef<{
-    requestId: string;
-    sessionId: string;
-    text: string;
-    model: string;
-    contextTokens: number;
-  } | null>(null);
-  const streamFlushRafRef = useRef<number | null>(null);
-  const flushStreamBufferNowRef = useRef<() => void>(() => {});
   const closeSessionSettings = useCallback((restoreFocus = false) => {
     setSessionSettingsOpen(false);
     if (restoreFocus) {
@@ -438,17 +404,14 @@ function App() {
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
   }, [prompt]);
 
-  // Keep the ref in sync with the reactive state
-  useEffect(() => {
-    currentSessionIdRef.current = currentSessionId;
-  }, [currentSessionId]);
-
   useEffect(() => {
     sidebarNavRef.current = sidebarNav;
   }, [sidebarNav]);
 
+  // Keep the module-level runtime mirror in sync with the reactive state so
+  // the once-registered event handlers always see current values.
   useEffect(() => {
-    isStreamingRef.current = hasActiveRequest;
+    runtime.isStreaming = hasActiveRequest;
   }, [hasActiveRequest]);
 
   useLayoutEffect(() => {
@@ -597,88 +560,21 @@ function App() {
   const createRequestId = () => `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   useEffect(() => {
-    effectiveWorkDirRef.current = effectiveWorkDir;
+    runtime.effectiveWorkDir = effectiveWorkDir;
   }, [effectiveWorkDir]);
 
   useEffect(() => {
-    langRef.current = lang;
+    runtime.lang = lang;
   }, [lang]);
 
+  // The listeners' focus-composer callback needs the textarea ref, which only
+  // exists inside React. Register it once.
   useEffect(() => {
-    selectedFileRef.current = selectedFile;
-  }, [selectedFile]);
-
-  const isCurrentRequestPayload = (payload: unknown) => {
-    if (!payload || typeof payload !== "object") return true;
-    const requestId = (payload as { requestId?: string }).requestId;
-    return !requestId || requestId === activeRequestIdRef.current;
-  };
-
-  const payloadContent = (payload: AgentEventPayload) =>
-    typeof payload === "string" ? payload : String(payload.content || "");
-
-  const payloadRequestId = (payload?: unknown) => {
-    if (!payload || typeof payload !== "object") return "";
-    return String((payload as { requestId?: string }).requestId || "");
-  };
-
-  const agentEventSessionId = (payload?: unknown) => {
-    const requestId = payloadRequestId(payload);
-    return (requestId && requestSessionByIdRef.current[requestId])
-      || activeRequestSessionIdRef.current
-      || currentSessionIdRef.current;
-  };
-
-  const finishStreamingLocally = (expectedRequestId = activeRequestIdRef.current) => {
-    if (expectedRequestId && activeRequestIdRef.current && expectedRequestId !== activeRequestIdRef.current) return;
-    flushStreamBufferNowRef.current();
-    const sessionId = activeRequestSessionIdRef.current;
-    if (expectedRequestId) delete requestSessionByIdRef.current[expectedRequestId];
-    isStreamingRef.current = false;
-    activeRequestIdRef.current = "";
-    activeRequestSessionIdRef.current = "";
-    if (sessionId) {
-      setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: null }));
-      setApprovalSubmittingBySession((previous) => ({ ...previous, [sessionId]: false }));
-      setRuntimeBySession((previous) => ({ ...previous, [sessionId]: null }));
-    }
-    setActiveRunSessionId(null);
-    setTimeout(() => chatTextareaRef.current?.focus(), 100);
-  };
-
-  const upsertToolActions = (messages: Message[], incoming: ToolAction[]) => {
-    const next = [...messages];
-    if (next.length === 0 || next[next.length - 1].role !== "assistant") {
-      next.push({
-        id: newMessageId(),
-        role: "assistant",
-        content: "",
-        actions: incoming,
-        timestamp: Date.now(),
-        model: activeRequestModelRef.current,
-        contextTokens: activeRequestContextTokensRef.current,
-      });
-      return next;
-    }
-
-    const last = { ...next[next.length - 1] };
-    const actions = last.actions ? [...last.actions] : [];
-    for (const action of incoming) {
-      const idx = actions.findIndex((a) => a.id === action.id);
-      if (idx >= 0) {
-        const merged = { ...actions[idx], ...action };
-        if (!action.arguments && actions[idx].arguments) {
-          merged.arguments = actions[idx].arguments;
-        }
-        actions[idx] = merged;
-      } else {
-        actions.push(action);
-      }
-    }
-    last.actions = actions;
-    next[next.length - 1] = last;
-    return next;
-  };
+    uiCallbacks.focusComposer = () => chatTextareaRef.current?.focus();
+    return () => {
+      uiCallbacks.focusComposer = () => {};
+    };
+  }, []);
 
   useEffect(() => {
     setRightPanelOpen(currentMode === "code");
@@ -766,7 +662,7 @@ function App() {
     const handleIframeMessage = (event: MessageEvent) => {
       if (event.data && event.data.type === "iframe-console-log") {
         const { logType, text } = event.data;
-        const sessionId = currentSessionIdRef.current;
+        const sessionId = useAppStore.getState().currentSessionId;
         setPreviewConsoleLogsBySession((previous) => {
           const next = [...(previous[sessionId] || []), { text, type: logType }];
           return { ...previous, [sessionId]: next.length > 200 ? next.slice(-200) : next };
@@ -775,21 +671,6 @@ function App() {
     };
     window.addEventListener("message", handleIframeMessage);
     return () => window.removeEventListener("message", handleIframeMessage);
-  }, []);
-
-  useEffect(() => {
-    const unlisten = listen<string>("config-import-rekey", (event) => {
-      addLog(event.payload, "error");
-      setSettingsOpen(true);
-    });
-    return () => { unlisten.then(fn => fn()); };
-  }, []);
-
-  useEffect(() => {
-    const unlisten = listen<string>("config-import-warning", (event) => {
-      addLog(event.payload, "info", true);
-    });
-    return () => { unlisten.then(fn => fn()); };
   }, []);
 
   // Header quick-toggle: flip between light and dark. If the active theme is a
@@ -807,7 +688,7 @@ function App() {
   // ==========================================
 
   useEffect(() => {
-    const sessionId = currentSessionIdRef.current;
+    const sessionId = useAppStore.getState().currentSessionId;
     setTerminalLogsBySession((previous) => ({
       ...previous,
       [sessionId]: [
@@ -1150,7 +1031,7 @@ function App() {
       setModifiedFilesBySession((previous) => ({ ...previous, [currentSessionId]: {} }));
       setPreviewBySession((previous) => ({ ...previous, [currentSessionId]: "" }));
     }
-    fileRequestSequenceRef.current[currentSessionId] = (fileRequestSequenceRef.current[currentSessionId] || 0) + 1;
+    runtime.fileRequestSequence[currentSessionId] = (runtime.fileRequestSequence[currentSessionId] || 0) + 1;
     setFileContent(null);
     setSelectedFile(null);
     void refreshWorkspace(currentSessionId, effectiveWorkDir);
@@ -1159,78 +1040,6 @@ function App() {
   // ==========================================
   // Helpers
   // ==========================================
-
-  const MAX_LOG_LINES = 500;
-  const notify = (
-    text: string,
-    type: "info" | "success" | "error" | "cmd" = "info",
-    options?: { actionLabel?: string; onAction?: () => void; duration?: number },
-  ) => {
-    const id = Date.now() + Math.random();
-    setToasts((prev) => [...prev.slice(-3), {
-      id,
-      text,
-      type,
-      actionLabel: options?.actionLabel,
-      onAction: options?.onAction,
-    }]);
-    window.setTimeout(() => {
-      setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, options?.duration ?? 3200);
-  };
-
-  const requestGeneratedSessionTitle = async (sessionId: string) => {
-    const pending = pendingTitleBySessionRef.current[sessionId];
-    if (!pending || titleRequestInFlightRef.current.has(sessionId)) return;
-    const session = sessionsRef.current.find((item) => item.id === sessionId);
-    const assistantMessage = [...(session?.messages || [])]
-      .reverse()
-      .find((message) => message.role === "assistant" && message.content.trim())?.content || "";
-    if (!assistantMessage) return;
-
-    titleRequestInFlightRef.current.add(sessionId);
-    delete pendingTitleBySessionRef.current[sessionId];
-    try {
-      const generated = await invoke<string>("generate_session_title", {
-        currentConfig: pending.config,
-        userMessage: pending.userMessage,
-        assistantMessage,
-      });
-      const title = normalizeGeneratedTitle(generated);
-      if (!title) return;
-      setSessions((previous) => previous.map((item) => (
-        item.id === sessionId && item.title === pending.fallbackTitle
-          ? { ...item, title, updatedAt: Date.now() }
-          : item
-      )));
-    } catch (error) {
-      console.debug("Session title generation failed; keeping local fallback.", error);
-    } finally {
-      titleRequestInFlightRef.current.delete(sessionId);
-    }
-  };
-
-  const addLog = (
-    text: string,
-    type: "info" | "success" | "error" | "cmd" = "info",
-    showToast = false,
-    sessionId = currentSessionIdRef.current,
-  ) => {
-    setTerminalLogsBySession((previous) => {
-      const next = [...(previous[sessionId] || []), { text, type }];
-      return {
-        ...previous,
-        [sessionId]: next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next,
-      };
-    });
-    if (showToast) notify(text, type);
-  };
-
-  const estimateTextTokens = (text: string) => {
-    const value = text || "";
-    const nonAscii = (value.match(/[^\x00-\x7f]/g) || []).length;
-    return Math.ceil((value.length - nonAscii) / 4 + nonAscii);
-  };
 
   const estimateMessagesTokens = (messages: Message[]) =>
     messages
@@ -1471,71 +1280,18 @@ function App() {
     await addFilesAsAttachments(fileList);
   };
 
-  const refreshWorkspace = async (sessionId = currentSessionIdRef.current, workDir = effectiveWorkDir) => {
-    const sequence = (workspaceRequestSequenceRef.current[sessionId] || 0) + 1;
-    workspaceRequestSequenceRef.current[sessionId] = sequence;
-    if (!workDir.trim()) {
-      setWorkspaceBySession((previous) => ({
-        ...previous,
-        [sessionId]: {
-          workDir,
-          repositoryRoot: "",
-          root: null,
-          branch: "",
-          entries: [],
-          selectedPath: null,
-          diff: "",
-          loading: false,
-          treeError: t("ui.choose-a-working-directory-first", lang),
-          changesError: "",
-        },
-      }));
-      return;
-    }
-    setWorkspaceBySession((previous) => ({
-      ...previous,
-      [sessionId]: {
-        ...(previous[sessionId] || createEmptyWorkspaceState()),
-        workDir,
-        loading: true,
-        selectedPath: null,
-        diff: "",
-        treeError: "",
-        changesError: "",
-      },
-    }));
-    const [treeResult, statusResult] = await Promise.allSettled([
-      invoke<DirectoryNode>("list_directory_tree", { workDir, maxDepth: 5, includeHidden: false }),
-      invoke<{ repositoryRoot: string; branch: string; entries: GitStatusEntry[] }>("get_git_status", { workDir }),
-    ]);
-    if (workspaceRequestSequenceRef.current[sessionId] !== sequence) return;
-    setWorkspaceBySession((previous) => ({
-      ...previous,
-      [sessionId]: {
-        ...(previous[sessionId] || createEmptyWorkspaceState()),
-        root: treeResult.status === "fulfilled" ? treeResult.value : null,
-        repositoryRoot: statusResult.status === "fulfilled" ? statusResult.value.repositoryRoot : "",
-        branch: statusResult.status === "fulfilled" ? statusResult.value.branch : "",
-        entries: statusResult.status === "fulfilled" ? statusResult.value.entries : [],
-        loading: false,
-        treeError: treeResult.status === "rejected" ? String(treeResult.reason) : "",
-        changesError: statusResult.status === "rejected" ? String(statusResult.reason) : "",
-      },
-    }));
-  };
-
   const selectWorkspaceFile = async (node: DirectoryNode) => {
     const sessionId = currentSessionId;
     const workDir = effectiveWorkDir;
-    const sequence = (fileRequestSequenceRef.current[sessionId] || 0) + 1;
-    fileRequestSequenceRef.current[sessionId] = sequence;
+    const sequence = (runtime.fileRequestSequence[sessionId] || 0) + 1;
+    runtime.fileRequestSequence[sessionId] = sequence;
     setSelectedFile(node.path);
     setFileContent(null);
     try {
       const content = await invoke<string>("read_file_content", { path: node.path, workDir });
-      if (currentSessionIdRef.current !== sessionId
-        || effectiveWorkDirRef.current !== workDir
-        || fileRequestSequenceRef.current[sessionId] !== sequence) return;
+      if (useAppStore.getState().currentSessionId !== sessionId
+        || runtime.effectiveWorkDir !== workDir
+        || runtime.fileRequestSequence[sessionId] !== sequence) return;
       setSelectedFile(node.path);
       setFileContent(content);
     } catch (error) {
@@ -1636,8 +1392,8 @@ function App() {
       if (entry.originalPath && entry.originalPath !== entry.path) {
         await invoke("restore_git_path", { workDir, path: entry.originalPath, staged: false });
       }
-      if (currentSessionIdRef.current === sessionId && effectiveWorkDirRef.current === workDir) {
-        fileRequestSequenceRef.current[sessionId] = (fileRequestSequenceRef.current[sessionId] || 0) + 1;
+      if (useAppStore.getState().currentSessionId === sessionId && runtime.effectiveWorkDir === workDir) {
+        runtime.fileRequestSequence[sessionId] = (runtime.fileRequestSequence[sessionId] || 0) + 1;
         setFileContent(null);
         setSelectedFile(null);
         setDiffView(false);
@@ -1654,7 +1410,7 @@ function App() {
       if (/\.(html?|svg)$/i.test(entry.path)) {
         setPreviewBySession((previous) => ({ ...previous, [sessionId]: "" }));
       }
-      if (currentSessionIdRef.current === sessionId && effectiveWorkDirRef.current === workDir) {
+      if (useAppStore.getState().currentSessionId === sessionId && runtime.effectiveWorkDir === workDir) {
         await refreshWorkspace(sessionId, workDir);
       }
     } catch (error) {
@@ -1679,15 +1435,15 @@ function App() {
     })) return;
     try {
       await invoke("restore_git_checkpoint", { workDir: checkpoint.workDir, commit: checkpoint.commit });
-      if (currentSessionIdRef.current === sessionId && effectiveWorkDirRef.current === checkpoint.workDir) {
-        fileRequestSequenceRef.current[sessionId] = (fileRequestSequenceRef.current[sessionId] || 0) + 1;
+      if (useAppStore.getState().currentSessionId === sessionId && runtime.effectiveWorkDir === checkpoint.workDir) {
+        runtime.fileRequestSequence[sessionId] = (runtime.fileRequestSequence[sessionId] || 0) + 1;
         setFileContent(null);
         setSelectedFile(null);
         setDiffView(false);
       }
       setModifiedFilesBySession((previous) => ({ ...previous, [sessionId]: {} }));
       setPreviewBySession((previous) => ({ ...previous, [sessionId]: "" }));
-      if (effectiveWorkDirRef.current === checkpoint.workDir) {
+      if (runtime.effectiveWorkDir === checkpoint.workDir) {
         await refreshWorkspace(sessionId, checkpoint.workDir);
       }
       await invoke("delete_git_checkpoint", { workDir: checkpoint.workDir, reference: checkpoint.reference });
@@ -1970,7 +1726,7 @@ function App() {
   };
 
   const handleCompact = async () => {
-    if (!sessionStorageReady || isStreamingRef.current || requestStartingRef.current) return;
+    if (!sessionStorageReady || runtime.isStreaming || requestStartingRef.current) return;
     const sessionId = currentSession.id;
     const messages = currentSession.messages;
     if (messages.length < 3) {
@@ -1983,10 +1739,10 @@ function App() {
       return;
     }
     const requestId = `compact-${createRequestId()}`;
-    activeRequestIdRef.current = requestId;
-    activeRequestSessionIdRef.current = sessionId;
-    requestSessionByIdRef.current[requestId] = sessionId;
-    isStreamingRef.current = true;
+    runtime.activeRequestId = requestId;
+    runtime.activeRequestSessionId = sessionId;
+    runtime.requestSessionById[requestId] = sessionId;
+    runtime.isStreaming = true;
     setActiveRunSessionId(sessionId);
     setRuntimeBySession((previous) => ({ ...previous, [sessionId]: { requestId, status: "running" } }));
     addLog(t("compact.start", lang), "info", false, sessionId);
@@ -2058,667 +1814,6 @@ function App() {
   };
 
   // ==========================================
-  // Tauri Event Listeners — registered once on mount, use ref for current session
-  // ==========================================
-
-  useEffect(() => {
-    const unlisteners: (() => void)[] = [];
-    let disposed = false;
-
-    // Apply all buffered stream text in a single state update. Safe to call
-    // synchronously (e.g. right before a tool/done event mutates the last
-    // message) — it cancels any pending frame and applies immediately.
-    const flushStreamBuffer = () => {
-      if (streamFlushRafRef.current !== null) {
-        cancelAnimationFrame(streamFlushRafRef.current);
-        streamFlushRafRef.current = null;
-      }
-      const buffered = streamBufferRef.current;
-      if (!buffered?.text) return;
-      streamBufferRef.current = null;
-      setSessions((prev) =>
-        prev.map((s) => {
-          if (s.id !== buffered.sessionId) return s;
-          const messages = [...s.messages];
-          if (
-            messages.length === 0 ||
-            messages[messages.length - 1].role !== "assistant"
-          ) {
-            messages.push({
-              id: newMessageId(),
-              role: "assistant",
-              content: buffered.text,
-              actions: [],
-              variants: [buffered.text],
-              currentVariantIndex: 0,
-              timestamp: Date.now(),
-              model: buffered.model,
-              contextTokens: buffered.contextTokens,
-            });
-          } else {
-            const last = { ...messages[messages.length - 1] };
-            last.content += buffered.text;
-            if (last.variants) {
-              last.variants[last.currentVariantIndex || 0] = last.content;
-            } else {
-              last.variants = [last.content];
-              last.currentVariantIndex = 0;
-            }
-            messages[messages.length - 1] = last;
-          }
-          return { ...s, messages };
-        })
-      );
-    };
-    flushStreamBufferNowRef.current = flushStreamBuffer;
-
-    async function setup() {
-      unlisteners.push(
-        await listen<{ requestId?: string; attempt: number; maxAttempts: number; delaySeconds: number; reason: string }>("agent-retry", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          const sessionId = agentEventSessionId(event.payload);
-          addLog(
-            langRef.current === "zh"
-              ? ("模型请求失败，" + event.payload.delaySeconds + " 秒后进行第 " + event.payload.attempt + "/" + event.payload.maxAttempts + " 次尝试（" + event.payload.reason + "）")
-              : ("Model request failed; retry " + event.payload.attempt + "/" + event.payload.maxAttempts + " in " + event.payload.delaySeconds + "s (" + event.payload.reason + ")"),
-            "info",
-            false,
-            sessionId,
-          );
-        }),
-      );
-      unlisteners.push(
-        await listen<AgentEventPayload>("agent-stream-chunk", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          let payload = payloadContent(event.payload);
-          if (!payload) return;
-          if (payload.includes("DSML")) {
-            payload = payload.replace(/<[｜|][｜|][^>]*>/g, "");
-            payload = payload.replace(/<\/[｜|][｜|][^>]*>/g, "");
-            if (!payload.trim()) return;
-          }
-          // Accumulate and flush once per frame instead of one render per token.
-          const requestId = payloadRequestId(event.payload) || activeRequestIdRef.current;
-          const sessionId = agentEventSessionId(event.payload);
-          if (streamBufferRef.current
-            && (streamBufferRef.current.requestId !== requestId || streamBufferRef.current.sessionId !== sessionId)) {
-            flushStreamBuffer();
-          }
-          if (!streamBufferRef.current) {
-            streamBufferRef.current = {
-              requestId,
-              sessionId,
-              text: "",
-              model: activeRequestModelRef.current,
-              contextTokens: activeRequestContextTokensRef.current,
-            };
-          }
-          streamBufferRef.current.text += payload;
-          if (streamFlushRafRef.current === null) {
-            streamFlushRafRef.current = requestAnimationFrame(flushStreamBuffer);
-          }
-        })
-      );
-
-      unlisteners.push(
-        await listen<SearchStatus>("agent-search-status", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          const status = event.payload;
-          const sessionId = agentEventSessionId(event.payload);
-          setSessions((prev) =>
-            prev.map((s) => {
-              if (s.id !== sessionId) return s;
-              const messages = [...s.messages];
-              if (messages.length === 0) return s;
-              const last = { ...messages[messages.length - 1] };
-              // If last message is not assistant (e.g. user msg during force search),
-              // only create assistant message when we have results, not for "searching" status
-              if (last.role !== "assistant") {
-                if (status.type === "searching") {
-                  // Don't create empty assistant message yet, wait for results or stream start
-                  return s;
-                }
-                // Create assistant message now that we have results or error
-                const assistantMsg: Message = {
-                  id: newMessageId(),
-                  role: "assistant",
-                  content: "",
-                  searchStatus: [status],
-                  actions: [],
-                };
-                messages.push(assistantMsg);
-                return { ...s, messages };
-              }
-              const existing = last.searchStatus || [];
-              if (status.type === "searching") {
-                last.searchStatus = [...existing, status];
-              } else if (status.type === "results" || status.type === "error") {
-                const lastSearchIdx = [...existing].reverse().findIndex((s) => s.type === "searching" && s.query === status.query);
-                if (lastSearchIdx !== -1) {
-                  const realIdx = existing.length - 1 - lastSearchIdx;
-                  const updated = [...existing];
-                  updated[realIdx] = { ...updated[realIdx], ...status };
-                  last.searchStatus = updated;
-                } else {
-                  last.searchStatus = [...existing, status];
-                }
-              }
-              messages[messages.length - 1] = last;
-              return { ...s, messages };
-            })
-          );
-        })
-      );
-
-      unlisteners.push(
-        await listen<AgentEventPayload>("agent-reasoning-chunk", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          const payload = payloadContent(event.payload);
-          if (!payload) return;
-          const sessionId = agentEventSessionId(event.payload);
-          setSessions((prev) =>
-            prev.map((s) => {
-              if (s.id !== sessionId) return s;
-              const messages = [...s.messages];
-              if (
-                messages.length === 0 ||
-                messages[messages.length - 1].role !== "assistant"
-              ) {
-                messages.push({
-                  id: newMessageId(),
-                  role: "assistant",
-                  content: "",
-                  actions: [],
-                  reasoningContent: payload,
-                  timestamp: Date.now(),
-                  model: activeRequestModelRef.current,
-                  contextTokens: activeRequestContextTokensRef.current,
-                });
-              } else {
-                const last = { ...messages[messages.length - 1] };
-                last.reasoningContent = (last.reasoningContent || "") + payload;
-                messages[messages.length - 1] = last;
-              }
-              return { ...s, messages };
-            })
-          );
-        })
-      );
-
-      unlisteners.push(
-        await listen<{
-          requestId?: string;
-          status: string;
-          serverStatuses: Array<{
-            name: string;
-            status: "started" | "error";
-            toolCount: number;
-            error?: string | null;
-          }>;
-        }>("agent-mcp-status", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          const requestId = event.payload.requestId || activeRequestIdRef.current;
-          const sessionId = agentEventSessionId(event.payload);
-          const startedNames = event.payload.serverStatuses
-            .filter((server) => server.status === "started")
-            .map((server) => server.name);
-          if (requestId) mcpRuntimeNamesByRequestRef.current[requestId] = startedNames;
-          setMcpStatusByName((previous) => {
-            const next = { ...previous };
-            for (const server of event.payload.serverStatuses) {
-              next[server.name] = server.status === "started"
-                ? {
-                    state: "ready",
-                    toolCount: server.toolCount,
-                    message: langRef.current === "zh" ? "本轮已启动" : "Active in this run",
-                  }
-                : {
-                    state: "error",
-                    toolCount: 0,
-                    message: server.error || (langRef.current === "zh" ? "启动失败" : "Failed to start"),
-                  };
-            }
-            return next;
-          });
-          for (const server of event.payload.serverStatuses.filter((item) => item.status === "error")) {
-            addLog(`MCP ${server.name}: ${server.error || "Failed to start"}`, "error", true, sessionId);
-          }
-        }),
-      );
-
-      unlisteners.push(
-        await listen<{ index: number; id: string; name: string; arguments: string }>(
-          "agent-tool-drafting",
-          (event) => {
-            if (!isCurrentRequestPayload(event.payload)) return;
-            const { index, id: toolId, name, arguments: args } = event.payload;
-            const sessionId = agentEventSessionId(event.payload);
-            setSessions((prev) =>
-              prev.map((s) => {
-                if (s.id !== sessionId) return s;
-                const messages = [...s.messages];
-                if (messages.length === 0 || messages[messages.length - 1].role !== "assistant") {
-                  messages.push({
-                    id: newMessageId(),
-                    role: "assistant",
-                    content: "",
-                    actions: [],
-                    timestamp: Date.now(),
-                    model: activeRequestModelRef.current,
-                    contextTokens: activeRequestContextTokensRef.current,
-                  });
-                }
-                const last = { ...messages[messages.length - 1] };
-                const actions = last.actions ? [...last.actions] : [];
-                if (index >= actions.length || !actions[index]) {
-                  actions[index] = {
-                    id: toolId || `tc-${index}-${Date.now()}`,
-                    name,
-                    arguments: args,
-                    status: "drafting",
-                  };
-                } else {
-                  actions[index] = { ...actions[index], arguments: args };
-                  if (toolId && actions[index].id.startsWith("tc-")) {
-                    actions[index].id = toolId;
-                  }
-                }
-                last.actions = actions;
-                messages[messages.length - 1] = last;
-                return { ...s, messages };
-              })
-            );
-          }
-        )
-      );
-
-      unlisteners.push(
-        await listen<{
-          id: string;
-          name: string;
-          arguments: string;
-          path?: string;
-          beforeExists?: boolean;
-          beforeContent?: string | null;
-        }>(
-          "agent-tool-executing",
-          (event) => {
-            if (!isCurrentRequestPayload(event.payload)) return;
-            const { id, name, arguments: args } = event.payload;
-            const sessionId = agentEventSessionId(event.payload);
-            addLog(`[Exec] ${name}: ${args.substring(0, 200)}`, "cmd", false, sessionId);
-            if (name === "write_file" || name === "edit_file") {
-              try {
-                const parsed = JSON.parse(args);
-                const filePath = event.payload.path || parsed.path || "";
-                if (filePath) {
-                  const oldContent = event.payload.beforeExists ? (event.payload.beforeContent || "") : "";
-                  const optimisticNewContent = name === "write_file" ? (parsed.content || "") : oldContent;
-                  setModifiedFilesBySession((previous) => {
-                    const existing = previous[sessionId]?.[filePath];
-                    return {
-                      ...previous,
-                      [sessionId]: {
-                        ...(previous[sessionId] || {}),
-                        [filePath]: { old: existing?.old ?? oldContent, new: optimisticNewContent },
-                      },
-                    };
-                  });
-                }
-              } catch {}
-            }
-            setSessions((prev) =>
-              prev.map((s) => {
-                if (s.id !== sessionId) return s;
-                const messages = upsertToolActions(s.messages, [{
-                  id,
-                  name,
-                  arguments: args,
-                  status: "executing" as const,
-                }]);
-                if (messages.length === 0) return s;
-                const last = { ...messages[messages.length - 1] };
-                if (last.role !== "assistant" || !last.actions) return s;
-                last.actions = last.actions.map((a) =>
-                  a.id === id ? { ...a, status: "executing" as const } : a
-                );
-                messages[messages.length - 1] = last;
-                return { ...s, messages };
-              })
-            );
-          }
-        )
-      );
-
-      unlisteners.push(
-        await listen<{
-          requestId?: string;
-          id: string;
-          name: string;
-          stream: string;
-          content: string;
-        }>("agent-tool-output-chunk", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          const sessionId = agentEventSessionId(event.payload);
-          const requestId = event.payload.requestId || activeRequestIdRef.current;
-          streamedToolOutputKeysRef.current.add(`${requestId}:${event.payload.id}`);
-          if (event.payload.content) {
-            addLog(event.payload.content, event.payload.stream === "stderr" ? "error" : "cmd", false, sessionId);
-          }
-        }),
-      );
-
-      unlisteners.push(
-        await listen<{
-          requestId?: string;
-          status: string;
-          reference?: string;
-          commit?: string;
-          createdAt?: number;
-          label?: string;
-          error?: string;
-        }>("agent-checkpoint", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          const sessionId = agentEventSessionId(event.payload);
-          if (event.payload.status === "created" && event.payload.reference && event.payload.commit) {
-            setCheckpointBySession((previous) => previous[sessionId] ? previous : {
-              ...previous,
-              [sessionId]: {
-                reference: event.payload.reference!,
-                commit: event.payload.commit!,
-                createdAt: event.payload.createdAt || Date.now(),
-                label: event.payload.label || "before tool execution",
-                workDir: activeRequestWorkDirRef.current,
-              },
-            });
-          } else if (event.payload.error) {
-            addLog(event.payload.error, "info", false, sessionId);
-          }
-        }),
-      );
-
-      unlisteners.push(
-        await listen<{
-          requestId?: string;
-          id: string;
-          name: string;
-          output: string;
-          path?: string;
-          afterExists?: boolean;
-          afterContent?: string | null;
-        }>(
-          "agent-tool-output",
-          (event) => {
-            if (!isCurrentRequestPayload(event.payload)) return;
-            const { id, name, output } = event.payload;
-            const sessionId = agentEventSessionId(event.payload);
-            const requestId = event.payload.requestId || activeRequestIdRef.current;
-            const outputKey = `${requestId}:${id}`;
-            const isErrorOutput = output.trimStart().startsWith("Error:");
-            if (!streamedToolOutputKeysRef.current.has(outputKey)) {
-              addLog(
-                `[${isErrorOutput ? "Error" : "Done"}] ${name}: ${output.substring(0, 200)}${output.length > 200 ? "..." : ""}`,
-                isErrorOutput ? "error" : "success",
-                false,
-                sessionId,
-              );
-            }
-            if (!isErrorOutput && ["write_file", "edit_file", "execute_command", "run_python"].includes(name)) {
-              const requestWorkDir = activeRequestWorkDirRef.current;
-              void refreshWorkspace(sessionId, requestWorkDir);
-              const visibleSessionId = currentSessionIdRef.current;
-              if (visibleSessionId !== sessionId && effectiveWorkDirRef.current === requestWorkDir) {
-                void refreshWorkspace(visibleSessionId, requestWorkDir);
-              }
-            }
-            if (name === "write_file" || name === "edit_file") {
-              const filePath = event.payload.path || "";
-              const content = event.payload.afterContent;
-              if (filePath) {
-                setModifiedFilesBySession((previous) => {
-                  const files = { ...(previous[sessionId] || {}) };
-                  const old = files[filePath]?.old || "";
-                  if (event.payload.afterExists && typeof content === "string" && content !== old) {
-                    files[filePath] = { old, new: content };
-                  } else {
-                    delete files[filePath];
-                  }
-                  return { ...previous, [sessionId]: files };
-                });
-              }
-              if (filePath && event.payload.afterExists && typeof content === "string") {
-                if (!isErrorOutput && /\.(html?|svg)$/i.test(filePath)) {
-                  setPreviewBySession((previous) => ({ ...previous, [sessionId]: content }));
-                  if (currentSessionIdRef.current === sessionId) setActiveTab("preview");
-                }
-                const absoluteFilePath = resolveWorkspacePath(activeRequestWorkDirRef.current, filePath);
-                if (effectiveWorkDirRef.current === activeRequestWorkDirRef.current
-                  && selectedFileRef.current
-                  && comparableWorkspacePath(selectedFileRef.current) === comparableWorkspacePath(absoluteFilePath)) {
-                  const visibleSessionId = currentSessionIdRef.current;
-                  fileRequestSequenceRef.current[visibleSessionId] = (fileRequestSequenceRef.current[visibleSessionId] || 0) + 1;
-                  setFileContent(content);
-                }
-              }
-            }
-            setSessions((prev) =>
-              prev.map((s) => {
-                if (s.id !== sessionId) return s;
-                const messages = upsertToolActions(s.messages, [{
-                  id,
-                  name,
-                  arguments: "",
-                  status: isErrorOutput ? "error" as const : "done" as const,
-                  output,
-                }]);
-                if (messages.length === 0) return s;
-                const last = { ...messages[messages.length - 1] };
-                if (last.role !== "assistant" || !last.actions) return s;
-                last.actions = last.actions.map((a) =>
-                  a.id === id ? { ...a, status: isErrorOutput ? "error" as const : "done" as const, output } : a
-                );
-                messages[messages.length - 1] = last;
-                return { ...s, messages };
-              })
-            );
-          }
-        )
-      );
-
-      unlisteners.push(
-        await listen<{ requestId?: string; id: string; name: string; reason: string }>(
-          "agent-tool-blocked",
-          (event) => {
-            if (!isCurrentRequestPayload(event.payload)) return;
-            const { id, name, reason } = event.payload;
-            const sessionId = agentEventSessionId(event.payload);
-            addLog(`[Blocked] ${name}: ${reason}`, "error", false, sessionId);
-            setSessions((prev) =>
-              prev.map((s) => {
-                if (s.id !== sessionId) return s;
-                const messages = upsertToolActions(s.messages, [{
-                  id,
-                  name,
-                  arguments: "",
-                  status: "blocked" as const,
-                  output: reason,
-                }]);
-                if (messages.length === 0) return s;
-                const last = { ...messages[messages.length - 1] };
-                if (last.role !== "assistant" || !last.actions) return s;
-                last.actions = last.actions.map((a) =>
-                  a.id === id ? { ...a, status: "blocked" as const, output: reason } : a
-                );
-                messages[messages.length - 1] = last;
-                return { ...s, messages };
-              })
-            );
-          }
-        )
-      );
-
-      unlisteners.push(
-        await listen<PendingApproval>("agent-tool-approval-request", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          const sessionId = agentEventSessionId(event.payload);
-          setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: event.payload }));
-          const pendingActions: ToolAction[] = event.payload.tool_calls.map((tc) => ({
-            id: tc.id,
-            name: tc.name,
-            arguments: tc.arguments,
-            status: "pending_approval" as const,
-          }));
-          setSessions((prev) =>
-            prev.map((s) => {
-              if (s.id !== sessionId) return s;
-              return { ...s, messages: upsertToolActions(s.messages, pendingActions) };
-            })
-          );
-        })
-      );
-
-      unlisteners.push(
-        await listen<{
-          requestId?: string;
-          content?: string;
-          loopCount?: number;
-          ttftMs?: number;
-          responseTimeMs?: number;
-        }>("agent-stream-done", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          flushStreamBuffer();
-          const done = event.payload || {};
-          const sessionId = agentEventSessionId(event.payload);
-          setSessions((prev) =>
-            prev.map((s) => {
-              if (s.id !== sessionId) return s;
-              const messages = [...s.messages];
-              if (messages.length === 0) return s;
-              const last = { ...messages[messages.length - 1] };
-              if (last.role !== "assistant") return s;
-              const usage = last.usage || {
-                promptTokens: last.contextTokens || activeRequestContextTokensRef.current || 0,
-                completionTokens: estimateTextTokens(last.content),
-                totalPromptTokens: last.contextTokens || activeRequestContextTokensRef.current || 0,
-                totalCompletionTokens: estimateTextTokens(last.content),
-                ttftMs: done.ttftMs || 0,
-                responseTimeMs: done.responseTimeMs || 0,
-                loopCount: done.loopCount || 1,
-              };
-              last.model = last.model || activeRequestModelRef.current;
-              last.contextTokens = last.contextTokens || activeRequestContextTokensRef.current;
-              last.usage = {
-                ...usage,
-                completionTokens: usage.completionTokens || estimateTextTokens(last.content),
-                ttftMs: done.ttftMs ?? usage.ttftMs,
-                responseTimeMs: done.responseTimeMs ?? usage.responseTimeMs,
-                loopCount: done.loopCount ?? usage.loopCount,
-              };
-              messages[messages.length - 1] = last;
-              return { ...s, messages };
-            })
-          );
-        })
-      );
-
-      unlisteners.push(
-        await listen<AgentEventPayload<{ status?: string }>>("agent-complete", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          flushStreamBuffer();
-          const status = typeof event.payload === "string" ? "" : event.payload.status;
-          const sessionId = agentEventSessionId(event.payload);
-          const requestId = payloadRequestId(event.payload) || activeRequestIdRef.current;
-          const mcpRuntimeNames = mcpRuntimeNamesByRequestRef.current[requestId] || [];
-          if (mcpRuntimeNames.length > 0) {
-            setMcpStatusByName((previous) => {
-              const next = { ...previous };
-              for (const name of mcpRuntimeNames) {
-                if (next[name]?.message === "Active in this run" || next[name]?.message === "本轮已启动") {
-                  next[name] = { state: "stopped" };
-                }
-              }
-              return next;
-            });
-          }
-          delete mcpRuntimeNamesByRequestRef.current[requestId];
-          const completedWorkDir = activeRequestWorkDirRef.current;
-          void refreshWorkspace(sessionId, completedWorkDir);
-          const visibleSessionId = currentSessionIdRef.current;
-          if (visibleSessionId !== sessionId && effectiveWorkDirRef.current === completedWorkDir) {
-            void refreshWorkspace(visibleSessionId, completedWorkDir);
-          }
-          finishStreamingLocally(requestId);
-          const eventLang = langRef.current;
-          addLog(status === "cancelled" ? (eventLang === "zh" ? "已停止当前输出。" : "Current output stopped.") : t("log.complete", eventLang), "info", false, sessionId);
-          if (status !== "cancelled" && pendingTitleBySessionRef.current[sessionId]) {
-            requestAnimationFrame(() => { void requestGeneratedSessionTitle(sessionId); });
-          }
-        })
-      );
-
-      unlisteners.push(
-        await listen<{
-          requestId?: string;
-          prompt_tokens: number;
-          completion_tokens: number;
-          total_prompt_tokens: number;
-          total_completion_tokens: number;
-          ttft_ms: number;
-          response_time_ms: number;
-          loop_count: number;
-        }>("agent-usage", (event) => {
-          if (!isCurrentRequestPayload(event.payload)) return;
-          const sessionId = agentEventSessionId(event.payload);
-          const usage = {
-            promptTokens: event.payload.prompt_tokens,
-            completionTokens: event.payload.completion_tokens,
-            totalPromptTokens: event.payload.total_prompt_tokens,
-            totalCompletionTokens: event.payload.total_completion_tokens,
-            ttftMs: event.payload.ttft_ms,
-            responseTimeMs: event.payload.response_time_ms,
-            loopCount: event.payload.loop_count,
-          };
-          setUsageStatsBySession((previous) => ({ ...previous, [sessionId]: usage }));
-          setSessions((prev) =>
-            prev.map((s) => {
-              if (s.id !== sessionId) return s;
-              const messages = [...s.messages];
-              if (messages.length === 0) return s;
-              const last = { ...messages[messages.length - 1] };
-              if (last.role !== "assistant") return s;
-              last.model = last.model || activeRequestModelRef.current;
-              last.contextTokens = usage.promptTokens || last.contextTokens || activeRequestContextTokensRef.current;
-              last.usage = usage;
-              messages[messages.length - 1] = last;
-              return { ...s, messages };
-            })
-          );
-        })
-      );
-    }
-
-    setup().then(() => {
-      if (disposed) {
-        unlisteners.splice(0).forEach((fn) => fn());
-      }
-    }).catch((e) => {
-      addLog(`Listener setup failed: ${e}`, "error");
-    });
-
-    return () => {
-      disposed = true;
-      if (streamFlushRafRef.current !== null) {
-        cancelAnimationFrame(streamFlushRafRef.current);
-        streamFlushRafRef.current = null;
-      }
-      streamBufferRef.current = null;
-      flushStreamBufferNowRef.current = () => {};
-      unlisteners.splice(0).forEach((fn) => fn());
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ==========================================
   // Actions
   // ==========================================
 
@@ -2782,7 +1877,7 @@ function App() {
     onAccepted?: () => void;
     sessionSnapshot?: ChatSession;
   }): Promise<boolean> => {
-    if (!sessionStorageReady || isStreamingRef.current || requestStartingRef.current) return false;
+    if (!sessionStorageReady || runtime.isStreaming || requestStartingRef.current) return false;
     const { requestConfig, searchMode: requestSearchMode } = resolveSessionRequest(sessionConfig);
     if (requestNeedsApiKey(requestConfig)) {
       setSettingsOpen(true);
@@ -2959,13 +2054,13 @@ function App() {
       return false;
     }
 
-    activeRequestIdRef.current = requestId;
-    activeRequestSessionIdRef.current = targetSessionId;
-    activeRequestModelRef.current = requestConfig.model;
-    activeRequestWorkDirRef.current = requestConfig.default_work_dir;
-    activeRequestContextTokensRef.current = estimatedRequestTokens;
-    requestSessionByIdRef.current[requestId] = targetSessionId;
-    isStreamingRef.current = true;
+    runtime.activeRequestId = requestId;
+    runtime.activeRequestSessionId = targetSessionId;
+    runtime.activeRequestModel = requestConfig.model;
+    runtime.activeRequestWorkDir = requestConfig.default_work_dir;
+    runtime.activeRequestContextTokens = estimatedRequestTokens;
+    runtime.requestSessionById[requestId] = targetSessionId;
+    runtime.isStreaming = true;
     setActiveRunSessionId(targetSessionId);
     setRuntimeBySession((previous) => ({
       ...previous,
@@ -2994,10 +2089,10 @@ function App() {
         searchMode: requestSearchMode,
         imageAttachments,
       });
-      if (activeRequestIdRef.current === requestId) finishStreamingLocally(requestId);
+      if (runtime.activeRequestId === requestId) finishStreamingLocally(requestId);
       return true;
     } catch (error) {
-      if (activeRequestIdRef.current === requestId) finishStreamingLocally(requestId);
+      if (runtime.activeRequestId === requestId) finishStreamingLocally(requestId);
       addLog(`Agent error: ${error}`, "error", true, targetSessionId);
       setSessions((previous) => previous.map((session) => session.id === targetSessionId ? {
         ...session,
@@ -3028,7 +2123,7 @@ function App() {
   const handleSendMessage = async () => {
     if (!sessionStorageReady) return;
     const sendableAttachments = fitAttachmentBudget([], attachments).accepted;
-    if ((!prompt.trim() && sendableAttachments.length === 0) || isStreamingRef.current || requestStartingRef.current || isAttachmentLoading) return;
+    if ((!prompt.trim() && sendableAttachments.length === 0) || runtime.isStreaming || requestStartingRef.current || isAttachmentLoading) return;
 
     // Quick commands using helper
     const { isCommand, command } = parseCommand(prompt.trim());
@@ -3091,7 +2186,7 @@ function App() {
       requestAttachments: pendingAttachments,
       onAccepted: () => {
         if (shouldGenerateTitle) {
-          pendingTitleBySessionRef.current[targetSessionId] = {
+          runtime.pendingTitleBySession[targetSessionId] = {
             userMessage: userMessage || pendingAttachments.map((attachment) => attachment.name).join(", "),
             fallbackTitle: localTitle,
             config: requestConfig,
@@ -3126,9 +2221,9 @@ function App() {
   };
 
   const handleStopStreaming = async () => {
-    const requestId = activeRequestIdRef.current;
-    const sessionId = activeRequestSessionIdRef.current;
-    if (!requestId || !isStreamingRef.current || sessionId !== currentSessionId || currentRuntime?.status === "stopping") return;
+    const requestId = runtime.activeRequestId;
+    const sessionId = runtime.activeRequestSessionId;
+    if (!requestId || !runtime.isStreaming || sessionId !== currentSessionId || currentRuntime?.status === "stopping") return;
 
     try {
       setRuntimeBySession((previous) => ({
@@ -3139,7 +2234,7 @@ function App() {
       addLog(t("ui.stop-requested-for-current-output", lang), "info", false, sessionId);
     } catch (e) {
       addLog(`Stop request failed: ${e}`, "error", true, sessionId);
-      if (activeRequestIdRef.current === requestId) {
+      if (runtime.activeRequestId === requestId) {
         setRuntimeBySession((previous) => ({
           ...previous,
           [sessionId]: { requestId, status: "running" },
@@ -3150,8 +2245,8 @@ function App() {
 
   const handleSteeringMessage = async () => {
     const message = prompt.trim();
-    const sessionId = activeRequestSessionIdRef.current;
-    const requestId = activeRequestIdRef.current;
+    const sessionId = runtime.activeRequestSessionId;
+    const requestId = runtime.activeRequestId;
     if (!message || !isStreaming || sessionId !== currentSessionId || !requestId || currentMode !== "code") return;
     try {
       await invoke("push_steering_message", { requestId, message });
@@ -3168,7 +2263,7 @@ function App() {
   };
 
   const handleRetry = async (msgIdx: number) => {
-    if (!sessionStorageReady || isStreamingRef.current || requestStartingRef.current) return;
+    if (!sessionStorageReady || runtime.isStreaming || requestStartingRef.current) return;
     const msgs = currentSession.messages;
     let userIndex = -1;
     for (let i = msgIdx; i >= 0; i--) {
@@ -3203,7 +2298,7 @@ function App() {
   };
 
   const handleEditBranch = async (msgIdx: number) => {
-    if (!sessionStorageReady || isStreamingRef.current || requestStartingRef.current) return;
+    if (!sessionStorageReady || runtime.isStreaming || requestStartingRef.current) return;
     const sourceMessage = currentSession.messages[msgIdx];
     if (!sourceMessage) return;
     const editedMessage: Message = {
@@ -3411,23 +2506,19 @@ function App() {
     setExpandedActions({});
     setActiveRunSessionId(null);
     setPreparingRequestSessionId(null);
-    isStreamingRef.current = false;
+    runtime.isStreaming = false;
     requestStartingRef.current = false;
-    activeRequestIdRef.current = "";
-    activeRequestSessionIdRef.current = "";
+    runtime.activeRequestId = "";
+    runtime.activeRequestSessionId = "";
     setFileContent(null);
     setSelectedFile(null);
     setDiffView(false);
     setActiveTab("activity");
-    requestSessionByIdRef.current = {};
-    workspaceRequestSequenceRef.current = {};
-    fileRequestSequenceRef.current = {};
-    streamedToolOutputKeysRef.current.clear();
-    streamBufferRef.current = null;
-    if (streamFlushRafRef.current !== null) {
-      cancelAnimationFrame(streamFlushRafRef.current);
-      streamFlushRafRef.current = null;
-    }
+    runtime.requestSessionById = {};
+    runtime.workspaceRequestSequence = {};
+    runtime.fileRequestSequence = {};
+    runtime.streamedToolOutputKeys.clear();
+    discardStreamBuffer();
     try {
       localStorage.removeItem("gx_drafts");
       localStorage.removeItem("gx_draft");
@@ -3450,8 +2541,8 @@ function App() {
     setUsageStatsBySession((previous) => omitSessionKey(previous, sessionId));
     setEditingMessageIdxBySession((previous) => omitSessionKey(previous, sessionId));
     setEditTextBySession((previous) => omitSessionKey(previous, sessionId));
-    delete workspaceRequestSequenceRef.current[sessionId];
-    delete fileRequestSequenceRef.current[sessionId];
+    delete runtime.workspaceRequestSequence[sessionId];
+    delete runtime.fileRequestSequence[sessionId];
   };
 
   const replaceAllSessions = async (nextSessions: ChatSession[], preferredSessionId?: string) => {
@@ -3521,7 +2612,7 @@ function App() {
     const finalizeTimer = window.setTimeout(() => {
       if (restored) return;
       dropSessionUiState(id);
-      delete pendingTitleBySessionRef.current[id];
+      delete runtime.pendingTitleBySession[id];
       void consumeSessionCheckpoints([id]);
     }, 5200);
     const undoDelete = async () => {
@@ -3547,7 +2638,7 @@ function App() {
       } catch (error) {
         restored = false;
         dropSessionUiState(id);
-        delete pendingTitleBySessionRef.current[id];
+        delete runtime.pendingTitleBySession[id];
         void consumeSessionCheckpoints([id]);
         addLog(`${t("ui.restore-session-failed", lang)}: ${error}`, "error", true);
       }
@@ -4035,7 +3126,7 @@ function App() {
                   {config.show_advanced_reply_info && msg.role === "assistant" && (
                     <>
                       <span className="bubble-meta-sep">·</span>
-                      <span>{getModelDisplayName(msg.model || activeRequestModelRef.current || currentSession.sessionConfig.model || config.model)}</span>
+                      <span>{getModelDisplayName(msg.model || runtime.activeRequestModel || currentSession.sessionConfig.model || config.model)}</span>
                       <span className="bubble-meta-sep">·</span>
                       <span>{t("usage.prompt", lang)} {formatTokenCount(msg.usage?.promptTokens || msg.contextTokens || 0)} / {t("usage.completion", lang)} {formatTokenCount(msg.usage?.completionTokens || estimateTextTokens(msg.content))}</span>
                       <span className="bubble-meta-sep">·</span>

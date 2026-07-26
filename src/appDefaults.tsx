@@ -108,6 +108,13 @@ export const comparableWorkspacePath = (path: string) => {
   return /^[a-zA-Z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
 };
 
+// Rough token estimate: ~4 ASCII chars per token, 1 token per non-ASCII char.
+export const estimateTextTokens = (text: string) => {
+  const value = text || "";
+  const nonAscii = (value.match(/[^\x00-\x7f]/g) || []).length;
+  return Math.ceil((value.length - nonAscii) / 4 + nonAscii);
+};
+
 export const isSendableAttachment = (attachment: Attachment) => (
   attachment.type === "image" ? Boolean(attachment.data) : Boolean(attachment.data.trim())
 );

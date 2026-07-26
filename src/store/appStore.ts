@@ -5,6 +5,7 @@ import {
   type ToastNotice,
   type SessionRuntime,
   type RunCheckpoint,
+  type WorkspaceViewState,
 } from "../appDefaults";
 // Type-only import: erased at compile time, so no runtime module cycle.
 import type { McpServerView } from "../components/mcp/McpServerManager";
@@ -16,6 +17,8 @@ const resolve = <T,>(next: Updater<T>, previous: T): T =>
 export type McpStatus = Pick<McpServerView, "state" | "toolCount" | "message">;
 export type TerminalLogEntry = { text: string; type: "info" | "success" | "error" | "cmd" };
 export type ModifiedFileEntry = { old: string; new: string };
+export type PreviewConsoleLog = { text: string; type: "log" | "error" | "warn" | "info" };
+export type WorkspaceTab = "activity" | "files" | "preview";
 
 interface AppStoreState {
   sessions: ChatSession[];
@@ -46,6 +49,18 @@ interface AppStoreState {
   setPreviewBySession: (next: Updater<Record<string, string>>) => void;
   toasts: ToastNotice[];
   setToasts: (next: Updater<ToastNotice[]>) => void;
+  workspaceBySession: Record<string, WorkspaceViewState>;
+  setWorkspaceBySession: (next: Updater<Record<string, WorkspaceViewState>>) => void;
+  fileContent: string | null;
+  setFileContent: (next: Updater<string | null>) => void;
+  selectedFile: string | null;
+  setSelectedFile: (next: Updater<string | null>) => void;
+  activeTab: WorkspaceTab;
+  setActiveTab: (next: Updater<WorkspaceTab>) => void;
+  settingsOpen: boolean;
+  setSettingsOpen: (next: Updater<boolean>) => void;
+  previewConsoleLogsBySession: Record<string, PreviewConsoleLog[]>;
+  setPreviewConsoleLogsBySession: (next: Updater<Record<string, PreviewConsoleLog[]>>) => void;
 }
 
 export const useAppStore = create<AppStoreState>((set) => ({
@@ -82,4 +97,17 @@ export const useAppStore = create<AppStoreState>((set) => ({
   setPreviewBySession: (next) => set((s) => ({ previewBySession: resolve(next, s.previewBySession) })),
   toasts: [],
   setToasts: (next) => set((s) => ({ toasts: resolve(next, s.toasts) })),
+  workspaceBySession: {},
+  setWorkspaceBySession: (next) => set((s) => ({ workspaceBySession: resolve(next, s.workspaceBySession) })),
+  fileContent: null,
+  setFileContent: (next) => set((s) => ({ fileContent: resolve(next, s.fileContent) })),
+  selectedFile: null,
+  setSelectedFile: (next) => set((s) => ({ selectedFile: resolve(next, s.selectedFile) })),
+  activeTab: "activity",
+  setActiveTab: (next) => set((s) => ({ activeTab: resolve(next, s.activeTab) })),
+  settingsOpen: false,
+  setSettingsOpen: (next) => set((s) => ({ settingsOpen: resolve(next, s.settingsOpen) })),
+  previewConsoleLogsBySession: {},
+  setPreviewConsoleLogsBySession: (next) =>
+    set((s) => ({ previewConsoleLogsBySession: resolve(next, s.previewConsoleLogsBySession) })),
 }));
