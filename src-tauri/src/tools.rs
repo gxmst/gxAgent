@@ -1,12 +1,35 @@
+use crate::text::{utf8_prefix, IncrementalUtf8Decoder};
+use crate::workspace;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
 const FILE_SIZE_LIMIT: usize = 1024 * 1024; // 1MB
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300; // 5 minutes
+const PROCESS_OUTPUT_LIMIT_BYTES: usize = 256 * 1024; // shared by stdout and stderr
+const PROCESS_READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_READER_ABORT_TIMEOUT: Duration = Duration::from_millis(250);
+const PROCESS_OUTPUT_TRUNCATION_NOTICE: &str =
+    "\n[Process output truncated after 256 KiB; additional stdout/stderr was discarded.]\n";
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+
+pub const TOOL_CANCELLED_ERROR: &str = "__GX_AGENT_CANCELLED__";
+
+#[derive(Debug, Clone)]
+pub struct ExecutionChunk {
+    pub stream: &'static str,
+    pub content: String,
+}
 
 const BLOCKED_PATH_PREFIXES: &[&str] = &[
     r"\Windows\System32",
@@ -224,12 +247,48 @@ pub async fn execute_tool_with_timeout(
     search_api_key: &str,
     timeout_secs: u64,
 ) -> String {
+    execute_tool_with_control(
+        name,
+        args_str,
+        work_dir,
+        search_provider,
+        search_api_key,
+        timeout_secs,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Execute a tool with cooperative cancellation and optional stdout/stderr
+/// streaming. Process-backed tools additionally terminate their complete
+/// process tree before returning on cancellation or timeout.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_tool_with_control(
+    name: &str,
+    args_str: &str,
+    work_dir: &str,
+    search_provider: &str,
+    search_api_key: &str,
+    timeout_secs: u64,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    output_tx: Option<mpsc::UnboundedSender<ExecutionChunk>>,
+) -> String {
+    if cancel_rx
+        .as_ref()
+        .map(|receiver| *receiver.borrow())
+        .unwrap_or(false)
+    {
+        return TOOL_CANCELLED_ERROR.to_string();
+    }
+
     let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
     match name {
         "execute_command" => {
             let cmd = args["command"].as_str().unwrap_or("");
-            match run_execute_command(cmd, work_dir, timeout_secs).await {
+            match run_execute_command(cmd, work_dir, timeout_secs, cancel_rx, output_tx).await {
                 Ok(out) => out,
+                Err(e) if e == TOOL_CANCELLED_ERROR => e,
                 Err(e) => format!("Error: {}", e),
             }
         }
@@ -257,18 +316,32 @@ pub async fn execute_tool_with_timeout(
         }
         "run_python" => {
             let code = args["code"].as_str().unwrap_or("");
-            match run_python(code, work_dir, timeout_secs).await {
+            match run_python(code, work_dir, timeout_secs, cancel_rx, output_tx).await {
                 Ok(out) => out,
+                Err(e) if e == TOOL_CANCELLED_ERROR => e,
                 Err(e) => format!("Error: {}", e),
             }
         }
         "web_search" => {
             let query = args["query"].as_str().unwrap_or("");
             let search_timeout = std::time::Duration::from_secs(timeout_secs.min(20));
-            match tokio::time::timeout(search_timeout, run_web_search(query, search_provider, search_api_key)).await {
-                Ok(Ok(out)) => out,
-                Ok(Err(e)) => format!("Error: {}", e),
-                Err(_) => format!("Error: Search timed out after {}s. DuckDuckGo may be blocked in your network — consider using Tavily API instead.", search_timeout.as_secs()),
+            let search = run_web_search(query, search_provider, search_api_key);
+            tokio::pin!(search);
+            if let Some(mut receiver) = cancel_rx {
+                tokio::select! {
+                    result = tokio::time::timeout(search_timeout, &mut search) => match result {
+                        Ok(Ok(out)) => out,
+                        Ok(Err(e)) => format!("Error: {}", e),
+                        Err(_) => format!("Error: Search timed out after {}s. DuckDuckGo may be blocked in your network - consider using Tavily API instead.", search_timeout.as_secs()),
+                    },
+                    _ = wait_for_cancel(&mut receiver) => TOOL_CANCELLED_ERROR.to_string(),
+                }
+            } else {
+                match tokio::time::timeout(search_timeout, &mut search).await {
+                    Ok(Ok(out)) => out,
+                    Ok(Err(e)) => format!("Error: {}", e),
+                    Err(_) => format!("Error: Search timed out after {}s. DuckDuckGo may be blocked in your network - consider using Tavily API instead.", search_timeout.as_secs()),
+                }
             }
         }
         "edit_file" => {
@@ -304,10 +377,336 @@ pub async fn execute_tool_with_timeout(
     }
 }
 
+async fn wait_for_cancel(receiver: &mut watch::Receiver<bool>) {
+    if *receiver.borrow() {
+        return;
+    }
+    while receiver.changed().await.is_ok() {
+        if *receiver.borrow() {
+            return;
+        }
+    }
+}
+
+struct CapturedProcessOutput {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug)]
+struct ProcessOutputBudget {
+    remaining: AtomicUsize,
+    truncated: AtomicBool,
+    truncation_notice_sent: AtomicBool,
+}
+
+impl ProcessOutputBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(limit),
+            truncated: AtomicBool::new(false),
+            truncation_notice_sent: AtomicBool::new(false),
+        }
+    }
+
+    fn reserve(&self, requested: usize) -> usize {
+        let mut remaining = self.remaining.load(Ordering::Acquire);
+        loop {
+            let reserved = remaining.min(requested);
+            match self.remaining.compare_exchange_weak(
+                remaining,
+                remaining - reserved,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return reserved,
+                Err(actual) => remaining = actual,
+            }
+        }
+    }
+
+    fn restore_unused(&self, unused: usize) {
+        if unused > 0 {
+            self.remaining.fetch_add(unused, Ordering::Release);
+        }
+    }
+}
+
+struct ProcessReaderTask {
+    stream: &'static str,
+    output: Arc<Mutex<String>>,
+    output_tx: Option<mpsc::UnboundedSender<ExecutionChunk>>,
+    handle: JoinHandle<Result<(), String>>,
+}
+
+fn push_captured_output(output: &Arc<Mutex<String>>, content: &str) {
+    output
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push_str(content);
+}
+
+fn clone_captured_output(output: &Arc<Mutex<String>>) -> String {
+    output
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn emit_process_output(
+    stream: &'static str,
+    content: &str,
+    output_tx: &Option<mpsc::UnboundedSender<ExecutionChunk>>,
+    output: &Arc<Mutex<String>>,
+) {
+    if content.is_empty() {
+        return;
+    }
+    if let Some(sender) = output_tx {
+        let _ = sender.send(ExecutionChunk {
+            stream,
+            content: content.to_string(),
+        });
+    }
+    push_captured_output(output, content);
+}
+
+fn capture_process_output(
+    stream: &'static str,
+    decoded: &str,
+    output_tx: &Option<mpsc::UnboundedSender<ExecutionChunk>>,
+    output: &Arc<Mutex<String>>,
+    budget: &Arc<ProcessOutputBudget>,
+) {
+    if decoded.is_empty() || budget.truncated.load(Ordering::Acquire) {
+        return;
+    }
+
+    let reserved = budget.reserve(decoded.len());
+    let accepted = utf8_prefix(decoded, reserved);
+    budget.restore_unused(reserved.saturating_sub(accepted.len()));
+    emit_process_output(stream, accepted, output_tx, output);
+
+    if accepted.len() < decoded.len() {
+        budget.truncated.store(true, Ordering::Release);
+        if !budget.truncation_notice_sent.swap(true, Ordering::AcqRel) {
+            emit_process_output(stream, PROCESS_OUTPUT_TRUNCATION_NOTICE, output_tx, output);
+        }
+    }
+}
+
+async fn read_process_stream<R>(
+    mut reader: R,
+    stream: &'static str,
+    output_tx: Option<mpsc::UnboundedSender<ExecutionChunk>>,
+    output: Arc<Mutex<String>>,
+    budget: Arc<ProcessOutputBudget>,
+) -> Result<(), String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = [0_u8; 8192];
+    let mut decoder = IncrementalUtf8Decoder::default();
+
+    loop {
+        let read = reader
+            .read(&mut bytes)
+            .await
+            .map_err(|e| format!("Failed to read process {}: {}", stream, e))?;
+        if read == 0 {
+            break;
+        }
+        let decoded = decoder.push(&bytes[..read]);
+        capture_process_output(stream, &decoded, &output_tx, &output, &budget);
+    }
+
+    let tail = decoder.finish();
+    capture_process_output(stream, &tail, &output_tx, &output, &budget);
+    Ok(())
+}
+
+fn spawn_process_reader<R>(
+    reader: R,
+    stream: &'static str,
+    output_tx: Option<mpsc::UnboundedSender<ExecutionChunk>>,
+    budget: Arc<ProcessOutputBudget>,
+) -> ProcessReaderTask
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let output = Arc::new(Mutex::new(String::new()));
+    let handle = tokio::spawn(read_process_stream(
+        reader,
+        stream,
+        output_tx.clone(),
+        output.clone(),
+        budget,
+    ));
+    ProcessReaderTask {
+        stream,
+        output,
+        output_tx,
+        handle,
+    }
+}
+
+async fn finish_process_reader(
+    mut task: ProcessReaderTask,
+    shutdown_timeout: Duration,
+    report_inherited_pipe: bool,
+) -> Result<String, String> {
+    match tokio::time::timeout(shutdown_timeout, &mut task.handle).await {
+        Ok(joined) => {
+            joined.map_err(|error| format!("{} reader task failed: {}", task.stream, error))??
+        }
+        Err(_) => {
+            task.handle.abort();
+            let _ = tokio::time::timeout(PROCESS_READER_ABORT_TIMEOUT, &mut task.handle).await;
+            if report_inherited_pipe {
+                let notice = format!(
+                    "\n[Stopped waiting for the {} pipe after the process exited; a descendant process may still have it open.]\n",
+                    task.stream
+                );
+                emit_process_output(task.stream, &notice, &task.output_tx, &task.output);
+            }
+        }
+    }
+    Ok(clone_captured_output(&task.output))
+}
+
+#[cfg(windows)]
+fn configure_process(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(windows))]
+fn configure_process(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+async fn terminate_process_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let mut taskkill = Command::new("taskkill");
+        taskkill.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        taskkill.creation_flags(CREATE_NO_WINDOW);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), taskkill.status()).await;
+    }
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+}
+
+#[cfg(not(windows))]
+async fn terminate_process_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let process_group = format!("-{}", pid);
+        let _ = Command::new("kill")
+            .args(["-TERM", &process_group])
+            .status()
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let _ = Command::new("kill")
+            .args(["-KILL", &process_group])
+            .status()
+            .await;
+    }
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+}
+
+async fn run_captured_process(
+    command: &mut Command,
+    timeout_secs: u64,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    output_tx: Option<mpsc::UnboundedSender<ExecutionChunk>>,
+) -> Result<CapturedProcessOutput, String> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_process(command);
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Failed to start process: {}", e))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture process stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture process stderr".to_string())?;
+    let output_budget = Arc::new(ProcessOutputBudget::new(PROCESS_OUTPUT_LIMIT_BYTES));
+    let stdout_task =
+        spawn_process_reader(stdout, "stdout", output_tx.clone(), output_budget.clone());
+    let stderr_task = spawn_process_reader(stderr, "stderr", output_tx, output_budget);
+
+    enum Completion {
+        Exited(std::io::Result<ExitStatus>),
+        TimedOut,
+        Cancelled,
+    }
+
+    let completion = {
+        let wait = child.wait();
+        tokio::pin!(wait);
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs.max(1)));
+        tokio::pin!(timeout);
+        if let Some(mut receiver) = cancel_rx {
+            tokio::select! {
+                status = &mut wait => Completion::Exited(status),
+                _ = &mut timeout => Completion::TimedOut,
+                _ = wait_for_cancel(&mut receiver) => Completion::Cancelled,
+            }
+        } else {
+            tokio::select! {
+                status = &mut wait => Completion::Exited(status),
+                _ = &mut timeout => Completion::TimedOut,
+            }
+        }
+    };
+
+    let status = match completion {
+        Completion::Exited(status) => {
+            status.map_err(|e| format!("Failed to wait for process: {}", e))?
+        }
+        Completion::TimedOut => {
+            terminate_process_tree(&mut child).await;
+            let _ = tokio::join!(
+                finish_process_reader(stdout_task, PROCESS_READER_SHUTDOWN_TIMEOUT, false),
+                finish_process_reader(stderr_task, PROCESS_READER_SHUTDOWN_TIMEOUT, false),
+            );
+            return Err(format!("Process timed out after {}s", timeout_secs.max(1)));
+        }
+        Completion::Cancelled => {
+            terminate_process_tree(&mut child).await;
+            let _ = tokio::join!(
+                finish_process_reader(stdout_task, PROCESS_READER_SHUTDOWN_TIMEOUT, false),
+                finish_process_reader(stderr_task, PROCESS_READER_SHUTDOWN_TIMEOUT, false),
+            );
+            return Err(TOOL_CANCELLED_ERROR.to_string());
+        }
+    };
+
+    let (stdout, stderr) = tokio::join!(
+        finish_process_reader(stdout_task, PROCESS_READER_SHUTDOWN_TIMEOUT, true),
+        finish_process_reader(stderr_task, PROCESS_READER_SHUTDOWN_TIMEOUT, true),
+    );
+    Ok(CapturedProcessOutput {
+        status,
+        stdout: stdout?,
+        stderr: stderr?,
+    })
+}
+
 async fn run_execute_command(
     command: &str,
     work_dir: &str,
     timeout_secs: u64,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    output_tx: Option<mpsc::UnboundedSender<ExecutionChunk>>,
 ) -> Result<String, String> {
     // Prepend UTF-8 encoding setup to avoid garbled Chinese output
     let full_command = format!(
@@ -315,30 +714,14 @@ async fn run_execute_command(
         command
     );
 
+    let workspace = workspace::ensure_workspace_dir(work_dir, false)?;
     let mut cmd = Command::new("powershell");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", &full_command]);
+    cmd.current_dir(workspace);
 
-    // Only set current_dir if work_dir is valid and exists
-    if !work_dir.is_empty() {
-        let path = Path::new(work_dir);
-        if path.exists() {
-            cmd.current_dir(work_dir);
-        }
-    }
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        cmd.creation_flags(CREATE_NO_WINDOW).output(),
-    )
-    .await
-    .map_err(|_| format!("Command timed out after {}s", timeout_secs))?
-    .map_err(|e| format!("Failed to execute command: {}", e))?;
-
-    // Try UTF-8 decoding first, fallback to lossy conversion
-    let stdout = String::from_utf8(result.stdout)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
-    let stderr = String::from_utf8(result.stderr)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+    let result = run_captured_process(&mut cmd, timeout_secs, cancel_rx, output_tx).await?;
+    let stdout = result.stdout;
+    let stderr = result.stderr;
 
     let exit_code = result
         .status
@@ -768,13 +1151,20 @@ async fn run_list_dir(path: &str, work_dir: &str) -> Result<String, String> {
     }
 }
 
-async fn run_python(code: &str, work_dir: &str, timeout_secs: u64) -> Result<String, String> {
+async fn run_python(
+    code: &str,
+    work_dir: &str,
+    timeout_secs: u64,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    output_tx: Option<mpsc::UnboundedSender<ExecutionChunk>>,
+) -> Result<String, String> {
+    let workspace = workspace::ensure_workspace_dir(work_dir, false)?;
     // Check Python availability
-    let python_check = Command::new("python")
-        .args(["--version"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .await;
+    let mut python_check_command = Command::new("python");
+    python_check_command.args(["--version"]);
+    #[cfg(windows)]
+    python_check_command.creation_flags(CREATE_NO_WINDOW);
+    let python_check = python_check_command.output().await;
 
     if python_check.is_err() {
         return Err(
@@ -793,19 +1183,9 @@ async fn run_python(code: &str, work_dir: &str, timeout_secs: u64) -> Result<Str
 
     let mut cmd = Command::new("python");
     cmd.arg(&file_path);
+    cmd.current_dir(workspace);
 
-    if !work_dir.is_empty() {
-        let path = Path::new(work_dir);
-        if path.exists() {
-            cmd.current_dir(work_dir);
-        }
-    }
-
-    let execution_result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        cmd.creation_flags(CREATE_NO_WINDOW).output(),
-    )
-    .await;
+    let execution_result = run_captured_process(&mut cmd, timeout_secs, cancel_rx, output_tx).await;
 
     // Always cleanup temp file
     let cleanup_result = tokio::fs::remove_file(&file_path).await;
@@ -816,18 +1196,16 @@ async fn run_python(code: &str, work_dir: &str, timeout_secs: u64) -> Result<Str
         );
     }
 
-    let result = execution_result
-        .map_err(|_| format!("Python execution timed out after {}s", timeout_secs))?
-        .map_err(|e| format!("Failed to run python: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&result.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+    let result = execution_result?;
+    let stdout = result.stdout;
+    let stderr = result.stderr;
 
     if result.status.success() {
-        if stdout.is_empty() {
-            Ok("(no output)".to_string())
-        } else {
-            Ok(stdout)
+        match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => Ok("(no output)".to_string()),
+            (false, true) => Ok(stdout),
+            (true, false) => Ok(format!("Stderr:\n{}", stderr)),
+            (false, false) => Ok(format!("Stdout:\n{}\nStderr:\n{}", stdout, stderr)),
         }
     } else {
         Ok(format!(
@@ -1176,9 +1554,7 @@ fn parse_duckduckgo_results(html: &str) -> Result<String, String> {
         } else if raw_link.contains("duckduckgo.com/y.js")
             || raw_link.contains("duckduckgo.com/d.js")
             || raw_link.contains("duckduckgo.com/l/")
-        {
-            String::new()
-        } else if raw_link.starts_with("/")
+            || raw_link.starts_with("/")
             || (raw_link.contains("duckduckgo.com") && !raw_link.starts_with("http"))
         {
             String::new()
@@ -1221,57 +1597,10 @@ fn parse_duckduckgo_results(html: &str) -> Result<String, String> {
 /// the work_dir boundary. This prevents both traversal attacks and absolute-path
 /// sandbox escapes (e.g. reading `C:\Users\...\.ssh\id_rsa`).
 fn resolve_path(path: &str, work_dir: &str) -> Result<String, String> {
-    let p = Path::new(path);
-
-    if work_dir.is_empty() {
-        let normalized = normalize_path(p);
-        if has_escaping_parent(p) {
-            return Err(format!(
-                "Path traversal detected: '{}' escapes to parent directories without a work directory constraint",
-                path
-            ));
-        }
-        let resolved = if p.is_absolute() {
-            match std::fs::canonicalize(p) {
-                Ok(c) => c.to_string_lossy().to_string(),
-                Err(_) => normalized.to_string_lossy().to_string(),
-            }
-        } else {
-            normalized.to_string_lossy().to_string()
-        };
-        check_blocked_path(&resolved)?;
-        return Ok(resolved);
-    }
-
-    let resolved = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        PathBuf::from(work_dir).join(p)
-    };
-
-    let normalized = normalize_path(&resolved);
-    let work_dir_normalized = normalize_path(&PathBuf::from(work_dir));
-
-    let canonical_resolved = match std::fs::canonicalize(&normalized) {
-        Ok(c) => c,
-        Err(_) => normalized.clone(),
-    };
-
-    let canonical_workdir = match std::fs::canonicalize(&work_dir_normalized) {
-        Ok(c) => c,
-        Err(_) => work_dir_normalized.clone(),
-    };
-
-    if !canonical_resolved.starts_with(&canonical_workdir) {
-        return Err(format!(
-            "Access denied: path '{}' resolves outside of work directory '{}'",
-            path, work_dir
-        ));
-    }
-
-    check_blocked_path(&canonical_resolved.to_string_lossy())?;
-
-    Ok(canonical_resolved.to_string_lossy().to_string())
+    let resolved = workspace::resolve_within_workspace(path, work_dir)?;
+    let resolved = resolved.to_string_lossy().to_string();
+    check_blocked_path(&resolved)?;
+    Ok(resolved)
 }
 
 fn check_blocked_path(resolved: &str) -> Result<(), String> {
@@ -1287,65 +1616,13 @@ fn check_blocked_path(resolved: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Check if a path contains `..` components that would escape above the root.
-fn has_escaping_parent(path: &Path) -> bool {
-    let mut depth = 0;
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                if depth > 0 {
-                    depth -= 1;
-                } else {
-                    return true; // Escapes above root
-                }
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                depth = 0;
-            }
-            _ => {
-                depth += 1;
-            }
-        }
-    }
-    false
-}
-
-/// Normalize a path without requiring it to exist on disk.
-/// Resolves `.` and `..` components.
-/// Returns the normalized path; if `..` would escape above root, those components
-/// are preserved (not silently dropped) so the caller can detect the issue.
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut components: Vec<std::path::Component> = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                // Only pop if there's a normal component to go back from
-                if let Some(last) = components.last() {
-                    match last {
-                        std::path::Component::Normal(_) => {
-                            components.pop();
-                        }
-                        // Don't pop prefixes or root dirs
-                        _ => components.push(component),
-                    }
-                } else {
-                    // No previous component — preserve the `..` so callers can detect escape
-                    components.push(component);
-                }
-            }
-            c => components.push(c),
-        }
-    }
-    components.iter().collect()
-}
-
 /// Check if Python is available on the system
 pub async fn check_python_available() -> bool {
-    Command::new("python")
-        .args(["--version"])
-        .creation_flags(CREATE_NO_WINDOW)
+    let mut command = Command::new("python");
+    command.args(["--version"]);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
         .output()
         .await
         .map(|o| o.status.success())
@@ -1354,7 +1631,13 @@ pub async fn check_python_available() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{glob_to_regex, is_safe_url};
+    use super::{
+        capture_process_output, clone_captured_output, finish_process_reader, glob_to_regex,
+        is_safe_url, spawn_process_reader, ProcessOutputBudget, PROCESS_OUTPUT_TRUNCATION_NOTICE,
+    };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn safe_url_allows_public_http_urls() {
@@ -1397,5 +1680,77 @@ mod tests {
         let re = glob_to_regex("*.rs").expect("valid glob");
         assert!(re.is_match("tools.rs"));
         assert!(!re.is_match("src/tools.rs"));
+    }
+
+    #[test]
+    fn process_output_budget_caps_capture_and_streaming_once() {
+        let budget = Arc::new(ProcessOutputBudget::new(10));
+        let stdout = Arc::new(Mutex::new(String::new()));
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let output_tx = Some(sender);
+
+        capture_process_output("stdout", "abcdef", &output_tx, &stdout, &budget);
+        capture_process_output("stderr", "ghijklmnop", &output_tx, &stderr, &budget);
+        capture_process_output("stdout", "ignored", &output_tx, &stdout, &budget);
+        drop(output_tx);
+
+        let stdout = clone_captured_output(&stdout);
+        let stderr = clone_captured_output(&stderr);
+        assert_eq!(stdout, "abcdef");
+        assert_eq!(stderr, format!("ghij{}", PROCESS_OUTPUT_TRUNCATION_NOTICE));
+
+        let mut streamed = String::new();
+        while let Ok(chunk) = receiver.try_recv() {
+            streamed.push_str(&chunk.content);
+        }
+        assert_eq!(
+            streamed,
+            format!("abcdefghij{}", PROCESS_OUTPUT_TRUNCATION_NOTICE)
+        );
+        assert_eq!(
+            streamed.matches(PROCESS_OUTPUT_TRUNCATION_NOTICE).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn process_output_cap_preserves_utf8_boundaries() {
+        let budget = Arc::new(ProcessOutputBudget::new(5));
+        let output = Arc::new(Mutex::new(String::new()));
+
+        capture_process_output("stdout", "中文", &None, &output, &budget);
+
+        assert_eq!(
+            clone_captured_output(&output),
+            format!("中{}", PROCESS_OUTPUT_TRUNCATION_NOTICE)
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_shutdown_aborts_an_inherited_open_pipe() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let budget = Arc::new(ProcessOutputBudget::new(1024));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_process_reader(reader, "stdout", Some(sender), budget);
+
+        writer.write_all(b"hello").await.expect("write test output");
+        let first_chunk = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("reader should emit promptly")
+            .expect("stream should remain open");
+        assert_eq!(first_chunk.content, "hello");
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(1),
+            finish_process_reader(task, Duration::from_millis(20), true),
+        )
+        .await
+        .expect("reader shutdown must be bounded")
+        .expect("reader output should remain available");
+
+        assert!(output.starts_with("hello"));
+        assert!(output.contains("descendant process may still have it open"));
+        drop(writer);
     }
 }

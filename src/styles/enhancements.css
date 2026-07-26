@@ -6,8 +6,8 @@
   padding: var(--space-2) var(--space-3);
   background: var(--bg-app);
   border: 1px solid var(--border-medium);
-  border-radius: var(--radius-md);
-  transition: border-color 0.2s;
+  border-radius: var(--radius-xl);
+  transition: border-color var(--transition-normal);
 }
 
 .search-bar:focus-within {
@@ -19,7 +19,7 @@
   border: none;
   background: none;
   outline: none;
-  font-size: 13px;
+  font-size: var(--font-ui);
   color: var(--text-primary);
 }
 
@@ -35,8 +35,8 @@
   padding: 2px;
   display: flex;
   align-items: center;
-  border-radius: var(--radius-sm);
-  transition: background 0.2s;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-normal);
 }
 
 .search-bar .clear-btn:hover {
@@ -49,7 +49,7 @@
   border-collapse: collapse;
   width: 100%;
   margin: var(--space-3) 0;
-  font-size: 13px;
+  font-size: var(--font-ui);
 }
 
 .chat-bubble-content th {
@@ -81,11 +81,11 @@
   background: var(--accent);
   color: var(--text-inverse);
   border: none;
-  border-radius: var(--radius-md);
-  font-size: 14px;
+  border-radius: var(--radius-xl);
+  font-size: var(--font-body);
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background var(--transition-normal);
 }
 
 .error-screen button:hover {
@@ -105,10 +105,10 @@
   padding: var(--space-3);
   background: var(--bg-app);
   border: 1px solid var(--border-medium);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-xl);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--font-body);
   resize: vertical;
 }
 
@@ -129,10 +129,10 @@
   gap: var(--space-1);
   padding: var(--space-2) var(--space-3);
   border: none;
-  border-radius: var(--radius-md);
-  font-size: 13px;
+  border-radius: var(--radius-xl);
+  font-size: var(--font-ui);
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background var(--transition-normal);
 }
 
 .btn-primary {
@@ -155,7 +155,7 @@
 
 /* Token Counter */
 .token-counter {
-  font-size: 12px;
+  font-size: var(--font-small);
   color: var(--text-tertiary);
   padding: var(--space-1) var(--space-2);
 }
@@ -171,11 +171,11 @@
   border: none;
   color: var(--text-secondary);
   padding: var(--space-2);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
   display: flex;
   align-items: center;
-  transition: background 0.2s;
+  transition: background var(--transition-normal);
 }
 
 .session-actions button:hover {
@@ -187,16 +187,16 @@
 .json-output pre {
   background: var(--bg-elevated);
   padding: var(--space-3);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-xl);
   overflow-x: auto;
-  font-size: 12px;
+  font-size: var(--font-small);
   line-height: 1.5;
 }
 
 .table-output table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--font-small);
 }
 
 .table-output td {
@@ -207,7 +207,7 @@
 .plain-output pre {
   white-space: pre-wrap;
   word-wrap: break-word;
-  font-size: 13px;
+  font-size: var(--font-ui);
   line-height: 1.5;
 }
 
@@ -219,7 +219,7 @@
   right: 0;
   background: var(--bg-elevated);
   border: 1px solid var(--border-medium);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
   margin-bottom: var(--space-2);
   max-height: 200px;
@@ -228,9 +228,18 @@
 }
 
 .command-item {
+  display: block;
+  width: 100%;
   padding: var(--space-3);
+  background: transparent;
+  color: inherit;
+  border-top: none;
+  border-right: none;
+  border-left: none;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background var(--transition-normal);
   border-bottom: 1px solid var(--border-light);
 }
 
@@ -247,12 +256,12 @@
   font-weight: 600;
   color: var(--accent);
   display: block;
-  font-size: 13px;
+  font-size: var(--font-ui);
   margin-bottom: var(--space-1);
 }
 
 .command-desc {
-  font-size: 12px;
+  font-size: var(--font-small);
   color: var(--text-secondary);
 }
 
@@ -264,10 +273,10 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border-light);
   padding: var(--space-1);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.2s;
+  transition: opacity var(--transition-normal);
   display: flex;
   align-items: center;
   color: var(--text-secondary);
@@ -287,7 +296,7 @@
   border: 1px solid var(--border-medium);
   background: var(--bg-app);
   padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: inherit;
   font-weight: inherit;
   color: var(--text-primary);

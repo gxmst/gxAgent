@@ -37,5 +37,14 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Test frontend
+        run: npm test
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Test Rust backend
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
       - name: Check Rust backend
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets

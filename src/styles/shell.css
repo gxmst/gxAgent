@@ -1,0 +1,680 @@
+/* ========================================================
+   App shell — layout, scrollbars, panel headers, buttons, inputs, sidebar.
+   ======================================================== */
+
+/* ========================================================
+   Layout
+   ======================================================== */
+
+.app-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 240px;
+  min-width: 180px;
+  background-color: var(--bg-sidebar);
+  border-right: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.workspace-container {
+  display: flex;
+  flex-grow: 1;
+  height: 100%;
+  overflow: hidden;
+}
+
+.chat-panel {
+  flex: 1;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
+  background-color: var(--bg-main);
+}
+
+/* Draggable divider */
+.resize-divider {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 5;
+  transition: background var(--transition-fast);
+}
+.resize-divider:hover,
+.resize-divider.dragging {
+  background: var(--accent);
+}
+
+.resize-divider:focus-visible {
+  outline: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+.canvas-panel {
+  width: 360px;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: var(--bg-sidebar);
+  border-left: 1px solid var(--border-default);
+}
+
+.canvas-panel.collapsed {
+  display: none;
+}
+
+/* Toggle button for right panel */
+.panel-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.panel-toggle-btn:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-card);
+}
+.panel-toggle-btn.active {
+  color: var(--accent);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-card);
+}
+
+/* ========================================================
+   Scrollbars
+   ======================================================== */
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+
+/* ========================================================
+   Panel Header — Borderless, minimal
+   ======================================================== */
+
+.panel-header {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-default);
+  background-color: var(--bg-main);
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.panel-header-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.panel-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.panel-status-cluster,
+.panel-action-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.panel-action-cluster {
+  padding-left: 4px;
+  border-left: 1px solid var(--border-default);
+}
+
+.panel-title {
+  font-size: var(--font-ui);
+  font-weight: 600;
+  letter-spacing: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-title .accent-icon {
+  color: var(--text-secondary);
+}
+
+/* ========================================================
+   Buttons
+   ======================================================== */
+
+button.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-weight: 500;
+  font-size: var(--font-small);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  outline: none;
+  box-shadow: var(--shadow-card);
+}
+
+button.btn:hover:not(:disabled) {
+  background: var(--bg-card-hover);
+  box-shadow: var(--shadow-soft);
+}
+
+button.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-inverse);
+}
+
+button.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+button.btn-icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--radius-md);
+}
+
+button:disabled {
+  cursor: not-allowed !important;
+  opacity: 0.5;
+}
+
+button.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.btn-approve {
+  background: var(--success-subtle);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+button.btn-approve:hover:not(:disabled) {
+  background: var(--success-border);
+}
+
+button.btn-reject {
+  background: var(--error-subtle);
+  border-color: var(--error-border);
+  color: var(--error);
+}
+button.btn-reject:hover:not(:disabled) {
+  background: var(--error-border);
+}
+
+/* ========================================================
+   Inputs
+   ======================================================== */
+
+.input-text {
+  width: 100%;
+  padding: 7px 11px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  transition: all var(--transition-fast);
+  outline: none;
+  font-family: inherit;
+  font-size: var(--font-ui);
+}
+
+.input-text:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+/* Give masked values enough rhythm to scan without spreading placeholders. */
+.input-text.is-masked {
+  letter-spacing: 0.1em;
+  font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.input-text.is-masked::placeholder {
+  letter-spacing: normal;
+  font-family: inherit;
+}
+
+/* Secret input with a reveal (eye) toggle on the right. */
+.secret-input {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.secret-input .input-text {
+  padding-right: 36px;
+}
+
+.secret-input-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.secret-input-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+
+.secret-input-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+select.input-text {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e6e6c' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+
+[data-mode="dark"] select.input-text option {
+  background: #1a1a2e;
+  color: #fff;
+}
+
+/* ========================================================
+   Sidebar — Pill navigation + floating cards
+   ======================================================== */
+
+.sidebar-nav-pills {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px;
+  height: 48px;
+  align-items: center;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-default);
+  box-sizing: border-box;
+  flex: 0 0 auto;
+}
+
+.sidebar-pill {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--font-caption);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-align: center;
+}
+
+.sidebar-pill.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-card);
+}
+
+.sidebar-pill:hover:not(.active) {
+  background: var(--bg-card-hover);
+}
+
+.history-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: scroll;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.history-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.history-list::-webkit-scrollbar-track {
+  background: var(--bg-card);
+  border-radius: var(--radius-full);
+}
+
+.history-list::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius-full);
+}
+
+.search-empty-hint {
+  text-align: center;
+  padding: 16px 8px;
+  color: var(--text-tertiary);
+  font-size: var(--font-caption);
+  opacity: 0.7;
+}
+
+.history-item {
+  position: relative;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--text-secondary);
+  transition: background var(--transition-fast), color var(--transition-fast),
+    box-shadow var(--transition-fast), transform var(--transition-fast), border-color var(--transition-fast);
+  font-size: var(--font-small);
+  flex: 0 0 auto;
+  min-height: 50px;
+  box-sizing: border-box;
+}
+
+/* Hairline separator between adjacent conversations. Inset from the edges so
+   it reads as a divider, not a full-width rule. Hidden under the raised card
+   whenever an item (or the one above it) is hovered/active. */
+.history-item::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -1px;
+  height: 1px;
+  background: var(--border-light);
+  transition: opacity var(--transition-fast);
+}
+
+.history-item:last-child::after,
+.history-item:hover::after,
+.history-item.active::after,
+.history-item:has(+ .history-item:hover)::after,
+.history-item:has(+ .history-item.active)::after {
+  opacity: 0;
+}
+
+.history-item.pinned {
+  padding-left: 14px;
+}
+
+.history-item.pinned::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-subtle);
+}
+
+.history-item.pinned .history-mode-tag {
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.history-item:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-card);
+  transform: translateX(2px);
+}
+
+.history-item.active {
+  background: var(--bg-card);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-soft);
+}
+
+/* Accent rail on the active conversation — a clearer "you are here" marker
+   than the card alone. Reuses the pinned rail geometry. */
+.history-item.active::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+
+.history-item.active.pinned::before {
+  box-shadow: 0 0 0 1px var(--accent-subtle);
+}
+
+.history-delete-btn {
+  padding: 3px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+  display: flex;
+  align-items: center;
+}
+.history-delete-btn:hover {
+  color: var(--error);
+  background: var(--error-subtle);
+}
+
+.sidebar-footer {
+  padding: 10px;
+  border-top: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.sidebar-tools-label {
+  font-size: var(--font-caption);
+  color: var(--text-tertiary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 2px;
+}
+
+.sidebar-tools-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+  font-size: var(--font-caption);
+  color: var(--text-tertiary);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sidebar-tools-header span:last-child {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.sidebar-tools-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+}
+
+.sidebar-tool-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 24px;
+}
+
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--font-caption);
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tool-chip.active {
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-color: var(--accent-border);
+}
+
+.tool-chip:hover {
+  color: var(--text-primary);
+  background: var(--bg-card);
+}
+
+.sidebar-tools-empty {
+  font-size: var(--font-caption);
+  color: var(--text-tertiary);
+  padding: 3px 2px;
+}
+
+.sidebar-tools-summary {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto 14px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--font-caption);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.sidebar-tools-summary:hover,
+.sidebar-tools-summary:focus-visible {
+  border-color: var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.sidebar-tools-summary-icon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.sidebar-tools-summary > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-tools-summary strong {
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--font-caption);
+  line-height: 1.35;
+  text-align: center;
+}
+
+.tool-toggle {
+  padding: 4px 5px;
+  font-size: var(--font-caption);
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-align: center;
+}
+
+.tool-toggle.active {
+  background: var(--bg-card);
+  color: var(--accent);
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-card);
+}
+
+.tool-toggle:hover {
+  background: var(--bg-card);
+}
