@@ -1,14 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Settings2,
-  Terminal as TerminalIcon,
-  MessageSquare,
-  Pin,
-  Sun,
-  Moon,
-  PanelRightOpen,
-  PanelRightClose,
   BarChart3,
 } from "lucide-react";
 // Order matters: tokens first, a11y last (it clamps/overrides earlier rules).
@@ -40,6 +32,7 @@ import { t } from "./i18n";
 import { fallbackSessionTitle } from "./utils/sessionTitle";
 import { ChatMessageList } from "./components/chat/ChatMessageList";
 import { Composer } from "./components/chat/Composer";
+import { ChatHeader } from "./components/chat/ChatHeader";
 import {
   OnboardingWizard,
   type ConnectionCheck,
@@ -85,7 +78,6 @@ import {
   normalizeSessions,
   TOOL_NAMES,
   FONT_OPTIONS,
-  THEME_OPTIONS,
   themeMode,
   modelCatalogForConfig,
   modelCatalogKey,
@@ -166,7 +158,6 @@ function App() {
   // Global hotkeys
   useGlobalHotkeys(() => createNewSession());
 
-  const [editingSessionTitle, setEditingSessionTitle] = useState(false);
   const { menu, handleContextMenu, closeMenu } = useContextMenu();
 
   // Auto-save drafts per session — debounced so each keystroke does not hit localStorage.
@@ -224,7 +215,6 @@ function App() {
   const [diffView, setDiffView] = useState(false);
   const [rolePresetsOpen, setRolePresetsOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const [customPresets, setCustomPresets] = useState<RolePreset[]>(() => {
@@ -616,16 +606,6 @@ function App() {
     window.addEventListener("message", handleIframeMessage);
     return () => window.removeEventListener("message", handleIframeMessage);
   }, []);
-
-  // Header quick-toggle: flip between light and dark. If the active theme is a
-  // custom dark theme, this jumps to the plain light theme and vice versa.
-  const toggleTheme = () => {
-    setConfig((prev) => {
-      const current = THEME_OPTIONS.find((th) => th.value === prev.theme);
-      const isDark = current?.mode === "dark";
-      return { ...prev, theme: isDark ? "light" : "dark" };
-    });
-  };
 
   // ==========================================
   // Init logs with language
@@ -2697,86 +2677,19 @@ function App() {
       <div className="workspace-container">
         {/* LEFT: Chat */}
         <section className="chat-panel">
-          <header className="panel-header">
-            <div className="panel-heading">
-              {editingSessionTitle ? (
-                <input
-                  className="session-title-editable"
-                  value={currentSession.title}
-                  onChange={(e) => {
-                    setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, title: e.target.value } : s));
-                  }}
-                  onBlur={() => setEditingSessionTitle(false)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') setEditingSessionTitle(false);
-                    if (e.key === 'Escape') setEditingSessionTitle(false);
-                  }}
-                  autoFocus
-                />
-              ) : (
-                <span
-                  className="panel-title"
-                  style={{ fontSize: "var(--font-ui)", cursor: "pointer" }}
-                  onDoubleClick={() => setEditingSessionTitle(true)}
-                  title="双击编辑标题"
-                >
-                  {currentSession.title || t("session.new", lang)}
-                </span>
-              )}
-              <div className="panel-subtitle">
-                {effectiveWorkDir || "."}
-                {sessionSaveStatus === "saving" && ` · ${t("ui.saving", lang)}`}
-                {sessionSaveStatus === "error" && ` · ${t("ui.save-failed", lang)}`}
-              </div>
-            </div>
-            <div className="panel-header-controls">
-              <div className="panel-status-cluster">
-                <span className={`mode-indicator ${currentMode}`}>
-                  {currentMode === "chat" ? <MessageSquare size={11} /> : <TerminalIcon size={11} />}
-                  {currentMode === "chat" ? t("mode.chat", lang) : t("mode.code", lang)}
-                </span>
-              </div>
-              <div className="panel-action-cluster">
-                <button
-                  className="panel-toggle-btn"
-                  onClick={toggleTheme}
-                  title="Toggle theme"
-                  aria-label={t("ui.toggle-theme", lang)}
-                >
-                  {config.theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
-                </button>
-                <button
-                  ref={sessionSettingsToggleRef}
-                  className="panel-toggle-btn"
-                  onClick={() => setSessionSettingsOpen(!sessionSettingsOpen)}
-                  title={t("session.settings", lang)}
-                  aria-haspopup="dialog"
-                  aria-expanded={sessionSettingsOpen}
-                >
-                  <Settings2 size={14} />
-                </button>
-                <button
-                  className="panel-toggle-btn"
-                  onClick={() => setRightPanelOpen(!rightPanelOpen)}
-                  title={rightPanelOpen ? "Close panel" : "Open panel"}
-                  aria-expanded={rightPanelOpen}
-                >
-                  {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-                </button>
-                <button
-                  className={`panel-toggle-btn ${alwaysOnTop ? "active" : ""}`}
-                  aria-pressed={alwaysOnTop}
-                  onClick={async () => {
-                    const result = await invoke<boolean>("toggle_always_on_top");
-                    setAlwaysOnTop(result);
-                  }}
-                  title={alwaysOnTop ? t("window.unpin", lang) : t("window.pin", lang)}
-                >
-                  <Pin size={14} />
-                </button>
-              </div>
-            </div>
-          </header>
+          <ChatHeader
+            lang={lang}
+            config={config}
+            setConfig={setConfig}
+            currentSession={currentSession}
+            effectiveWorkDir={effectiveWorkDir}
+            sessionSaveStatus={sessionSaveStatus}
+            sessionSettingsOpen={sessionSettingsOpen}
+            setSessionSettingsOpen={setSessionSettingsOpen}
+            sessionSettingsToggleRef={sessionSettingsToggleRef}
+            rightPanelOpen={rightPanelOpen}
+            setRightPanelOpen={setRightPanelOpen}
+          />
 
           {/* Session Settings Panel */}
           {sessionSettingsOpen && (
