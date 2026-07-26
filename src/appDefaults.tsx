@@ -477,6 +477,9 @@ export function normalizeSessions(raw: unknown): ChatSession[] {
         ...item,
         id,
         title: typeof item.title === "string" ? item.title : "",
+        // Optional flags default to absent so legacy sessions stay untouched.
+        pinned: item.pinned === true ? true : undefined,
+        archived: item.archived === true ? true : undefined,
         messages,
         sessionConfig: normalizeSessionConfig(item.sessionConfig),
         sidebarOrder,

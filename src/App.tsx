@@ -353,7 +353,7 @@ function App() {
   const visibleSessions = useMemo(() => {
     const query = debouncedSearch.trim().toLowerCase();
     return sessions
-      .filter((session) => (session.sessionConfig.mode || "chat") === sidebarNav)
+      .filter((session) => (session.sessionConfig.mode || "chat") === sidebarNav && !session.archived)
       .filter((session) => {
         if (!query) return true;
         if ((session.title || "").toLowerCase().includes(query)) return true;
@@ -363,6 +363,9 @@ function App() {
       })
       .sort(compareSidebarSessions);
   }, [debouncedSearch, sessions, sidebarNav]);
+  const archivedSessions = useMemo(() => sessions
+    .filter((session) => (session.sessionConfig.mode || "chat") === sidebarNav && session.archived)
+    .sort(compareSidebarSessions), [sessions, sidebarNav]);
   const tabbableSessionId = visibleSessions.some((session) => session.id === currentSessionId)
     ? currentSessionId
     : visibleSessions[0]?.id;
@@ -933,6 +936,7 @@ function App() {
     switchSidebarMode,
     replaceAllSessions,
     deleteSession,
+    setSessionArchived,
   } = useSessionLifecycle({
     lang,
     sessionStorageReady,
@@ -1129,6 +1133,7 @@ function App() {
         config={config}
         sessions={sessions}
         visibleSessions={visibleSessions}
+        archivedSessions={archivedSessions}
         currentSessionId={currentSessionId}
         tabbableSessionId={tabbableSessionId}
         sidebarNav={sidebarNav}
@@ -1150,6 +1155,7 @@ function App() {
         setCurrentSessionId={setCurrentSessionId}
         setSessions={setSessions}
         deleteSession={deleteSession}
+        setSessionArchived={setSessionArchived}
         moveSessionInList={moveSessionInList}
         setToolStatsDialog={setToolStatsDialog}
         setSettingsTab={setSettingsTab}

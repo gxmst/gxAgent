@@ -120,7 +120,7 @@ export function useSessionLifecycle({
     const target = sessions.find((session) => (
       session.id === rememberedSessionId && session.sessionConfig.mode === mode
     )) || sessions
-      .filter((session) => session.sessionConfig.mode === mode)
+      .filter((session) => session.sessionConfig.mode === mode && !session.archived)
       .sort(compareSidebarSessions)[0];
     if (target) {
       setCurrentSessionId(target.id);
@@ -217,6 +217,35 @@ export function useSessionLifecycle({
     setCurrentSessionId(nextId);
   };
 
+  const setSessionArchived = (id: string, archived: boolean) => {
+    if (!sessionStorageReady) return;
+    const target = sessions.find((session) => session.id === id);
+    if (!target || Boolean(target.archived) === archived) return;
+
+    // Archiving the current session leaves a hole in the visible list; pick
+    // the next visible same-mode session, mirroring deleteSession's fallback.
+    if (archived && currentSessionId === id) {
+      const targetMode = target.sessionConfig.mode || sidebarNav;
+      const orderedModeSessions = sessions
+        .filter((session) => session.sessionConfig.mode === targetMode && !session.archived)
+        .sort(compareSidebarSessions);
+      const archivedVisibleIndex = orderedModeSessions.findIndex((session) => session.id === id);
+      const remainingInMode = orderedModeSessions.filter((session) => session.id !== id);
+      const fallbackSession = remainingInMode[Math.min(
+        Math.max(archivedVisibleIndex, 0),
+        Math.max(remainingInMode.length - 1, 0),
+      )] || sessions.find((session) => session.id !== id && !session.archived);
+      if (fallbackSession) {
+        setCurrentSessionId(fallbackSession.id);
+        setSidebarNav(fallbackSession.sessionConfig.mode || "chat");
+      }
+    }
+
+    setSessions((previous) => previous.map((session) => session.id === id
+      ? { ...session, archived: archived ? true : undefined, updatedAt: Date.now() }
+      : session));
+  };
+
   const deleteSession = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!sessionStorageReady) return;
@@ -236,7 +265,7 @@ export function useSessionLifecycle({
     const remaining = sessions.filter((s) => s.id !== id);
     const targetMode = target?.sessionConfig.mode || sidebarNav;
     const orderedModeSessions = sessions
-      .filter((session) => session.sessionConfig.mode === targetMode)
+      .filter((session) => session.sessionConfig.mode === targetMode && !session.archived)
       .sort(compareSidebarSessions);
     const deletedVisibleIndex = orderedModeSessions.findIndex((session) => session.id === id);
     const remainingInMode = orderedModeSessions.filter((session) => session.id !== id);
@@ -312,5 +341,6 @@ export function useSessionLifecycle({
     switchSidebarMode,
     replaceAllSessions,
     deleteSession,
+    setSessionArchived,
   };
 }

@@ -129,6 +129,9 @@ export interface ChatSession {
   messages: Message[];
   sessionConfig: SessionConfig;
   pinned?: boolean;
+  /** Archived sessions are hidden from the normal sidebar list and live in a
+   *  collapsed "Archived" section instead. Optional for backward compat. */
+  archived?: boolean;
   sidebarOrder: number;
   createdAt: number;
   updatedAt: number;

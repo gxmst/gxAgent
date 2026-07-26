@@ -6,8 +6,10 @@
  * Extracted verbatim from App.tsx; state stays in App and flows in
  * through props.
  */
-import type { RefObject } from "react";
+import { useState, type RefObject } from "react";
 import {
+  Archive,
+  ArchiveRestore,
   BarChart3,
   ChevronLeft,
   ChevronRight,
@@ -46,6 +48,7 @@ export interface SidebarProps {
   config: AppConfig;
   sessions: ChatSession[];
   visibleSessions: ChatSession[];
+  archivedSessions: ChatSession[];
   currentSessionId: string;
   tabbableSessionId: string | null;
   sidebarNav: SessionConfig["mode"];
@@ -67,6 +70,7 @@ export interface SidebarProps {
   setCurrentSessionId: (id: string) => void;
   setSessions: React.Dispatch<React.SetStateAction<ChatSession[]>>;
   deleteSession: (id: string, e: React.MouseEvent) => void;
+  setSessionArchived: (id: string, archived: boolean) => void;
   moveSessionInList: (sessionId: string, direction: "up" | "down") => void;
   setToolStatsDialog: React.Dispatch<React.SetStateAction<ToolStatsDialog | null>>;
   setSettingsTab: (tab: "model" | "chat" | "agent" | "search" | "data") => void;
@@ -76,15 +80,17 @@ export interface SidebarProps {
 
 export function Sidebar(props: SidebarProps) {
   const {
-    lang, config, sessions, visibleSessions, currentSessionId,
+    lang, config, sessions, visibleSessions, archivedSessions, currentSessionId,
     tabbableSessionId, sidebarNav, sidebarWidth, sessionSearch,
     setSessionSearch, debouncedSearch, sessionStorageReady, historyListRef,
     runtimeBySession, pendingApprovalsBySession, contextMenu, setContextMenu,
     allPresets: ALL_PRESETS, addLog, getModelDisplayName, switchSidebarMode,
     createNewSession, setCurrentSessionId, setSessions, deleteSession,
-    moveSessionInList, setToolStatsDialog, setSettingsTab, setSettingsOpen,
-    setSessionSettingsOpen,
+    setSessionArchived, moveSessionInList, setToolStatsDialog, setSettingsTab,
+    setSettingsOpen, setSessionSettingsOpen,
   } = props;
+
+  const [archivedOpen, setArchivedOpen] = useState(false);
 
   return (
     <aside className="sidebar" style={{ width: sidebarWidth }}>
@@ -139,7 +145,8 @@ export function Sidebar(props: SidebarProps) {
 
   {/* Session List */}
   <div ref={historyListRef} className="history-list" aria-label={t("ui.conversation-list", lang)}>
-    {visibleSessions.map((s) => {
+    {(() => {
+      const renderSessionRow = (s: ChatSession) => {
         const activePreset = ALL_PRESETS.find(p => p.id === s.sessionConfig.activeRolePresetId);
         const runtime = runtimeBySession[s.id];
         const awaitingApproval = Boolean(pendingApprovalsBySession[s.id]);
@@ -207,13 +214,39 @@ export function Sidebar(props: SidebarProps) {
           {s.pinned ? <Pin size={10} /> : s.sessionConfig.mode === "code" ? <TerminalIcon size={10} /> : <MessageSquare size={10} />}
         </span>
       </div>
+        );
+      };
+
+      return (
+        <>
+          {visibleSessions.map(renderSessionRow)}
+          {visibleSessions.length === 0 && debouncedSearch.trim() && (
+            <div className="search-empty-hint">
+              {t("ui.no-matching-sessions", lang)}
+            </div>
+          )}
+          {archivedSessions.length > 0 && (
+            <div className="archived-section">
+              <button
+                type="button"
+                className={`archived-section-toggle ${archivedOpen ? "open" : ""}`}
+                aria-expanded={archivedOpen}
+                onClick={() => setArchivedOpen((open) => !open)}
+              >
+                <Archive size={11} />
+                <span>{t("ui.archived-count", lang, { count: String(archivedSessions.length) })}</span>
+                <ChevronRight size={11} className="archived-section-chevron" aria-hidden="true" />
+              </button>
+              {archivedOpen && (
+                <div className="archived-section-list">
+                  {archivedSessions.map(renderSessionRow)}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       );
-    })}
-    {visibleSessions.length === 0 && debouncedSearch.trim() && (
-      <div className="search-empty-hint">
-        {t("ui.no-matching-sessions", lang)}
-      </div>
-    )}
+    })()}
   </div>
 
   {/* Context Menu */}
@@ -243,6 +276,14 @@ export function Sidebar(props: SidebarProps) {
               setContextMenu(null);
             }}>
               <Pin size={12} /> {targetSession?.pinned ? t("context.unpin", lang) : t("context.pin", lang)}
+            </button>
+            <button className="context-menu-item" onClick={() => {
+              setSessionArchived(contextMenu.sessionId, !targetSession?.archived);
+              setContextMenu(null);
+            }}>
+              {targetSession?.archived
+                ? <><ArchiveRestore size={12} /> {t("context.unarchive", lang)}</>
+                : <><Archive size={12} /> {t("context.archive", lang)}</>}
             </button>
             {hasPreset && (
               <button className="context-menu-item" onClick={() => {
