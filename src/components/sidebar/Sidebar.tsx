@@ -236,7 +236,8 @@ export function Sidebar(props: SidebarProps) {
           {visibleSessions.map(renderSessionRow)}
           {visibleSessions.length === 0 && debouncedSearch.trim() && (
             <div className="search-empty-hint">
-              {t("ui.no-matching-sessions", lang)}
+              <Search size={16} aria-hidden="true" />
+              <span>{t("ui.no-matching-sessions", lang)}</span>
             </div>
           )}
           {archivedSessions.length > 0 && (

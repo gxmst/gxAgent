@@ -402,11 +402,19 @@ select.input-text {
 }
 
 .search-empty-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   text-align: center;
-  padding: 16px 8px;
+  padding: 20px 8px;
   color: var(--text-tertiary);
   font-size: var(--font-caption);
-  opacity: 0.7;
+  animation: archived-list-in var(--transition-fast);
+}
+
+.search-empty-hint svg {
+  opacity: 0.55;
 }
 
 .history-item {
@@ -466,9 +474,15 @@ select.input-text {
   box-shadow: 0 0 0 1px var(--accent-subtle);
 }
 
+/* Pin glyph replaces the mode icon on pinned rows. Needs padding + radius +
+   full opacity, otherwise the accent chip reads as a dim bare icon (the base
+   .history-mode-tag is an unpadded 50%-opacity flex box). */
 .history-item.pinned .history-mode-tag {
   color: var(--accent);
   background: var(--accent-subtle);
+  opacity: 1;
+  padding: 3px;
+  border-radius: var(--radius-xs);
 }
 
 .history-item:hover {
