@@ -27,6 +27,7 @@ import {
   newMessageId,
 } from "../appDefaults";
 import { parseCommand, sessionToMarkdown } from "../utils/helpers";
+import { formatQuoteReply } from "../utils/quote";
 import { resolveRequestConfig } from "../utils/requestConfig";
 import { fallbackSessionTitle } from "../utils/sessionTitle";
 import { useAppStore } from "../store/appStore";
@@ -86,6 +87,8 @@ export function useAgentRequest({
   const setPendingApprovalsBySession = useAppStore((s) => s.setPendingApprovalsBySession);
   const setUsageStatsBySession = useAppStore((s) => s.setUsageStatsBySession);
   const setModifiedFilesBySession = useAppStore((s) => s.setModifiedFilesBySession);
+  const currentQuote = useAppStore((s) => s.quoteBySession[s.currentSessionId] || null);
+  const setQuoteBySession = useAppStore((s) => s.setQuoteBySession);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const isStreaming = activeRunSessionId === currentSessionId;
   const currentMode = currentSession.sessionConfig.mode || "chat";
@@ -562,7 +565,12 @@ export function useAgentRequest({
 
     const targetSessionId = currentSessionId;
     const targetSession = currentSession;
-    const userMessage = prompt.trim();
+    // A pending quote draft rides along as a markdown blockquote prefix — the
+    // rendered user bubble shows it as a normal quote, no schema changes.
+    const quote = currentQuote;
+    const userMessage = quote
+      ? formatQuoteReply(quote.excerpt, prompt.trim())
+      : prompt.trim();
     const pendingAttachments = [...sendableAttachments];
     const shouldGenerateTitle = targetSession.messages.length === 0 && !targetSession.title.trim();
     const localTitle = fallbackSessionTitle(userMessage, pendingAttachments[0]?.name);
@@ -582,6 +590,7 @@ export function useAgentRequest({
         }
         setDraftsBySession((previous) => ({ ...previous, [targetSessionId]: "" }));
         setAttachmentsBySession((previous) => ({ ...previous, [targetSessionId]: [] }));
+        if (quote) setQuoteBySession((previous) => ({ ...previous, [targetSessionId]: null }));
         setSessions((prev) =>
           prev.map((s) => {
             if (s.id !== targetSessionId) return s;

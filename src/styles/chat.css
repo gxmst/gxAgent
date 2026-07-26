@@ -392,6 +392,67 @@
   max-width: 800px;
 }
 
+/* Quote-reply chip above the textarea: clamped excerpt + dismiss. */
+.quote-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  width: 100%;
+  max-width: 800px;
+  margin-bottom: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-card);
+  animation: quote-chip-in var(--transition-fast);
+}
+
+@keyframes quote-chip-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.quote-chip-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.quote-chip-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-small);
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.quote-chip-dismiss {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.quote-chip-dismiss:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+
 .attachment-chip {
   display: flex;
   align-items: center;
@@ -475,6 +536,20 @@
 
 .user-message-text {
   white-space: pre-wrap;
+}
+
+/* Leading quote-reply block inside a user bubble (split from the markdown
+   blockquote prefix so the raw "> " markers never show). */
+.user-message-quote {
+  margin: 0 0 6px;
+  padding: 3px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--text-secondary);
+  font-size: var(--font-small);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Usage stats */

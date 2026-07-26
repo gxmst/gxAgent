@@ -19,6 +19,7 @@ import {
   Pencil,
   Plus,
   PlusCircle,
+  Quote,
   Send,
   Sparkles,
   Trash2,
@@ -116,6 +117,8 @@ export function Composer({
   const currentRuntime = useAppStore((s) => s.runtimeBySession[s.currentSessionId] || null);
   const pendingApprovals = useAppStore((s) => s.pendingApprovalsBySession[s.currentSessionId] || null);
   const usageStats = useAppStore((s) => s.usageStatsBySession[s.currentSessionId] || null);
+  const quoteDraft = useAppStore((s) => s.quoteBySession[s.currentSessionId] || null);
+  const setQuoteBySession = useAppStore((s) => s.setQuoteBySession);
 
   const isStreaming = activeRunSessionId === currentSessionId;
   const hasActiveRequest = activeRunSessionId !== null;
@@ -239,6 +242,20 @@ export function Composer({
       {pendingApprovals && (
         <div className={`approval-dock ${pendingApprovalHasInlineAction ? "has-inline" : ""}`}>
           <ApprovalCard lang={lang} config={config} setConfig={setConfig} className="approval-card-dock" />
+        </div>
+      )}
+      {quoteDraft && (
+        <div className="quote-chip" role="note">
+          <Quote size={12} className="quote-chip-icon" aria-hidden="true" />
+          <span className="quote-chip-text">{quoteDraft.excerpt}</span>
+          <button
+            type="button"
+            className="quote-chip-dismiss"
+            aria-label={t("quote.dismiss", lang)}
+            onClick={() => setQuoteBySession((previous) => ({ ...previous, [currentSessionId]: null }))}
+          >
+            <X size={10} />
+          </button>
         </div>
       )}
       {attachments.length > 0 && (

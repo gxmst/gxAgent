@@ -9,6 +9,7 @@ import {
 } from "../appDefaults";
 // Type-only import: erased at compile time, so no runtime module cycle.
 import type { McpServerView } from "../components/mcp/McpServerManager";
+import type { QuoteDraft } from "../utils/quote";
 
 type Updater<T> = T | ((previous: T) => T);
 const resolve = <T,>(next: Updater<T>, previous: T): T =>
@@ -61,6 +62,8 @@ interface AppStoreState {
   setSettingsOpen: (next: Updater<boolean>) => void;
   previewConsoleLogsBySession: Record<string, PreviewConsoleLog[]>;
   setPreviewConsoleLogsBySession: (next: Updater<Record<string, PreviewConsoleLog[]>>) => void;
+  quoteBySession: Record<string, QuoteDraft | null>;
+  setQuoteBySession: (next: Updater<Record<string, QuoteDraft | null>>) => void;
 }
 
 export const useAppStore = create<AppStoreState>((set) => ({
@@ -110,4 +113,6 @@ export const useAppStore = create<AppStoreState>((set) => ({
   previewConsoleLogsBySession: {},
   setPreviewConsoleLogsBySession: (next) =>
     set((s) => ({ previewConsoleLogsBySession: resolve(next, s.previewConsoleLogsBySession) })),
+  quoteBySession: {},
+  setQuoteBySession: (next) => set((s) => ({ quoteBySession: resolve(next, s.quoteBySession) })),
 }));

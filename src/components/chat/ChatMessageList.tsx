@@ -20,6 +20,7 @@ import {
   FileText,
   Loader2,
   Pencil,
+  Quote,
   RotateCcw,
   ShieldAlert,
   Trash2,
@@ -39,6 +40,7 @@ import {
 import { MarkdownContent } from "../markdown/MarkdownContent";
 import { TaskProgress } from "../shared/TaskProgress";
 import { ApprovalCard, messageHasPendingApproval } from "./ApprovalCard";
+import { quoteExcerpt, splitLeadingQuote } from "../../utils/quote";
 import { useAppStore } from "../../store/appStore";
 import { runtime } from "../../services/agentRuntime";
 
@@ -93,6 +95,7 @@ export function ChatMessageList({
 }: ChatMessageListProps) {
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setSessions = useAppStore((s) => s.setSessions);
+  const setQuoteBySession = useAppStore((s) => s.setQuoteBySession);
   const activeRunSessionId = useAppStore((s) => s.activeRunSessionId);
   const currentRuntime = useAppStore((s) => s.runtimeBySession[s.currentSessionId] || null);
   const pendingApprovals = useAppStore((s) => s.pendingApprovalsBySession[s.currentSessionId] || null);
@@ -156,6 +159,26 @@ export function ChatMessageList({
       default:
         return null;
     }
+  };
+
+  /** Set the per-session quote draft from a message. Quotes the user's text
+   *  selection when it lives inside this message's bubble; otherwise the
+   *  first ~200 chars of the message content. */
+  const handleQuote = (msg: Message, event: React.MouseEvent<HTMLButtonElement>) => {
+    const container = event.currentTarget.closest(".chat-bubble-container");
+    const selection = window.getSelection();
+    const selectionText = selection && !selection.isCollapsed
+      && container && selection.anchorNode && container.contains(selection.anchorNode)
+      ? selection.toString()
+      : "";
+    const content = msg.variants ? (msg.variants[msg.currentVariantIndex || 0] || msg.content) : msg.content;
+    const excerpt = quoteExcerpt(content, selectionText);
+    if (!excerpt) return;
+    setQuoteBySession((previous) => ({
+      ...previous,
+      [currentSessionId]: { messageId: msg.id ?? "", excerpt },
+    }));
+    requestAnimationFrame(() => chatTextareaRef.current?.focus());
   };
 
   const currentLocale = LANGUAGE_OPTIONS.find((l) => l.code === lang)?.locale || "en-US";
@@ -483,7 +506,18 @@ export function ChatMessageList({
                     ))}
                   </div>
                 )}
-                {msg.content && <div className="user-message-text">{msg.content}</div>}
+                {msg.content && (() => {
+                  // User bubbles are plain text, so a quote-reply prefix
+                  // (markdown blockquote) is split off and styled as a quote
+                  // instead of showing raw "> " markers.
+                  const { quote, rest } = splitLeadingQuote(msg.content);
+                  return (
+                    <>
+                      {quote !== null && <blockquote className="user-message-quote">{quote}</blockquote>}
+                      {rest && <div className="user-message-text">{rest}</div>}
+                    </>
+                  );
+                })()}
               </>
             )}
           </div>
@@ -559,6 +593,13 @@ export function ChatMessageList({
                 }}
               >
                 <Copy size={12} />
+              </button>
+              <button
+                className="bubble-action-btn"
+                title={t("msg.quote", lang)}
+                onClick={(event) => handleQuote(msg, event)}
+              >
+                <Quote size={12} />
               </button>
               <button
                 className="bubble-action-btn"

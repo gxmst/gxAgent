@@ -85,6 +85,7 @@ export function useSessionLifecycle({
   const setPendingApprovalsBySession = useAppStore((s) => s.setPendingApprovalsBySession);
   const setApprovalSubmittingBySession = useAppStore((s) => s.setApprovalSubmittingBySession);
   const setUsageStatsBySession = useAppStore((s) => s.setUsageStatsBySession);
+  const setQuoteBySession = useAppStore((s) => s.setQuoteBySession);
   const setFileContent = useAppStore((s) => s.setFileContent);
   const setSelectedFile = useAppStore((s) => s.setSelectedFile);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
@@ -153,6 +154,7 @@ export function useSessionLifecycle({
     setPendingApprovalsBySession({});
     setApprovalSubmittingBySession({});
     setUsageStatsBySession({});
+    setQuoteBySession({});
     setEditingMessageIdxBySession({});
     setEditTextBySession({});
     setExpandedActions({});
@@ -191,6 +193,7 @@ export function useSessionLifecycle({
     setPendingApprovalsBySession((previous) => omitSessionKey(previous, sessionId));
     setApprovalSubmittingBySession((previous) => omitSessionKey(previous, sessionId));
     setUsageStatsBySession((previous) => omitSessionKey(previous, sessionId));
+    setQuoteBySession((previous) => omitSessionKey(previous, sessionId));
     setEditingMessageIdxBySession((previous) => omitSessionKey(previous, sessionId));
     setEditTextBySession((previous) => omitSessionKey(previous, sessionId));
     delete runtime.workspaceRequestSequence[sessionId];
