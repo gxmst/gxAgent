@@ -54,7 +54,6 @@ import { CustomPresetForm } from "./components/CustomPresetForm";
 import { useSessionStorage } from "./hooks/useSessionStorage";
 import { resolveRequestConfig } from "./utils/requestConfig";
 import { compareSidebarSessions, moveSessionInSidebar } from "./utils/sessionOrder";
-import { suggestTrustPatterns } from "./utils/trustPatterns";
 import { TaskProgress } from "./components/shared/TaskProgress";
 import type { DirectoryNode } from "./components/workspace/WorkspaceTree";
 import type { GitStatusEntry } from "./components/workspace/WorkspaceChanges";
@@ -66,6 +65,7 @@ import { WorkspacePanel } from "./components/workspace/WorkspacePanel";
 import { ConfirmDialog, type ConfirmationOptions } from "./components/shared/ConfirmDialog";
 import { t } from "./i18n";
 import { fallbackSessionTitle } from "./utils/sessionTitle";
+import { ApprovalCard } from "./components/chat/ApprovalCard";
 import {
   OnboardingWizard,
   type ConnectionCheck,
@@ -82,7 +82,6 @@ type SettingsTab = (typeof SETTINGS_TAB_ORDER)[number];
 
 import {
   AppConfig,
-  TrustedPattern,
   ProviderPreset,
   ModelInfo,
   ToolAction,
@@ -331,9 +330,7 @@ function App() {
   const pendingApprovalsBySession = useAppStore((s) => s.pendingApprovalsBySession);
   const setPendingApprovalsBySession = useAppStore((s) => s.setPendingApprovalsBySession);
   const pendingApprovals = pendingApprovalsBySession[currentSessionId] || null;
-  const approvalSubmittingBySession = useAppStore((s) => s.approvalSubmittingBySession);
   const setApprovalSubmittingBySession = useAppStore((s) => s.setApprovalSubmittingBySession);
-  const approvalSubmitting = Boolean(approvalSubmittingBySession[currentSessionId]);
   const usageStatsBySession = useAppStore((s) => s.usageStatsBySession);
   const setUsageStatsBySession = useAppStore((s) => s.setUsageStatsBySession);
   const usageStats = usageStatsBySession[currentSessionId] || null;
@@ -2344,97 +2341,6 @@ function App() {
     });
   };
 
-  const handleApproval = async (approved: boolean, trustPattern: boolean = false) => {
-    if (!pendingApprovals || approvalSubmitting) return;
-    const sessionId = currentSessionId;
-    setApprovalSubmittingBySession((previous) => ({ ...previous, [sessionId]: true }));
-    const approvedIds = approved
-      ? pendingApprovals.tool_calls.map((tc) => tc.id)
-      : [];
-    const rejectedIds = approved
-      ? []
-      : pendingApprovals.tool_calls.map((tc) => tc.id);
-
-    try {
-      await invoke("resolve_tool_approval", {
-        requestId: pendingApprovals.request_id,
-        approvedIds,
-        rejectedIds,
-      });
-      setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: null }));
-
-      // If approved with trust, add each tool call's suggested patterns to
-      // the whitelist. Compound commands contribute one pattern per segment
-      // so the backend's per-segment matching approves them next time.
-      if (approved && trustPattern) {
-        const now = Math.floor(Date.now() / 1000);
-        const seen = new Set<string>();
-        const newPatterns: TrustedPattern[] = pendingApprovals.tool_calls.flatMap((tc) =>
-          suggestTrustPatterns(tc.name, tc.arguments)
-            .filter((pattern) => {
-              const key = `${tc.name}\u0000${pattern}`;
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            })
-            .map((pattern) => ({ tool_name: tc.name, pattern, created_at: now })),
-        );
-
-        try {
-          const updatedConfig = await invoke<AppConfig>("add_trusted_patterns", {
-            currentConfig: config,
-            patterns: newPatterns,
-          });
-          setConfig(updatedConfig);
-          addLog(`Added ${newPatterns.length} pattern(s) to whitelist`, "success");
-        } catch (e) {
-          addLog(`Failed to add whitelist patterns: ${e}`, "error");
-        }
-      }
-    } catch (e) {
-      addLog(`Approval error: ${e}`, "error");
-    } finally {
-      setApprovalSubmittingBySession((previous) => ({ ...previous, [sessionId]: false }));
-    }
-  };
-
-  const renderApprovalCard = (className = "") => {
-    if (!pendingApprovals) return null;
-    const trustPreview = [...new Set(
-      pendingApprovals.tool_calls.flatMap((tc) => suggestTrustPatterns(tc.name, tc.arguments)),
-    )].join(", ");
-    return (
-      <div className={`approval-card ${className}`.trim()}>
-        <div className="approval-card-header">
-          <ShieldAlert size={14} />
-          <span>{t("approval.title", lang)}</span>
-        </div>
-        {pendingApprovals.tool_calls.map((tc) => (
-          <div key={tc.id} className="approval-item">
-            <span style={{ fontWeight: 600, color: "var(--accent)", fontSize: "var(--font-small)" }}>{tc.name}</span>
-            <pre style={{ fontSize: "var(--font-caption)", color: "var(--text-secondary)", marginTop: 3, whiteSpace: "pre-wrap" }}>
-              {tc.arguments}
-            </pre>
-          </div>
-        ))}
-        <div className="approval-trust-preview">
-          {t("approval.trustPreview", lang, { patterns: trustPreview })}
-        </div>
-        <div className="approval-actions">
-          <button className="btn btn-approve" disabled={approvalSubmitting} onClick={() => handleApproval(true)}>
-            <CheckCircle2 size={13} /> {t("approval.approve", lang)}
-          </button>
-          <button className="btn btn-approve-trust" disabled={approvalSubmitting} onClick={() => handleApproval(true, true)} title={t("approval.trustHint", lang)}>
-            <ShieldAlert size={13} /> {t("approval.approveAndTrust", lang)}
-          </button>
-          <button className="btn btn-reject" disabled={approvalSubmitting} onClick={() => handleApproval(false)}>
-            <XCircle size={13} /> {t("approval.reject", lang)}
-          </button>
-        </div>
-      </div>
-    );
-  };
-
   const createNewSessionInMode = async (mode: SessionConfig["mode"]) => {
     if (!sessionStorageReady) return null;
     let workDir: string | null = null;
@@ -3068,7 +2974,7 @@ function App() {
                 {pendingApprovals &&
                   msg.actions?.some((a) =>
                     pendingApprovals.tool_calls.some((tc) => tc.id === a.id)
-                  ) && renderApprovalCard()}
+                  ) && <ApprovalCard lang={lang} config={config} setConfig={setConfig} />}
               </>
             ) : (
               <>
@@ -3634,7 +3540,7 @@ function App() {
             )}
             {pendingApprovals && (
               <div className={`approval-dock ${pendingApprovalHasInlineAction ? "has-inline" : ""}`}>
-                {renderApprovalCard("approval-card-dock")}
+                <ApprovalCard lang={lang} config={config} setConfig={setConfig} className="approval-card-dock" />
               </div>
             )}
             {attachments.length > 0 && (
