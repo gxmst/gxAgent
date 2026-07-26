@@ -264,6 +264,12 @@ pub fn check_approval(
         return ApprovalLevel::AutoApprove;
     }
 
+    // Explicitly enabled by the user after a prominent warning. The hard-risk
+    // blocklist above remains active even in unrestricted mode.
+    if approval_policy == "unrestricted" {
+        return ApprovalLevel::AutoApprove;
+    }
+
     // 3. Check trusted patterns (whitelist). Shell commands that only read
     // files inside the workspace count as implicitly trusted — except under
     // the strict policy, where only the sandboxed builtin read tools skip
@@ -930,6 +936,18 @@ mod tests {
         assert!(matches!(
             check_approval("write_file", &args, "standard", &[], "C:\\proj"),
             ApprovalLevel::NeedsConfirmation
+        ));
+    }
+
+    #[test]
+    fn unrestricted_skips_prompts_but_keeps_hard_blocks() {
+        assert!(matches!(
+            check_approval("run_python", r#"{"code":"print(1)"}"#, "unrestricted", &[], "C:\\proj"),
+            ApprovalLevel::AutoApprove
+        ));
+        assert!(matches!(
+            check_approval("execute_command", r#"{"command":"Remove-Item -Recurse -Force C:\\Windows"}"#, "unrestricted", &[], "C:\\proj"),
+            ApprovalLevel::Blocked
         ));
     }
 

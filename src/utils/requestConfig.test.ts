@@ -15,7 +15,7 @@ const globalConfig: AppConfig = {
   system_prompt: "global prompt",
   streaming: true,
   thinking_level: "medium",
-  context_limit: 50,
+  context_limit: 128000,
   tools_enabled: ["read_file", "web_search"],
   approval_policy: "standard",
   trusted_patterns: [],
@@ -44,7 +44,7 @@ const globalConfig: AppConfig = {
   max_agent_loops: 10,
   max_tool_calls_per_request: 30,
   preview_sandbox: true,
-  tools_migration_version: 1,
+  tools_migration_version: 3,
 };
 
 const sessionConfig: SessionConfig = {
@@ -170,5 +170,17 @@ describe("resolveRequestConfig", () => {
       { ...sessionConfig, searchMode: "force" },
     );
     expect(resolved.tools_enabled).toEqual(["read_file"]);
+  });
+
+  it("enables unrestricted approval only for a trusted code session", () => {
+    expect(resolveRequestConfig(globalConfig, {
+      ...sessionConfig,
+      mode: "code",
+      trustAllOperations: true,
+    }).approval_policy).toBe("unrestricted");
+    expect(resolveRequestConfig(globalConfig, {
+      ...sessionConfig,
+      trustAllOperations: true,
+    }).approval_policy).toBe("standard");
   });
 });

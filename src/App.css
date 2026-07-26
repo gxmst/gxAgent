@@ -1777,8 +1777,8 @@ select.input-text {
   top: 58px;
   right: 12px;
   z-index: 45;
-  width: min(420px, calc(100% - 24px));
-  max-height: calc(100% - 72px);
+  width: min(640px, calc(100% - 24px));
+  max-height: calc(100% - 82px);
   border: 1px solid var(--border-default);
   background: var(--bg-card);
   overflow-y: auto;
@@ -1808,9 +1808,65 @@ select.input-text {
 
 .session-settings-body {
   padding: 12px 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.session-settings-body > .session-field:nth-child(2),
+.session-settings-body > .session-settings-advanced,
+.session-settings-body > .trust-all-field,
+.session-settings-body > button {
+  grid-column: 1 / -1;
+}
+
+.session-settings-advanced {
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  background: var(--bg-main);
+}
+
+.session-settings-advanced > summary {
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.session-settings-advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  padding: 0 10px 10px;
+}
+
+.trust-all-field {
+  padding: 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: 9px;
+  background: var(--warning-subtle);
+}
+
+.trust-all-field > span {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
+}
+
+.trust-all-field small {
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+}
+
+@media (max-width: 700px) {
+  .session-settings-body,
+  .session-settings-advanced-grid {
+    grid-template-columns: 1fr;
+  }
+  .session-settings-body > * {
+    grid-column: 1 !important;
+  }
 }
 
 .session-field {
@@ -1849,6 +1905,17 @@ select.input-text {
 
 .session-input-sm {
   width: 80px;
+}
+
+.session-workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-workspace-row .session-input {
+  min-width: 0;
+  flex: 1;
 }
 
 .session-textarea {
@@ -2281,14 +2348,37 @@ select.input-text {
    ======================================================== */
 
 .agent-action-card {
-  margin-top: 8px;
-  margin-bottom: 4px;
-  border-radius: 10px;
+  margin: 2px 0;
+  border-radius: 7px;
   border: 1px solid var(--border-default);
   background: var(--bg-card);
   overflow: hidden;
   transition: border-color 0.12s;
-  box-shadow: var(--shadow-card);
+  box-shadow: none;
+}
+
+.agent-action-timeline {
+  max-height: min(220px, 32vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 4px 0 8px;
+  padding: 4px;
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  background: var(--bg-main);
+}
+
+.agent-action-timeline-label {
+  position: sticky;
+  top: -4px;
+  z-index: 1;
+  padding: 3px 6px 5px;
+  color: var(--text-tertiary);
+  background: var(--bg-main);
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .agent-action-card.executing { border-color: var(--accent-border); }
@@ -2301,7 +2391,7 @@ select.input-text {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 10px;
+  padding: 4px 7px;
   cursor: pointer;
 }
 .agent-action-header:hover { background: var(--bg-card-hover); }
@@ -2312,7 +2402,7 @@ select.input-text {
   gap: 6px;
   min-width: 0;
   flex: 1 1 auto;
-  font-size: 0.8rem;
+  font-size: 0.74rem;
   font-weight: 500;
   color: var(--text-primary);
 }
@@ -2371,7 +2461,7 @@ select.input-text {
   font-size: 0.75rem;
   background: var(--bg-code);
   border-top: 1px solid var(--border-default);
-  max-height: min(420px, 60vh);
+  max-height: min(240px, 36vh);
   overflow: auto;
   overscroll-behavior: contain;
 }

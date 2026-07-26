@@ -119,7 +119,7 @@ fn default_preview_sandbox() -> bool {
 /// (the `#[serde(default)]` on the field) and are migrated on load; after
 /// migration the version is stored, so a tool the user later disables stays
 /// disabled instead of being re-enabled on every launch.
-pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 2;
+pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 3;
 
 /// Pre-v2 defaults for the agent limits, used by the one-time migration in
 /// load_config to tell "user never touched this" (exact old default) apart
@@ -298,7 +298,7 @@ impl Default for AppConfig {
             role_prompt: None,
             streaming: true,
             thinking_level: "medium".into(),
-            context_limit: 50,
+            context_limit: 128_000,
             tools_enabled: vec![
                 "execute_command".into(),
                 "read_file".into(),

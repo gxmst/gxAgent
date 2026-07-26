@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Window};
 
 /// Sanitize arguments for logging - redact sensitive information
@@ -240,6 +240,66 @@ where
     }
 }
 
+const MODEL_REQUEST_ATTEMPTS: u32 = 5;
+
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+async fn send_model_request_with_retry(
+    window: &Window,
+    request_id: &str,
+    cancel_rx: &watch::Receiver<bool>,
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, String> {
+    for attempt in 1..=MODEL_REQUEST_ATTEMPTS {
+        ensure_not_cancelled(cancel_rx)?;
+        let builder = request
+            .try_clone()
+            .ok_or_else(|| "Model request could not be cloned for retry".to_string())?;
+        match await_with_cancel(cancel_rx, builder.send()).await? {
+            Ok(response) if !retryable_status(response.status()) || attempt == MODEL_REQUEST_ATTEMPTS => {
+                return Ok(response);
+            }
+            Ok(response) => {
+                let status = response.status();
+                let delay_secs = 1u64 << (attempt - 1).min(3);
+                emit_request_event(
+                    window,
+                    "agent-retry",
+                    request_id,
+                    json!({
+                        "attempt": attempt + 1,
+                        "maxAttempts": MODEL_REQUEST_ATTEMPTS,
+                        "delaySeconds": delay_secs,
+                        "reason": format!("HTTP {}", status),
+                    }),
+                );
+                await_with_cancel(cancel_rx, tokio::time::sleep(Duration::from_secs(delay_secs))).await?;
+            }
+            Err(error) if attempt < MODEL_REQUEST_ATTEMPTS => {
+                let delay_secs = 1u64 << (attempt - 1).min(3);
+                emit_request_event(
+                    window,
+                    "agent-retry",
+                    request_id,
+                    json!({
+                        "attempt": attempt + 1,
+                        "maxAttempts": MODEL_REQUEST_ATTEMPTS,
+                        "delaySeconds": delay_secs,
+                        "reason": error.to_string(),
+                    }),
+                );
+                await_with_cancel(cancel_rx, tokio::time::sleep(Duration::from_secs(delay_secs))).await?;
+            }
+            Err(error) => return Err(format!("Request failed after {} attempts: {}", MODEL_REQUEST_ATTEMPTS, error)),
+        }
+    }
+    Err("Model request retry loop ended unexpectedly".to_string())
+}
+
 /// Check if search followup instruction already exists in recent messages
 fn has_search_instruction(messages: &[Value]) -> bool {
     messages.iter().rev().take(3).any(|msg| {
@@ -400,7 +460,25 @@ fn load_workspace_rules(work_dir: &str) -> Option<(String, String)> {
 
 fn estimate_message_tokens(msg: &Value) -> u64 {
     let content = msg["content"].as_str().unwrap_or("");
-    (content.len() as u64) / 4
+    (content.len() as u64).div_ceil(4).max(1) + 6
+}
+
+fn limit_messages_by_tokens(messages: Vec<Value>, budget: u64) -> Vec<Value> {
+    if messages.is_empty() || budget == 0 {
+        return messages;
+    }
+    let mut kept = Vec::new();
+    let mut used = 0u64;
+    for message in messages.into_iter().rev() {
+        let cost = estimate_message_tokens(&message);
+        if !kept.is_empty() && used.saturating_add(cost) > budget {
+            break;
+        }
+        used = used.saturating_add(cost);
+        kept.push(message);
+    }
+    kept.reverse();
+    kept
 }
 
 fn compact_messages(messages: &mut [Value], context_limit: usize) {
@@ -421,13 +499,9 @@ fn compact_messages(messages: &mut [Value], context_limit: usize) {
         total_tokens += estimate_message_tokens(msg);
     }
 
-    // `context_limit` is a message-count setting (see the history slicing in
-    // run_chat_mode and the auto-compact trigger). Convert it into a token
-    // budget by allowing a generous average per kept message; only when the
-    // conversation blows past that do we char-truncate the middle. With the
-    // default of 50 this is ~20k estimated tokens (~80KB of content).
-    const TOKENS_PER_MESSAGE_BUDGET: u64 = 400;
-    let limit_tokens = (context_limit as u64).max(1) * TOKENS_PER_MESSAGE_BUDGET;
+    // context_limit is an estimated token budget. Only when the conversation
+    // blows past it do we char-truncate oversized middle messages.
+    let limit_tokens = (context_limit as u64).max(1);
     if total_tokens < limit_tokens {
         return;
     }
@@ -953,9 +1027,13 @@ async fn chat_turn(
     builder = provider::apply_auth(wire, builder, &config.api_key);
 
     ensure_not_cancelled(cancel_rx)?;
-    let response = await_with_cancel(cancel_rx, builder.json(&body).send())
-        .await?
-        .map_err(|e| format!("Request failed: {}", e))?;
+    let response = send_model_request_with_retry(
+        window,
+        request_id,
+        cancel_rx,
+        builder.json(&body),
+    )
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1208,17 +1286,7 @@ async fn run_chat_mode(
         "content": chat_system_prompt
     })];
 
-    let limit = config.context_limit as usize;
-    let limited_messages: Vec<Value> = if session_messages.len() > limit {
-        session_messages
-            .into_iter()
-            .rev()
-            .take(limit)
-            .rev()
-            .collect()
-    } else {
-        session_messages
-    };
+    let limited_messages = limit_messages_by_tokens(session_messages, config.context_limit as u64);
     messages.extend(normalize_session_messages(limited_messages, is_ollama));
     messages.push(build_user_message(
         outbound_user_prompt,
@@ -1439,19 +1507,16 @@ async fn maybe_auto_compact(
     cancel_rx: &watch::Receiver<bool>,
     messages: &mut Vec<Value>,
 ) -> Result<bool, String> {
-    // context_limit is a message-count setting in the UI and in the initial
-    // history slicing. Trigger only after the live loop has grown beyond that
-    // budget plus the recent tail we always keep intact.
-    let keep_tail = 6usize;
-    let context_limit = (config.context_limit as usize).max(1);
-    let high_water = (1 + context_limit + keep_tail).max(12);
-    if messages.len() <= high_water {
+    let budget = (config.context_limit as u64).max(1);
+    let total_tokens: u64 = messages.iter().map(estimate_message_tokens).sum();
+    if total_tokens <= budget / 2 {
         return Ok(false);
     }
 
     // Keep the system prompt (index 0) and a recent tail intact; summarize the
     // middle. Choose the cut so it lands on a clean boundary: never between an
     // assistant tool_calls message and its tool results.
+    let keep_tail = 6usize;
     if messages.len() <= 1 + keep_tail {
         return Ok(false);
     }
@@ -1581,17 +1646,7 @@ async fn start_agent_loop_inner(
         "content": system_prompt
     })];
 
-    let limit = config.context_limit as usize;
-    let limited_messages: Vec<Value> = if session_messages.len() > limit {
-        session_messages
-            .into_iter()
-            .rev()
-            .take(limit)
-            .rev()
-            .collect()
-    } else {
-        session_messages
-    };
+    let limited_messages = limit_messages_by_tokens(session_messages, config.context_limit as u64);
     messages.extend(normalize_session_messages(limited_messages, is_ollama));
     messages.push(build_user_message(
         outbound_user_prompt,
@@ -1666,9 +1721,13 @@ async fn start_agent_loop_inner(
         let url = provider::build_url(wire, &config.base_url, &config.model, config.streaming);
         let request_builder = provider::apply_auth(wire, client.post(&url), &config.api_key);
 
-        let response = await_with_cancel(&cancel_rx, request_builder.json(&request_body).send())
-            .await?
-            .map_err(|e| format!("API request failed: {}", e))?;
+        let response = send_model_request_with_retry(
+            &window,
+            &request_id,
+            &cancel_rx,
+            request_builder.json(&request_body),
+        )
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -2700,11 +2759,10 @@ mod compact_tests {
     #[test]
     fn normal_conversations_are_left_untouched() {
         // ~10 messages of 1000 chars each ≈ 2.5k estimated tokens — far below
-        // the default budget (50 * 400 = 20k). The old `context_limit * 4`
-        // unit bug would have truncated this at 800 total chars.
+        // this 20k token budget.
         let mut messages: Vec<Value> = (0..10).map(|_| tool_msg(1000)).collect();
         let original = messages.clone();
-        compact_messages(&mut messages, 50);
+        compact_messages(&mut messages, 20_000);
         assert_eq!(messages, original);
     }
 
@@ -2712,7 +2770,7 @@ mod compact_tests {
     fn oversized_middle_tool_outputs_are_truncated_and_edges_protected() {
         // 12 messages of 8000 chars ≈ 24k estimated tokens — above the budget.
         let mut messages: Vec<Value> = (0..12).map(|_| tool_msg(8000)).collect();
-        compact_messages(&mut messages, 50);
+        compact_messages(&mut messages, 20_000);
 
         // First message and the last 4 stay intact.
         assert_eq!(messages[0]["content"].as_str().unwrap().len(), 8000);
@@ -2723,6 +2781,18 @@ mod compact_tests {
         let middle = messages[3]["content"].as_str().unwrap();
         assert!(middle.len() < 8000);
         assert!(middle.contains("Tool output truncated"));
+    }
+
+    #[test]
+    fn history_limit_keeps_the_newest_messages_by_token_budget() {
+        let messages = vec![
+            json!({ "role": "user", "content": "a".repeat(4000) }),
+            json!({ "role": "assistant", "content": "b".repeat(4000) }),
+            json!({ "role": "user", "content": "new" }),
+        ];
+        let limited = limit_messages_by_tokens(messages, 1_100);
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited.last().unwrap()["content"], "new");
     }
 }
 

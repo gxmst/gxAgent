@@ -186,6 +186,17 @@ fn repair_config_workspace(config: &mut AppConfig) -> Result<bool, String> {
     Ok(true)
 }
 
+fn normalize_context_budget(value: u32, migration_version: u32) -> u32 {
+    let token_budget = if migration_version < 3 && value <= 500 {
+        // The old value was a message count; preserve its approximate
+        // effective budget instead of treating (for example) 50 as tokens.
+        value.max(1).saturating_mul(400)
+    } else {
+        value
+    };
+    token_budget.clamp(1_000, 1_000_000)
+}
+
 /// Load config from local file, returns default if not found (decrypts API keys)
 #[tauri::command]
 fn load_config() -> Result<AppConfig, String> {
@@ -211,6 +222,12 @@ fn load_config() -> Result<AppConfig, String> {
     // instead of being re-enabled on every launch. Read-only tools are safe to
     // append broadly; edit_file follows the user's existing write_file choice.
     let mut config_changed = false;
+    let normalized_context_limit =
+        normalize_context_budget(config.context_limit, config.tools_migration_version);
+    if normalized_context_limit != config.context_limit {
+        config.context_limit = normalized_context_limit;
+        config_changed = true;
+    }
     if config.tools_migration_version < config::CURRENT_TOOLS_MIGRATION_VERSION {
         // Each step is gated on the version it introduced, so a step never
         // re-runs for users who already passed it (re-running would undo
@@ -1410,6 +1427,13 @@ mod tests {
         let chunks = split_compaction_text(source, 3);
         assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 3));
         assert_eq!(chunks.concat(), source);
+    }
+
+    #[test]
+    fn context_budget_migration_preserves_legacy_and_clamps_bounds() {
+        assert_eq!(normalize_context_budget(50, 2), 20_000);
+        assert_eq!(normalize_context_budget(128_000, 2), 128_000);
+        assert_eq!(normalize_context_budget(2_000_000, 3), 1_000_000);
     }
 
     #[test]

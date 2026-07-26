@@ -205,7 +205,7 @@ const i18n: Record<string, Record<string, string>> = {
     "session.name": "名称",
     "session.systemPrompt": "系统提示（角色设定）",
     "session.model": "模型",
-    "session.contextLimit": "上下文消息数量上限",
+    "session.contextLimit": "上下文 Token 预算",
     "session.temperature": "温度",
     "session.topP": "Top P",
     "session.maxTokens": "最大输出Token数",
@@ -406,7 +406,7 @@ const i18n: Record<string, Record<string, string>> = {
     "session.name": "Name",
     "session.systemPrompt": "System Prompt (Role)",
     "session.model": "Model",
-    "session.contextLimit": "Context Message Limit",
+    "session.contextLimit": "Context Token Budget",
     "session.temperature": "Temperature",
     "session.topP": "Top P",
     "session.maxTokens": "Max Output Tokens",
@@ -821,6 +821,7 @@ const DEFAULT_SESSION_CONFIG: SessionConfig = {
   backgroundImage: "",
   activeRolePresetId: null,
   searchMode: "auto",
+  trustAllOperations: false,
 };
 
 const THINKING_LEVELS: NonNullable<SessionConfig["thinkingLevel"]>[] = ["low", "medium", "high"];
@@ -838,7 +839,7 @@ const DEFAULT_CONFIG: AppConfig = {
     "You are a helpful AI assistant with access to local tools. Help the user accomplish tasks by using the available tools when needed. Be careful, honest, and direct. If you are unsure or lack enough information, say so instead of guessing. Do not invent facts, files, command results, or tool output.",
   streaming: true,
   thinking_level: "medium",
-  context_limit: 50,
+  context_limit: 128000,
   tools_enabled: [
     "execute_command",
     "read_file",
@@ -869,7 +870,7 @@ const DEFAULT_CONFIG: AppConfig = {
   max_agent_loops: 30,
   max_tool_calls_per_request: 120,
   preview_sandbox: true,
-  tools_migration_version: 1,
+  tools_migration_version: 3,
 };
 
 function createDefaultSession(): ChatSession {
@@ -913,7 +914,13 @@ function normalizeSessionConfig(raw: unknown): SessionConfig {
     workDir: nullableText(input.workDir),
     systemPrompt: typeof input.systemPrompt === "string" && input.systemPrompt.length > 0 ? input.systemPrompt : null,
     model: nullableText(input.model),
-    contextLimit: legacy && input.contextLimit === 50 ? null : nullableNumber(input.contextLimit),
+    // v1/v2 stored a message-count limit. Convert plausible legacy values to
+    // the old effective token budget (roughly 400 tokens per message).
+    contextLimit: input.contextLimit === null || input.contextLimit === undefined
+      ? null
+      : Math.min(1_000_000, Math.max(1000, (nullableNumber(input.contextLimit) ?? 0) <= 500
+        ? (nullableNumber(input.contextLimit) ?? 50) * 400
+        : nullableNumber(input.contextLimit) ?? 128000)),
     temperature: legacy && input.temperature === 0.7 ? null : nullableNumber(input.temperature),
     topP: legacy && input.topP === 1 ? null : nullableNumber(input.topP),
     maxTokens: legacy && input.maxTokens == null
@@ -930,6 +937,7 @@ function normalizeSessionConfig(raw: unknown): SessionConfig {
     backgroundImage: typeof input.backgroundImage === "string" ? input.backgroundImage : "",
     activeRolePresetId: nullableText(input.activeRolePresetId),
     searchMode: input.searchMode === "off" || input.searchMode === "force" ? input.searchMode : "auto",
+    trustAllOperations: input.trustAllOperations === true,
   };
 }
 
@@ -1068,6 +1076,9 @@ function normalizeSessions(raw: unknown): ChatSession[] {
       const messages = Array.isArray(item.messages)
         ? item.messages.map(normalizeMessage).filter((message): message is Message => Boolean(message))
         : [];
+      const compactBackup = Array.isArray(item.compactBackup)
+        ? item.compactBackup.map(normalizeMessage).filter((message): message is Message => Boolean(message))
+        : undefined;
       const inferredTimestamp = [...messages].reverse().find((message) => typeof message?.timestamp === "number")?.timestamp;
       const idTimestamp = Number(item.id.match(/(\d{10,})/)?.[1]);
       const createdAt = typeof item.createdAt === "number"
@@ -1086,7 +1097,8 @@ function normalizeSessions(raw: unknown): ChatSession[] {
         sidebarOrder,
         createdAt,
         updatedAt,
-        compactBackup: Array.isArray(item.compactBackup) ? item.compactBackup : undefined,
+        compactBackup,
+        compactBackupContextSummary: normalizeContextSummary(item.compactBackupContextSummary, compactBackup || []),
         contextSummary: normalizeContextSummary(item.contextSummary, messages),
       };
     });
@@ -1212,6 +1224,8 @@ const ChatListFooter = ({ context }: { context?: ChatListContext }) =>
   context?.showThinking ? <ThinkingBubble lang={context.lang} /> : null;
 const CHAT_VIRTUOSO_COMPONENTS = { Footer: ChatListFooter };
 
+const CONTEXT_BUDGET_OPTIONS = [128_000, 256_000, 500_000, 1_000_000] as const;
+const MAX_CONTEXT_BUDGET = 1_000_000;
 const modelContextLimit = (modelId: string) => {
   const id = modelId.toLowerCase();
   if (id.includes("gpt-4o") || id.includes("gpt-4.1") || id.includes("gpt-5")) return 128000;
@@ -1222,6 +1236,8 @@ const modelContextLimit = (modelId: string) => {
   if (id.includes("llama")) return 128000;
   return 128000;
 };
+
+const formatContextBudget = (value: number) => value >= 1_000_000 ? "1M" : (Math.round(value / 1000) + "K");
 
 function App() {
   // ==========================================
@@ -1311,6 +1327,8 @@ function App() {
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [customGlobalContextBudget, setCustomGlobalContextBudget] = useState(false);
+  const [customSessionContextBudget, setCustomSessionContextBudget] = useState<Record<string, boolean>>({});
   const [mcpStatusByName, setMcpStatusByName] = useState<Record<string, Pick<McpServerView, "state" | "toolCount" | "message">>>({});
 
   const [activeRunSessionId, setActiveRunSessionId] = useState<string | null>(null);
@@ -1942,6 +1960,13 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [config, configReady]);
 
+  // Populate the model picker on startup so the user does not have to open
+  // Settings and press the refresh button first.
+  useEffect(() => {
+    if (!configReady || !config.base_url) return;
+    void fetchModelList();
+  }, [configReady]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -1950,13 +1975,18 @@ function App() {
       if (cancelled) return;
       if (loadedSessions !== null) {
         const storedSessions = normalizeSessions(loadedSessions);
-        lastPersistedSessionsRef.current = Object.fromEntries(
+        const rawById = Object.fromEntries(loadedSessions
+          .filter((session): session is ChatSession => Boolean(session && typeof session === "object" && typeof session.id === "string"))
+          .map((session) => [session.id, JSON.stringify(session)]));
+        lastPersistedSessionsRef.current = rawById;
+        sessionJsonCacheRef.current = Object.fromEntries(
           storedSessions.map((session) => [session.id, JSON.stringify(session)]),
         );
-        sessionJsonCacheRef.current = { ...lastPersistedSessionsRef.current };
-        sessionObjCacheRef.current = Object.fromEntries(
-          storedSessions.map((session) => [session.id, session]),
-        );
+        // Keep migrated sessions dirty so backfilled stable message ids and
+        // token-budget conversions are written to the authoritative backend.
+        sessionObjCacheRef.current = Object.fromEntries(storedSessions
+          .filter((session) => rawById[session.id] === JSON.stringify(session))
+          .map((session) => [session.id, session]));
         setSessions(storedSessions);
         setCurrentSessionId((prev) =>
           storedSessions.some((session) => session.id === prev) ? prev : storedSessions[0].id
@@ -2967,7 +2997,7 @@ function App() {
       const result = await invoke<string>("compact_history", {
         currentConfig: resolvedCurrentConfig,
         requestId,
-        contextTokenLimit: modelContextLimit(resolvedCurrentConfig.model),
+      contextTokenLimit: Math.min(modelContextLimit(resolvedCurrentConfig.model), resolvedCurrentConfig.context_limit),
         messages: messages.flatMap((message) => {
           const serialized = serializeMessageForApi(message);
           return serialized ? [{ role: serialized.role, content: serialized.content }] : [];
@@ -2979,6 +3009,7 @@ function App() {
           return {
             ...s,
             compactBackup: messages,
+            compactBackupContextSummary: s.contextSummary,
             messages: [
               { id: newMessageId(), role: "assistant" as const, content: result, actions: [], timestamp: Date.now() },
             ],
@@ -3005,7 +3036,9 @@ function App() {
     setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
       ...session,
       messages: session.compactBackup || session.messages,
+      contextSummary: session.compactBackupContextSummary,
       compactBackup: undefined,
+      compactBackupContextSummary: undefined,
       updatedAt: Date.now(),
     } : session));
     notify(lang === "zh" ? "已恢复压缩前的对话。" : "Conversation restored.", "success");
@@ -3080,6 +3113,20 @@ function App() {
     flushStreamBufferNowRef.current = flushStreamBuffer;
 
     async function setup() {
+      unlisteners.push(
+        await listen<{ requestId?: string; attempt: number; maxAttempts: number; delaySeconds: number; reason: string }>("agent-retry", (event) => {
+          if (!isCurrentRequestPayload(event.payload)) return;
+          const sessionId = agentEventSessionId(event.payload);
+          addLog(
+            langRef.current === "zh"
+              ? ("模型请求失败，" + event.payload.delaySeconds + " 秒后进行第 " + event.payload.attempt + "/" + event.payload.maxAttempts + " 次尝试（" + event.payload.reason + "）")
+              : ("Model request failed; retry " + event.payload.attempt + "/" + event.payload.maxAttempts + " in " + event.payload.delaySeconds + "s (" + event.payload.reason + ")"),
+            "info",
+            false,
+            sessionId,
+          );
+        }),
+      );
       unlisteners.push(
         await listen<AgentEventPayload>("agent-stream-chunk", (event) => {
           if (!isCurrentRequestPayload(event.payload)) return;
@@ -3723,6 +3770,7 @@ function App() {
     requestAttachments,
     label = "send",
     onAccepted,
+    sessionSnapshot,
   }: {
     targetSessionId: string;
     sessionConfig: SessionConfig;
@@ -3731,6 +3779,7 @@ function App() {
     requestAttachments: Attachment[];
     label?: string;
     onAccepted?: () => void;
+    sessionSnapshot?: ChatSession;
   }): Promise<boolean> => {
     if (!sessionStorageReady || isStreamingRef.current || requestStartingRef.current) return false;
     const { requestConfig, searchMode: requestSearchMode } = resolveSessionRequest(sessionConfig);
@@ -3745,12 +3794,16 @@ function App() {
     const imageAttachments = imageAttachmentsForApi(requestAttachments);
     const instructionTokens = estimateTextTokens(requestConfig.system_prompt)
       + (requestConfig.role_prompt ? estimateTextTokens(requestConfig.role_prompt) + 24 : 0);
-    const requestContextLimit = modelContextLimit(requestConfig.model);
+    const requestContextLimit = Math.min(
+      modelContextLimit(requestConfig.model),
+      Math.max(1_000, requestConfig.context_limit || modelContextLimit(requestConfig.model)),
+    );
+    requestConfig.context_limit = requestContextLimit;
 
     // Outbound history: messages after the last divider, with the persisted
     // rolling summary standing in for everything that divider hides. The
     // summary only applies while its own divider is still the latest one.
-    const targetSession = sessions.find((session) => session.id === targetSessionId);
+    const targetSession = sessions.find((session) => session.id === targetSessionId) || sessionSnapshot;
     const historyDivider = lastContextDivider(history);
     const activeSummary = targetSession?.contextSummary
       && historyDivider?.id === targetSession.contextSummary.dividerId
@@ -3819,6 +3872,19 @@ function App() {
               dividerId,
               createdAt: Date.now(),
             };
+            if (sessionSnapshot && !sessions.some((session) => session.id === targetSessionId)) {
+              const kept = sessionSnapshot.messages.filter((message) => message.id !== supersededDividerId);
+              const boundaryIdx = kept.findIndex((message) => message.id === boundarySource.id);
+              if (boundaryIdx >= 0) {
+                sessionSnapshot.messages = [
+                  ...kept.slice(0, boundaryIdx + 1),
+                  { id: dividerId, role: "context_divider" as const, content: "" },
+                  ...kept.slice(boundaryIdx + 1),
+                ];
+                sessionSnapshot.contextSummary = nextSummary;
+                sessionSnapshot.updatedAt = Date.now();
+              }
+            }
             setSessions((previous) => previous.map((session) => {
               if (session.id !== targetSessionId) return session;
               const kept = session.messages.filter((message) => message.id !== supersededDividerId);
@@ -3953,6 +4019,10 @@ function App() {
       messages,
     );
     branch.sessionConfig = { ...source.sessionConfig };
+    branch.contextSummary = source.contextSummary
+      && messages.some((message) => message.id === source.contextSummary?.dividerId)
+      ? source.contextSummary
+      : undefined;
     return branch;
   };
 
@@ -4133,6 +4203,7 @@ function App() {
       targetSessionId: branch.id,
       sessionConfig: branch.sessionConfig,
       history: msgs.slice(0, userIndex),
+      sessionSnapshot: branch,
       userMessage: userText,
       requestAttachments: userAttachments,
       label: "retry-branch",
@@ -4178,6 +4249,7 @@ function App() {
       targetSessionId: branch.id,
       sessionConfig: branch.sessionConfig,
       history: currentSession.messages.slice(0, msgIdx),
+      sessionSnapshot: branch,
       userMessage: editedMessage.content,
       requestAttachments: editedAttachments,
       label: "edit-branch",
@@ -4218,7 +4290,7 @@ function App() {
         const newPatterns: TrustedPattern[] = pendingApprovals.tool_calls.flatMap((tc) =>
           suggestTrustPatterns(tc.name, tc.arguments)
             .filter((pattern) => {
-              const key = `${tc.name} ${pattern}`;
+              const key = `${tc.name}\u0000${pattern}`;
               if (seen.has(key)) return false;
               seen.add(key);
               return true;
@@ -4281,9 +4353,20 @@ function App() {
     );
   };
 
-  const createNewSessionInMode = (mode: SessionConfig["mode"]) => {
+  const createNewSessionInMode = async (mode: SessionConfig["mode"]) => {
     if (!sessionStorageReady) return null;
+    let workDir: string | null = null;
+    if (mode === "code") {
+      try {
+        workDir = await invoke<string | null>("pick_workspace_directory");
+      } catch (error) {
+        notify((lang === "zh" ? "无法打开目录选择器：" : "Could not open the folder picker: ") + error, "error");
+        return null;
+      }
+      if (!workDir) return null;
+    }
     const session = createSession(mode);
+    if (workDir) session.sessionConfig.workDir = workDir;
     setSessions((previous) => [...previous, session]);
     setSidebarNav(mode);
     setCurrentSessionId(session.id);
@@ -4291,7 +4374,7 @@ function App() {
   };
 
   const createNewSession = () => {
-    createNewSessionInMode(sidebarNav);
+    void createNewSessionInMode(sidebarNav);
   };
   createNewSessionRef.current = createNewSession;
 
@@ -4307,7 +4390,7 @@ function App() {
     if (target) {
       setCurrentSessionId(target.id);
     } else {
-      createNewSessionInMode(mode);
+      void createNewSessionInMode(mode);
     }
   };
   switchSidebarModeRef.current = switchSidebarMode;
@@ -4706,7 +4789,9 @@ function App() {
             {msg.role === "assistant" ? (
               <>
                 {/* Tool actions — rendered BEFORE content, in order */}
-                {msg.actions?.map((act, aIdx) => (
+                {msg.actions && msg.actions.length > 0 && <div className="agent-action-timeline">
+                <div className="agent-action-timeline-label">{lang === "zh" ? ("工具轨迹 · " + msg.actions.length) : ("Tool activity · " + msg.actions.length)}</div>
+                {msg.actions.map((act, aIdx) => (
                   <Fragment key={`${act.id}-${aIdx}`}>
                     {act.name === "todo_write" && (
                       <TaskProgress
@@ -4767,6 +4852,7 @@ function App() {
                     </div>
                   </Fragment>
                 ))}
+                </div>}
 
                 {/* Search status indicators */}
                 {msg.searchStatus && msg.searchStatus.length > 0 && (
@@ -5333,10 +5419,13 @@ function App() {
                         if (input.files[0].name.endsWith(".json")) {
                           const imported = JSON.parse(text);
                           if (imported.messages && Array.isArray(imported.messages)) {
+                            const importedMessages = imported.messages
+                              .map(normalizeMessage)
+                              .filter((message: Message | null): message is Message => Boolean(message));
                             const importedSession = createSession(
                               normalizeSessionConfig(imported.sessionConfig).mode,
                               imported.title || input.files![0].name,
-                              imported.messages,
+                              importedMessages,
                             );
                             importedSession.sessionConfig = normalizeSessionConfig(imported.sessionConfig);
                             setSessions(prev => [...prev, importedSession]);
@@ -5656,22 +5745,25 @@ function App() {
                 {/* Context Limit */}
                 <label className="session-field">
                   <span className="session-label">{t("session.contextLimit", lang)}</span>
-                  <input
-                    type="number"
-                    className="session-input session-input-sm"
-                    min={1}
-                    max={200}
-                    value={currentSession.sessionConfig.contextLimit ?? ""}
-                    placeholder={String(config.context_limit)}
-                    onChange={(e) => {
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                        ...s,
-                        sessionConfig: { ...s.sessionConfig, contextLimit: e.target.value ? parseInt(e.target.value) : null },
-                        updatedAt: Date.now(),
-                      } : s));
-                    }}
-                  />
+                  <select className="session-select" value={customSessionContextBudget[currentSessionId] || (currentSession.sessionConfig.contextLimit !== null && !CONTEXT_BUDGET_OPTIONS.includes(currentSession.sessionConfig.contextLimit as typeof CONTEXT_BUDGET_OPTIONS[number])) ? "custom" : currentSession.sessionConfig.contextLimit === null ? "inherit" : String(currentSession.sessionConfig.contextLimit)} onChange={(event) => {
+                    if (event.target.value === "custom") {
+                      setCustomSessionContextBudget((previous) => ({ ...previous, [currentSessionId]: true }));
+                      setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, contextLimit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1_000, s.sessionConfig.contextLimit ?? resolvedCurrentConfig.context_limit)) }, updatedAt: Date.now() } : s));
+                      return;
+                    }
+                    setCustomSessionContextBudget((previous) => ({ ...previous, [currentSessionId]: false }));
+                    const value = event.target.value === "inherit" ? null : Number(event.target.value);
+                    setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, contextLimit: value }, updatedAt: Date.now() } : s));
+                  }}>
+                    <option value="inherit">{lang === "zh" ? ("继承全局（" + formatContextBudget(config.context_limit) + "）") : ("Inherit global (" + formatContextBudget(config.context_limit) + ")")}</option>
+                    {CONTEXT_BUDGET_OPTIONS.map((value) => <option key={value} value={value}>{formatContextBudget(value)}</option>)}
+                    <option value="custom">{lang === "zh" ? "自定义" : "Custom"}</option>
+                  </select>
+                  {(customSessionContextBudget[currentSessionId] || (currentSession.sessionConfig.contextLimit !== null && !CONTEXT_BUDGET_OPTIONS.includes(currentSession.sessionConfig.contextLimit as typeof CONTEXT_BUDGET_OPTIONS[number]))) && <input type="number" className="session-input session-input-sm" min={1000} max={MAX_CONTEXT_BUDGET} step={1000} value={currentSession.sessionConfig.contextLimit ?? resolvedCurrentConfig.context_limit} onChange={(event) => setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, contextLimit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1000, Number(event.target.value) || 1000)) }, updatedAt: Date.now() } : s))} />}
                 </label>
+                <details className="session-settings-advanced">
+                  <summary>{lang === "zh" ? "高级生成参数" : "Advanced generation"}</summary>
+                  <div className="session-settings-advanced-grid">
                 {/* Temperature */}
                 <label className="session-field">
                   <span className="session-label">{t("session.temperature", lang)}: {resolvedCurrentConfig.temperature}{currentSession.sessionConfig.temperature === null ? ` (${lang === "zh" ? "继承" : "inherit"})` : ""}</span>
@@ -5761,17 +5853,37 @@ function App() {
                     <option value="false">{lang === "zh" ? "关闭" : "Off"}</option>
                   </select>
                 </label>
+                  </div>
+                </details>
                 <label className="session-field">
                   <span className="session-label">{lang === "zh" ? "工作目录" : "Working directory"}</span>
-                  <input disabled={Boolean(runtimeBySession[currentSessionId])} className="session-input" value={currentSession.sessionConfig.workDir ?? ""} placeholder={config.default_work_dir || "."} onChange={(event) => {
-                    setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                      ...session,
-                      sessionConfig: { ...session.sessionConfig, workDir: event.target.value || null },
-                      updatedAt: Date.now(),
-                    } : session));
-                  }} />
+                  <div className="session-workspace-row">
+                    <input disabled={Boolean(runtimeBySession[currentSessionId])} className="session-input" value={currentSession.sessionConfig.workDir ?? ""} placeholder={config.default_work_dir || "."} onChange={(event) => {
+                      setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
+                        ...session,
+                        sessionConfig: { ...session.sessionConfig, workDir: event.target.value || null },
+                        updatedAt: Date.now(),
+                      } : session));
+                    }} />
+                    <button type="button" className="session-btn" disabled={Boolean(runtimeBySession[currentSessionId])} onClick={async () => {
+                      const selected = await invoke<string | null>("pick_workspace_directory");
+                      if (selected) setSessions((previous) => previous.map((session) => session.id === currentSessionId ? { ...session, sessionConfig: { ...session.sessionConfig, workDir: selected }, updatedAt: Date.now() } : session));
+                    }}>{lang === "zh" ? "选择…" : "Choose…"}</button>
+                  </div>
                 </label>
+                {currentMode === "code" && (
+                  <label className="session-field session-field-row trust-all-field">
+                    <span><span className="session-label">{lang === "zh" ? "信任所有操作" : "Trust all operations"}</span><small>{lang === "zh" ? "跳过普通工具审批；危险命令仍会被拦截" : "Skip ordinary approvals; hard-dangerous commands remain blocked"}</small></span>
+                    <input type="checkbox" checked={Boolean(currentSession.sessionConfig.trustAllOperations)} onChange={(event) => {
+                      if (event.target.checked && !window.confirm(lang === "zh" ? "危险操作：编程模式将不再逐次询问工具审批。确定继续吗？" : "Danger: code mode will stop asking for tool approvals. Continue?")) return;
+                      setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, trustAllOperations: event.target.checked }, updatedAt: Date.now() } : s));
+                    }} />
+                  </label>
+                )}
                 {/* Thinking Level */}
+                <details className="session-settings-advanced">
+                  <summary>{lang === "zh" ? "显示与推理" : "Display & reasoning"}</summary>
+                  <div className="session-settings-advanced-grid">
                 <label className="session-field">
                   <span className="session-label">{t("session.thinkingLevel", lang)}</span>
                   <div className="session-btn-group">
@@ -5817,6 +5929,8 @@ function App() {
                     }}
                   />
                 </label>
+                  </div>
+                </details>
                 {/* Reset */}
                 <button
                   className="btn btn-secondary"
@@ -6927,14 +7041,14 @@ function App() {
 
               <div className="form-group">
                 <label className="form-label">{t("session.contextLimit", lang)}</label>
-                <input
-                  type="number"
-                  className="input-text"
-                  min={1}
-                  max={200}
-                  value={config.context_limit}
-                  onChange={(e) => setConfig((prev) => ({ ...prev, context_limit: parseInt(e.target.value) || 50 }))}
-                />
+                <select className="input-text" value={customGlobalContextBudget ? "custom" : CONTEXT_BUDGET_OPTIONS.includes(config.context_limit as typeof CONTEXT_BUDGET_OPTIONS[number]) ? String(config.context_limit) : "custom"} onChange={(event) => {
+                  setCustomGlobalContextBudget(event.target.value === "custom");
+                  if (event.target.value !== "custom") setConfig((prev) => ({ ...prev, context_limit: Number(event.target.value) }));
+                }}>
+                  {CONTEXT_BUDGET_OPTIONS.map((value) => <option key={value} value={value}>{formatContextBudget(value)}</option>)}
+                  <option value="custom">{lang === "zh" ? "自定义" : "Custom"}</option>
+                </select>
+                {(customGlobalContextBudget || !CONTEXT_BUDGET_OPTIONS.includes(config.context_limit as typeof CONTEXT_BUDGET_OPTIONS[number])) && <input type="number" className="input-text" min={1000} max={MAX_CONTEXT_BUDGET} step={1000} value={config.context_limit} onChange={(event) => setConfig((prev) => ({ ...prev, context_limit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1000, Number(event.target.value) || 1000)) }))} />}
               </div>
               </section>
               )}

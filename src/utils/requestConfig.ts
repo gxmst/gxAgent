@@ -81,6 +81,9 @@ export function resolveRequestConfig(
   if (sessionConfig.workDir !== null && sessionConfig.workDir.trim()) {
     resolved.default_work_dir = sessionConfig.workDir.trim();
   }
+  if (sessionConfig.trustAllOperations && sessionConfig.mode === "code") {
+    resolved.approval_policy = "unrestricted";
+  }
 
   resolved.tools_enabled = withWebSearchPolicy(globalConfig.tools_enabled, searchMode);
   return resolved;

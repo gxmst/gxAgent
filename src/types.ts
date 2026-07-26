@@ -130,6 +130,7 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   compactBackup?: Message[];
+  compactBackupContextSummary?: ContextSummary | null;
   /** Rolling auto-compact state: `summary` stands in for everything before
    *  the context divider whose message id is `dividerId`. Cleared implicitly
    *  when a newer divider supersedes that boundary. */
@@ -158,6 +159,8 @@ export interface SessionConfig {
   backgroundImage: string;
   activeRolePresetId: string | null;
   searchMode: "off" | "auto" | "force";
+  /** Code-mode escape hatch: after an explicit warning, skip approval prompts. */
+  trustAllOperations?: boolean;
 }
 
 export interface UsageStats {
