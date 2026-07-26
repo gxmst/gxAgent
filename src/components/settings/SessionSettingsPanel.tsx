@@ -18,6 +18,7 @@ import {
   formatContextBudget,
   type SessionRuntime,
 } from "../../appDefaults";
+import type { ConfirmationOptions } from "../shared/ConfirmDialog";
 
 export interface SessionSettingsPanelProps {
   lang: string;
@@ -35,6 +36,7 @@ export interface SessionSettingsPanelProps {
   patchSessionConfig: (patch: Partial<SessionConfig>) => void;
   setSessions: React.Dispatch<React.SetStateAction<ChatSession[]>>;
   undoCompact: () => void;
+  requestConfirmation: (options: ConfirmationOptions) => Promise<boolean>;
 }
 
 export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
@@ -43,7 +45,7 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
     models, runtimeBySession, sessionMutationLocked,
     customSessionContextBudget, setCustomSessionContextBudget,
     sessionSettingsPanelRef, closeSessionSettings, patchSessionConfig,
-    setSessions, undoCompact,
+    setSessions, undoCompact, requestConfirmation,
   } = props;
 
   return (
@@ -228,9 +230,16 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
               {(currentSession.sessionConfig.mode || "chat") === "code" && (
                 <label className="session-field session-field-row trust-all-field">
                   <span><span className="session-label">{t("ui.trust-all-operations", lang)}</span><small>{t("ui.skip-ordinary-approvals-hard-dangerous", lang)}</small></span>
-                  <input type="checkbox" checked={Boolean(currentSession.sessionConfig.trustAllOperations)} onChange={(event) => {
-                    if (event.target.checked && !window.confirm(t("ui.danger-code-mode-will-stop", lang))) return;
-                    patchSessionConfig({ trustAllOperations: event.target.checked });
+                  <input type="checkbox" checked={Boolean(currentSession.sessionConfig.trustAllOperations)} onChange={async (event) => {
+                    const checked = event.target.checked;
+                    if (checked && !await requestConfirmation({
+                      title: t("ui.trust-all-title", lang),
+                      message: t("ui.danger-code-mode-will-stop", lang),
+                      confirmLabel: t("ui.trust-all-operations", lang),
+                      cancelLabel: t("ui.cancel", lang),
+                      danger: true,
+                    })) return;
+                    patchSessionConfig({ trustAllOperations: checked });
                   }} />
                 </label>
               )}

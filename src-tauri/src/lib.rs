@@ -1056,6 +1056,65 @@ async fn request_compaction_summary(
     }
 }
 
+/// Generate a short sidebar title after the first assistant response. This is
+/// deliberately isolated from the active agent request: title failures never
+/// affect the conversation and the frontend keeps its local fallback.
+#[tauri::command]
+async fn generate_session_title(
+    current_config: AppConfig,
+    user_message: String,
+    assistant_message: String,
+) -> Result<String, String> {
+    let mut config = current_config;
+    config.temperature = 0.2;
+    config.max_tokens = Some(48);
+    config.streaming = false;
+    config.thinking_level = "low".to_string();
+    config.tools_enabled.clear();
+
+    let user_excerpt: String = user_message.chars().take(1_200).collect();
+    let assistant_excerpt: String = assistant_message.chars().take(1_600).collect();
+    let messages = vec![
+        json!({
+            "role": "system",
+            "content": "Create a concise conversation title in the user's language. For Chinese, Japanese, or Korean use 5-12 characters; otherwise use 3-7 words. Capture the concrete task, not generic wording. Return only the title with no quotes, label, punctuation suffix, or explanation."
+        }),
+        json!({
+            "role": "user",
+            "content": format!("User request:\n{}\n\nAssistant response:\n{}", user_excerpt, assistant_excerpt)
+        }),
+    ];
+    let wire = provider::Wire::from_config(&config);
+    let url = provider::build_url(wire, &config.base_url, &config.model, false);
+    let body = provider::build_body(wire, &config.model, &messages, &[], &config, false);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = provider::apply_auth(wire, client.post(&url), &config.api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("Title request failed: {}", error))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await.unwrap_or_default();
+        return Err(format!("Title API error ({}): {}", status, detail));
+    }
+    let response_body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Failed to parse title response: {}", error))?;
+    let (title, _reasoning, _calls, _prompt_tokens, _completion_tokens) =
+        provider::parse_full_response(wire, &response_body);
+    let title = title.trim();
+    if title.is_empty() {
+        Err("Model returned an empty title.".to_string())
+    } else {
+        Ok(title.to_string())
+    }
+}
+
 /// Compress conversation history using the current model
 #[tauri::command]
 async fn compact_history(
@@ -1395,6 +1454,7 @@ pub fn run() {
             storage::delete_session,
             set_active_profile,
             clear_active_profile,
+            generate_session_title,
             compact_history,
             save_mcp_server,
             delete_mcp_server,

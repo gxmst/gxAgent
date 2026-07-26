@@ -42,4 +42,8 @@
 
   /* Control sizing */
   --control-size-sm: 30px;
+
+  /* Motion */
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
 }

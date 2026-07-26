@@ -33,6 +33,7 @@ import {
   PlusCircle,
   Type,
   Brain,
+  ArrowDown,
 } from "lucide-react";
 // Order matters: tokens first, a11y last (it clamps/overrides earlier rules).
 import "./styles/tokens.css";
@@ -64,7 +65,9 @@ import { SettingsModal } from "./components/settings/SettingsModal";
 import { SessionSettingsPanel } from "./components/settings/SessionSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { WorkspacePanel } from "./components/workspace/WorkspacePanel";
+import { ConfirmDialog, type ConfirmationOptions } from "./components/shared/ConfirmDialog";
 import { t } from "./i18n";
+import { fallbackSessionTitle, normalizeGeneratedTitle } from "./utils/sessionTitle";
 import {
   OnboardingWizard,
   type ConnectionCheck,
@@ -121,7 +124,9 @@ import {
   themeMode,
   ThinkingBubble,
   CHAT_VIRTUOSO_COMPONENTS,
-  modelContextLimit,
+  modelCatalogForConfig,
+  modelCatalogKey,
+  modelContextLimitForConfig,
   type ToastNotice,
   type AgentEventPayload,
   type ToolStatsDialog,
@@ -218,6 +223,7 @@ function App() {
   }, []);
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelCatalogSourceKey, setModelCatalogSourceKey] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [customGlobalContextBudget, setCustomGlobalContextBudget] = useState(false);
   const [customSessionContextBudget, setCustomSessionContextBudget] = useState<Record<string, boolean>>({});
@@ -283,6 +289,27 @@ function App() {
     });
   }, [currentSessionId]);
   const [toasts, setToasts] = useState<ToastNotice[]>([]);
+  const [confirmation, setConfirmation] = useState<ConfirmationOptions | null>(null);
+  const confirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const confirmationReturnFocusRef = useRef<HTMLElement | null>(null);
+  const settleConfirmation = useCallback((confirmed: boolean) => {
+    confirmationResolverRef.current?.(confirmed);
+    confirmationResolverRef.current = null;
+    setConfirmation(null);
+    const returnFocus = confirmationReturnFocusRef.current;
+    confirmationReturnFocusRef.current = null;
+    requestAnimationFrame(() => returnFocus?.focus());
+  }, []);
+  const requestConfirmation = useCallback((options: ConfirmationOptions) => {
+    confirmationResolverRef.current?.(false);
+    confirmationReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setConfirmation(options);
+    return new Promise<boolean>((resolve) => {
+      confirmationResolverRef.current = resolve;
+    });
+  }, []);
   const {
     saveSession,
     saveSessions,
@@ -291,6 +318,8 @@ function App() {
   } = useSessionStorage();
 
   const [sessions, setSessions] = useState<ChatSession[]>(readLocalSessions);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const [sessionStorageReady, setSessionStorageReady] = useState(false);
   const sessionMutationLocked = !sessionStorageReady || hasPendingRequest;
   const [sessionSaveStatus, setSessionSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -334,6 +363,7 @@ function App() {
   const sessionSettingsPanelRef = useRef<HTMLDivElement>(null);
   const sessionSettingsToggleRef = useRef<HTMLButtonElement>(null);
   const isAtBottomRef = useRef(true);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const currentSessionIdRef = useRef(currentSessionId);
   const sidebarNavRef = useRef(sidebarNav);
   const lastSessionByModeRef = useRef<Partial<Record<SessionConfig["mode"], string>>>({});
@@ -366,6 +396,12 @@ function App() {
   // next idle persist refreshes it even if nothing else changed.
   const mirrorPendingRef = useRef(false);
   const sessionPersistenceEpochRef = useRef(0);
+  const pendingTitleBySessionRef = useRef<Record<string, {
+    userMessage: string;
+    fallbackTitle: string;
+    config: AppConfig;
+  }>>({});
+  const titleRequestInFlightRef = useRef<Set<string>>(new Set());
   // Stream token batching: accumulate chunks and flush once per animation frame
   // so a burst of tokens triggers one setSessions/render instead of one per token.
   const streamBufferRef = useRef<{
@@ -504,6 +540,12 @@ function App() {
     () => resolveRequestConfig(config, currentSession.sessionConfig, effectiveSearchMode),
     [config, currentSession.sessionConfig, effectiveSearchMode],
   );
+  const modelsForCurrentConfig = modelCatalogForConfig(models, modelCatalogSourceKey, resolvedCurrentConfig);
+  const modelsForGlobalConfig = modelCatalogForConfig(models, modelCatalogSourceKey, config);
+  const modelsForOnboarding = modelCatalogForConfig(models, modelCatalogSourceKey, {
+    wire_format: onboardingValues.wireFormat,
+    base_url: onboardingValues.baseUrl,
+  });
   const effectiveWorkDir = resolvedCurrentConfig.default_work_dir;
   const currentWorkspace = workspaceBySession[currentSessionId] || createEmptyWorkspaceState();
 
@@ -640,6 +682,11 @@ function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && confirmation) {
+        e.preventDefault();
+        settleConfirmation(false);
+        return;
+      }
       const ctrl = e.ctrlKey || e.metaKey;
       if (ctrl && e.shiftKey && (e.key === "N" || e.key === "n")) {
         e.preventDefault();
@@ -670,7 +717,12 @@ function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contextMenu, toolStatsDialog, rolePresetsOpen, modelPickerOpen, settingsOpen, sessionSettingsOpen, rightPanelOpen]);
+  }, [confirmation, contextMenu, modelPickerOpen, rightPanelOpen, rolePresetsOpen, sessionSettingsOpen, settingsOpen, settleConfirmation, toolStatsDialog]);
+
+  useEffect(() => () => {
+    confirmationResolverRef.current?.(false);
+    confirmationResolverRef.current = null;
+  }, []);
 
   useEffect(() => {
     const theme = config.theme || "light";
@@ -1079,6 +1131,11 @@ function App() {
   }, [currentSession.messages, isStreaming]);
 
   useEffect(() => {
+    isAtBottomRef.current = true;
+    setIsAtBottom(true);
+  }, [currentSessionId]);
+
+  useEffect(() => {
     const previousWorkspace = workspaceBySession[currentSessionId];
     if (previousWorkspace && previousWorkspace.workDir !== effectiveWorkDir) {
       setModifiedFilesBySession((previous) => ({ ...previous, [currentSessionId]: {} }));
@@ -1095,12 +1152,53 @@ function App() {
   // ==========================================
 
   const MAX_LOG_LINES = 500;
-  const notify = (text: string, type: "info" | "success" | "error" | "cmd" = "info") => {
+  const notify = (
+    text: string,
+    type: "info" | "success" | "error" | "cmd" = "info",
+    options?: { actionLabel?: string; onAction?: () => void; duration?: number },
+  ) => {
     const id = Date.now() + Math.random();
-    setToasts((prev) => [...prev.slice(-3), { id, text, type }]);
+    setToasts((prev) => [...prev.slice(-3), {
+      id,
+      text,
+      type,
+      actionLabel: options?.actionLabel,
+      onAction: options?.onAction,
+    }]);
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, 3200);
+    }, options?.duration ?? 3200);
+  };
+
+  const requestGeneratedSessionTitle = async (sessionId: string) => {
+    const pending = pendingTitleBySessionRef.current[sessionId];
+    if (!pending || titleRequestInFlightRef.current.has(sessionId)) return;
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    const assistantMessage = [...(session?.messages || [])]
+      .reverse()
+      .find((message) => message.role === "assistant" && message.content.trim())?.content || "";
+    if (!assistantMessage) return;
+
+    titleRequestInFlightRef.current.add(sessionId);
+    delete pendingTitleBySessionRef.current[sessionId];
+    try {
+      const generated = await invoke<string>("generate_session_title", {
+        currentConfig: pending.config,
+        userMessage: pending.userMessage,
+        assistantMessage,
+      });
+      const title = normalizeGeneratedTitle(generated);
+      if (!title) return;
+      setSessions((previous) => previous.map((item) => (
+        item.id === sessionId && item.title === pending.fallbackTitle
+          ? { ...item, title, updatedAt: Date.now() }
+          : item
+      )));
+    } catch (error) {
+      console.debug("Session title generation failed; keeping local fallback.", error);
+    } finally {
+      titleRequestInFlightRef.current.delete(sessionId);
+    }
   };
 
   const addLog = (
@@ -1514,7 +1612,13 @@ function App() {
       notify(t("ui.files-cannot-be-restored-while", lang), "error");
       return;
     }
-    if (!window.confirm(t("ui.confirm-restore-file", lang, { path: entry.path }))) return;
+    if (!await requestConfirmation({
+      title: t("ui.restore-file-title", lang),
+      message: t("ui.confirm-restore-file", lang, { path: entry.path }),
+      confirmLabel: t("ui.restore", lang),
+      cancelLabel: t("ui.cancel", lang),
+      danger: true,
+    })) return;
     try {
       if (entry.indexStatus.trim() && entry.indexStatus !== "?") {
         await invoke("restore_git_path", { workDir, path: entry.path, staged: true });
@@ -1557,7 +1661,13 @@ function App() {
       notify(t("ui.stop-the-current-task-before", lang), "error");
       return;
     }
-    if (!window.confirm(t("ui.confirm-restore-checkpoint", lang, { dir: checkpoint.workDir }))) return;
+    if (!await requestConfirmation({
+      title: t("ui.restore-checkpoint-title", lang),
+      message: t("ui.confirm-restore-checkpoint", lang, { dir: checkpoint.workDir }),
+      confirmLabel: t("ui.restore", lang),
+      cancelLabel: t("ui.cancel", lang),
+      danger: true,
+    })) return;
     try {
       await invoke("restore_git_checkpoint", { workDir: checkpoint.workDir, commit: checkpoint.commit });
       if (currentSessionIdRef.current === sessionId && effectiveWorkDirRef.current === checkpoint.workDir) {
@@ -1631,6 +1741,10 @@ function App() {
           });
       if (onboardingTestSequenceRef.current !== sequence || onboardingValuesRef.current !== snapshot) return;
       setModels(list);
+      setModelCatalogSourceKey(modelCatalogKey({
+        wire_format: snapshot.wireFormat,
+        base_url: snapshot.baseUrl,
+      }));
       const selectedModelExists = list.length === 0
         || list.some((model) => model.id === snapshot.model);
       if (!selectedModelExists) {
@@ -1692,20 +1806,25 @@ function App() {
 
   const fetchModelList = async () => {
     if (!config.base_url) return;
+    const snapshot = {
+      wire_format: config.wire_format || "openai",
+      base_url: config.base_url,
+      api_key: config.api_key,
+    };
     setModelsLoading(true);
     try {
-      const wire = config.wire_format || "openai";
       // Ollama has a distinct models endpoint; route the shared "fetch models"
       // button to it so the button works regardless of the active wire format.
-      const list = wire === "ollama"
-        ? await invoke<ModelInfo[]>("fetch_ollama_models", { baseUrl: config.base_url })
+      const list = snapshot.wire_format === "ollama"
+        ? await invoke<ModelInfo[]>("fetch_ollama_models", { baseUrl: snapshot.base_url })
         : await invoke<ModelInfo[]>("fetch_models", {
-            wireFormat: wire,
-            baseUrl: config.base_url,
-            apiKey: config.api_key,
+            wireFormat: snapshot.wire_format,
+            baseUrl: snapshot.base_url,
+            apiKey: snapshot.api_key,
           });
       setModels(list);
-      addLog(t("log.modelsFetched", lang, { count: String(list.length), url: config.base_url }), "success");
+      setModelCatalogSourceKey(modelCatalogKey(snapshot));
+      addLog(t("log.modelsFetched", lang, { count: String(list.length), url: snapshot.base_url }), "success");
     } catch (e) {
       addLog(t("log.modelsFailed", lang) + e, "error");
     } finally {
@@ -1723,6 +1842,7 @@ function App() {
       api_key: preset.needs_api_key ? prev.api_key : "",
     }));
     setModels([]);
+    setModelCatalogSourceKey(null);
   };
 
   const handleSaveProfile = async () => {
@@ -1865,7 +1985,10 @@ function App() {
       const result = await invoke<string>("compact_history", {
         currentConfig: resolvedCurrentConfig,
         requestId,
-      contextTokenLimit: Math.min(modelContextLimit(resolvedCurrentConfig.model, models), resolvedCurrentConfig.context_limit),
+        contextTokenLimit: Math.min(
+          modelContextLimitForConfig(resolvedCurrentConfig.model, models, modelCatalogSourceKey, resolvedCurrentConfig),
+          resolvedCurrentConfig.context_limit,
+        ),
         messages: messages.flatMap((message) => {
           const serialized = serializeMessageForApi(message);
           return serialized ? [{ role: serialized.role, content: serialized.content }] : [];
@@ -2518,6 +2641,9 @@ function App() {
           finishStreamingLocally(requestId);
           const eventLang = langRef.current;
           addLog(status === "cancelled" ? (eventLang === "zh" ? "已停止当前输出。" : "Current output stopped.") : t("log.complete", eventLang), "info", false, sessionId);
+          if (status !== "cancelled" && pendingTitleBySessionRef.current[sessionId]) {
+            requestAnimationFrame(() => { void requestGeneratedSessionTitle(sessionId); });
+          }
         })
       );
 
@@ -2660,9 +2786,15 @@ function App() {
     const imageAttachments = imageAttachmentsForApi(requestAttachments);
     const instructionTokens = estimateTextTokens(requestConfig.system_prompt)
       + (requestConfig.role_prompt ? estimateTextTokens(requestConfig.role_prompt) + 24 : 0);
+    const reportedModelLimit = modelContextLimitForConfig(
+      requestConfig.model,
+      models,
+      modelCatalogSourceKey,
+      requestConfig,
+    );
     const requestContextLimit = Math.min(
-      modelContextLimit(requestConfig.model, models),
-      Math.max(1_000, requestConfig.context_limit || modelContextLimit(requestConfig.model, models)),
+      reportedModelLimit,
+      Math.max(1_000, requestConfig.context_limit || reportedModelLimit),
     );
     requestConfig.context_limit = requestContextLimit;
 
@@ -2940,6 +3072,8 @@ function App() {
     const targetSession = currentSession;
     const userMessage = prompt.trim();
     const pendingAttachments = [...sendableAttachments];
+    const shouldGenerateTitle = targetSession.messages.length === 0 && !targetSession.title.trim();
+    const localTitle = fallbackSessionTitle(userMessage, pendingAttachments[0]?.name);
     await startAgentRequest({
       targetSessionId,
       sessionConfig: targetSession.sessionConfig,
@@ -2947,16 +3081,19 @@ function App() {
       userMessage,
       requestAttachments: pendingAttachments,
       onAccepted: () => {
+        if (shouldGenerateTitle) {
+          pendingTitleBySessionRef.current[targetSessionId] = {
+            userMessage: userMessage || pendingAttachments.map((attachment) => attachment.name).join(", "),
+            fallbackTitle: localTitle,
+            config: requestConfig,
+          };
+        }
         setDraftsBySession((previous) => ({ ...previous, [targetSessionId]: "" }));
         setAttachmentsBySession((previous) => ({ ...previous, [targetSessionId]: [] }));
         setSessions((prev) =>
           prev.map((s) => {
             if (s.id !== targetSessionId) return s;
-            let title = s.title;
-            if (s.messages.length === 0) {
-              const titleSource = userMessage || pendingAttachments[0]?.name || "Attachment";
-              title = titleSource.length > 25 ? titleSource.substring(0, 25) + "..." : titleSource;
-            }
+            const title = s.messages.length === 0 && !s.title.trim() ? localTitle : s.title;
             return {
               ...s,
               title,
@@ -3341,7 +3478,9 @@ function App() {
       return;
     }
     const target = sessions.find(s => s.id === id);
-    if (!window.confirm(t("ui.confirm-delete-session", lang, { title: target?.title || t("session.untitled", lang) }))) return;
+    if (!target) return;
+    const originalIndex = sessions.findIndex((session) => session.id === id);
+    const wasCurrentSession = currentSessionId === id;
     const remaining = sessions.filter((s) => s.id !== id);
     const targetMode = target?.sessionConfig.mode || sidebarNav;
     const orderedModeSessions = sessions
@@ -3354,12 +3493,10 @@ function App() {
       Math.max(remainingInMode.length - 1, 0),
     )] || remaining[0];
     try {
-      await consumeSessionCheckpoints([id]);
       sessionPersistenceEpochRef.current += 1;
       await deleteStoredSession(id);
       try { localStorage.setItem("gx_sessions", JSON.stringify(remaining)); } catch { /* backend is authoritative */ }
       setSessions(remaining);
-      dropSessionUiState(id);
       delete lastPersistedSessionsRef.current[id];
       delete sessionObjCacheRef.current[id];
       delete sessionJsonCacheRef.current[id];
@@ -3367,13 +3504,53 @@ function App() {
       addLog(`${t("ui.delete-failed", lang)}: ${error}`, "error", true);
       return;
     }
-    if (currentSessionId === id) {
+    if (wasCurrentSession) {
       setCurrentSessionId(fallbackSession.id);
       setSidebarNav(fallbackSession.sessionConfig.mode || "chat");
     }
+    let restored = false;
+    const finalizeTimer = window.setTimeout(() => {
+      if (restored) return;
+      dropSessionUiState(id);
+      delete pendingTitleBySessionRef.current[id];
+      void consumeSessionCheckpoints([id]);
+    }, 5200);
+    const undoDelete = async () => {
+      if (restored) return;
+      restored = true;
+      window.clearTimeout(finalizeTimer);
+      try {
+        await saveSession(target);
+        const serialized = JSON.stringify(target);
+        lastPersistedSessionsRef.current[id] = serialized;
+        sessionJsonCacheRef.current[id] = serialized;
+        setSessions((previous) => {
+          if (previous.some((session) => session.id === id)) return previous;
+          const next = [...previous];
+          next.splice(Math.min(originalIndex, next.length), 0, target);
+          return next;
+        });
+        if (wasCurrentSession) {
+          setCurrentSessionId(id);
+          setSidebarNav(target.sessionConfig.mode || "chat");
+        }
+        notify(t("ui.session-restored", lang), "success");
+      } catch (error) {
+        restored = false;
+        dropSessionUiState(id);
+        delete pendingTitleBySessionRef.current[id];
+        void consumeSessionCheckpoints([id]);
+        addLog(`${t("ui.restore-session-failed", lang)}: ${error}`, "error", true);
+      }
+    };
     notify(
-      t("ui.deleted-session", lang, { title: target?.title || t("session.untitled", lang) }),
+      t("ui.deleted-session", lang, { title: target.title || t("session.untitled", lang) }),
       "success",
+      {
+        actionLabel: t("ui.undo", lang),
+        onAction: () => { void undoDelete(); },
+        duration: 5000,
+      },
     );
   };
 
@@ -3411,6 +3588,7 @@ function App() {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return;
     if (e.key === "Escape") {
       e.preventDefault();
       setPrompt("");
@@ -3437,7 +3615,15 @@ function App() {
    *  control and settings field goes through here so "override vs inherit"
    *  semantics stay identical everywhere; null always means inherit. */
   const patchSessionConfig = (patch: Partial<SessionConfig>) => {
-    patchSessionConfig({ ...patch });
+    setSessions((previous) => previous.map((session) => (
+      session.id === currentSessionId
+        ? {
+            ...session,
+            sessionConfig: { ...session.sessionConfig, ...patch },
+            updatedAt: Date.now(),
+          }
+        : session
+    )));
   };
 
   // The cycle passes through "inherit" so the quick button can never strand a
@@ -3497,7 +3683,12 @@ function App() {
     currentInputAttachmentTokens,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   [resolvedCurrentConfig.system_prompt, resolvedCurrentConfig.role_prompt, currentSession.messages, currentInputAttachmentTokens]);
-  const currentModelLimit = modelContextLimit(activeModelId, models);
+  const currentModelLimit = modelContextLimitForConfig(
+    activeModelId,
+    models,
+    modelCatalogSourceKey,
+    resolvedCurrentConfig,
+  );
   const messageHasPendingApproval = (message: Message) => Boolean(
     pendingApprovals
     && message.actions?.some((action) => pendingApprovals.tool_calls.some((tc) => tc.id === action.id)),
@@ -3974,7 +4165,13 @@ function App() {
       closeMenu();
       return;
     }
-    if (confirm(t("settings.clearSessionsConfirm", lang))) {
+    if (await requestConfirmation({
+      title: t("ui.clear-all-title", lang),
+      message: t("settings.clearSessionsConfirm", lang),
+      confirmLabel: t("settings.clearSessions", lang),
+      cancelLabel: t("ui.cancel", lang),
+      danger: true,
+    })) {
       try {
         const replacement = createDefaultSession();
         await replaceAllSessions([replacement], replacement.id);
@@ -4038,6 +4235,14 @@ function App() {
           <div key={toast.id} className={`toast-item ${toast.type === "cmd" ? "info" : toast.type}`}>
             <span className="toast-dot" />
             <span className="toast-text">{toast.text}</span>
+            {toast.actionLabel && toast.onAction && (
+              <button type="button" className="toast-action" onClick={() => {
+                setToasts((previous) => previous.filter((item) => item.id !== toast.id));
+                toast.onAction?.();
+              }}>
+                {toast.actionLabel}
+              </button>
+            )}
           </div>
         ))}
       </div>
@@ -4189,7 +4394,7 @@ function App() {
               currentSession={currentSession}
               currentSessionId={currentSessionId}
               resolvedCurrentConfig={resolvedCurrentConfig}
-              models={models}
+              models={modelsForCurrentConfig}
               runtimeBySession={runtimeBySession}
               sessionMutationLocked={sessionMutationLocked}
               customSessionContextBudget={customSessionContextBudget}
@@ -4199,6 +4404,7 @@ function App() {
               patchSessionConfig={patchSessionConfig}
               setSessions={setSessions}
               undoCompact={undoCompact}
+              requestConfirmation={requestConfirmation}
             />
           )}
 
@@ -4211,6 +4417,20 @@ function App() {
                     <img src={CaturtleLogo} alt="gxAgent" width="80" height="80" style={{ opacity: 0.95 }} />
                   </div>
                   <h2 className="welcome-title">{t("welcome.title", lang)}</h2>
+                  <p className="welcome-desc">{t("welcome.desc", lang)}</p>
+                  <div className="welcome-prompts">
+                    {["welcome.prompt1", "welcome.prompt2", "welcome.prompt3", "welcome.prompt4"].map((key) => {
+                      const text = t(key, lang);
+                      return (
+                        <button type="button" className="welcome-prompt" key={key} onClick={() => {
+                          setPrompt(text);
+                          requestAnimationFrame(() => chatTextareaRef.current?.focus());
+                        }}>
+                          {text}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             ) : useVirtualized ? (
@@ -4220,7 +4440,10 @@ function App() {
                 style={currentSession.sessionConfig.backgroundImage ? { backgroundImage: `url(${currentSession.sessionConfig.backgroundImage})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
                 data={currentSession.messages}
                 followOutput={(atBottom: boolean) => (atBottom ? "auto" : false)}
-                atBottomStateChange={(atBottom: boolean) => { isAtBottomRef.current = atBottom; }}
+                atBottomStateChange={(atBottom: boolean) => {
+                  isAtBottomRef.current = atBottom;
+                  setIsAtBottom(atBottom);
+                }}
                 itemContent={(mIdx: number, msg: Message) => renderMessage(msg, mIdx)}
                 computeItemKey={(_mIdx: number, msg: Message) => msg.id ?? _mIdx}
                 context={{
@@ -4234,7 +4457,9 @@ function App() {
               <div className="chat-messages" ref={chatContainerRef} onScroll={() => {
                 const el = chatContainerRef.current;
                 if (!el) return;
-                isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+                const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+                isAtBottomRef.current = atBottom;
+                setIsAtBottom(atBottom);
               }} style={currentSession.sessionConfig.backgroundImage ? { backgroundImage: `url(${currentSession.sessionConfig.backgroundImage})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>
                 {plainMessageRows}
 
@@ -4245,6 +4470,24 @@ function App() {
 
                 <div ref={chatEndRef} />
               </div>
+            )}
+            {currentSession.messages.length > 0 && !isAtBottom && (
+              <button type="button" className="new-message-button" onClick={() => {
+                isAtBottomRef.current = true;
+                setIsAtBottom(true);
+                if (virtuosoRef.current) {
+                  virtuosoRef.current.scrollToIndex({
+                    index: currentSession.messages.length - 1,
+                    align: "end",
+                    behavior: "smooth",
+                  });
+                } else {
+                  chatContainerRef.current?.scrollTo({ top: chatContainerRef.current.scrollHeight, behavior: "smooth" });
+                }
+              }}>
+                <ArrowDown size={14} />
+                <span>{t("ui.new-messages", lang)}</span>
+              </button>
             )}
           </div>
 
@@ -4554,10 +4797,10 @@ function App() {
                           <span className="model-picker-tag">{p.default_model}</span>
                         </button>
                       ))}
-                      {models.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).length > 0 && (
+                      {modelsForCurrentConfig.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).length > 0 && (
                         <>
                           <div className="model-picker-divider">{t("ui.other-models", lang)}</div>
-                          {models.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).map((m) => (
+                          {modelsForCurrentConfig.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).map((m) => (
                             <button
                               key={m.id}
                               className={`model-picker-item ${currentSession.sessionConfig.model === m.id ? "active" : ""}`}
@@ -4702,8 +4945,11 @@ function App() {
           lang={lang}
           config={config}
           setConfig={setConfig}
-          models={models}
-          setModels={setModels}
+          models={modelsForGlobalConfig}
+          setModels={(list) => {
+            setModels(list);
+            setModelCatalogSourceKey(modelCatalogKey(config));
+          }}
           modelsLoading={modelsLoading}
           settingsTab={settingsTab}
           setSettingsTab={setSettingsTab}
@@ -4734,6 +4980,14 @@ function App() {
           sessionMutationLocked={sessionMutationLocked}
           hasAttachmentLoading={hasAttachmentLoading}
           replaceAllSessions={replaceAllSessions}
+          requestConfirmation={requestConfirmation}
+        />
+      )}
+      {confirmation && (
+        <ConfirmDialog
+          {...confirmation}
+          onCancel={() => settleConfirmation(false)}
+          onConfirm={() => settleConfirmation(true)}
         />
       )}
       {toolStatsDialog && (
@@ -4782,7 +5036,7 @@ function App() {
         lang={lang}
         values={onboardingValues}
         profiles={Object.entries(config.profiles).map(([id, profile]) => ({ ...profile, id }))}
-        models={models}
+        models={modelsForOnboarding}
         connection={onboardingConnection}
         onChange={updateOnboardingValues}
         onPickWorkspace={pickOnboardingWorkspace}

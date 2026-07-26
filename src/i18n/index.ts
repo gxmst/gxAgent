@@ -653,6 +653,19 @@ Object.assign(i18n.zh, {
   "ui.auto-saving": "正在自动保存...",
   "ui.saved": "已自动保存",
   "ui.auto-save-failed": "自动保存失败",
+  "ui.clear-all-title": "清空所有会话",
+  "ui.trust-all-title": "跳过工具审批",
+  "ui.restore-file-title": "恢复文件",
+  "ui.restore-checkpoint-title": "恢复本轮改动",
+  "ui.restore": "恢复",
+  "ui.undo": "撤销",
+  "ui.session-restored": "会话已恢复",
+  "ui.restore-session-failed": "恢复会话失败",
+  "ui.new-messages": "新消息",
+  "welcome.prompt1": "帮我梳理这个项目的结构",
+  "welcome.prompt2": "检查当前代码中的潜在问题",
+  "welcome.prompt3": "实现一个新功能并补上测试",
+  "welcome.prompt4": "解释这段报错并修复它",
 });
 
 Object.assign(i18n.en, {
@@ -766,6 +779,19 @@ Object.assign(i18n.en, {
   "ui.auto-saving": "Auto-saving...",
   "ui.saved": "Saved",
   "ui.auto-save-failed": "Auto-save failed",
+  "ui.clear-all-title": "Clear all sessions",
+  "ui.trust-all-title": "Skip tool approvals",
+  "ui.restore-file-title": "Restore file",
+  "ui.restore-checkpoint-title": "Restore run changes",
+  "ui.restore": "Restore",
+  "ui.undo": "Undo",
+  "ui.session-restored": "Session restored",
+  "ui.restore-session-failed": "Failed to restore session",
+  "ui.new-messages": "New messages",
+  "welcome.prompt1": "Map out this project's structure",
+  "welcome.prompt2": "Check the current code for issues",
+  "welcome.prompt3": "Implement a feature and add tests",
+  "welcome.prompt4": "Explain this error and fix it",
 });
 
 // Parameterized keys migrated from multiline template-literal ternaries.

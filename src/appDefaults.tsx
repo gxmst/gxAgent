@@ -41,6 +41,8 @@ export type ToastNotice = {
   id: number;
   text: string;
   type: "info" | "success" | "error" | "cmd";
+  actionLabel?: string;
+  onAction?: () => void;
 };
 
 export type AgentEventPayload<T extends Record<string, unknown> = Record<string, unknown>> =
@@ -602,6 +604,21 @@ export const CHAT_VIRTUOSO_COMPONENTS = { Footer: ChatListFooter };
 
 export const CONTEXT_BUDGET_OPTIONS = [128_000, 256_000, 500_000, 1_000_000] as const;
 export const MAX_CONTEXT_BUDGET = 1_000_000;
+
+type ModelCatalogConnection = Pick<AppConfig, "wire_format" | "base_url">;
+
+export const modelCatalogKey = (connection: ModelCatalogConnection) => {
+  const wireFormat = (connection.wire_format || "openai").trim().toLowerCase();
+  const baseUrl = connection.base_url.trim().replace(/\/+$/, "");
+  return `${wireFormat}\n${baseUrl}`;
+};
+
+export const modelCatalogForConfig = (
+  models: ModelInfo[],
+  sourceKey: string | null,
+  connection: ModelCatalogConnection,
+) => sourceKey === modelCatalogKey(connection) ? models : [];
+
 /** Best-effort model context window. The provider's own model list is the
  *  authority when it reports one (context_length); the name-based table is
  *  only the fallback for lists that don't. */
@@ -617,5 +634,12 @@ export const modelContextLimit = (modelId: string, models?: ModelInfo[]) => {
   if (id.includes("llama")) return 128000;
   return 128000;
 };
+
+export const modelContextLimitForConfig = (
+  modelId: string,
+  models: ModelInfo[],
+  sourceKey: string | null,
+  connection: ModelCatalogConnection,
+) => modelContextLimit(modelId, modelCatalogForConfig(models, sourceKey, connection));
 
 export const formatContextBudget = (value: number) => value >= 1_000_000 ? "1M" : (Math.round(value / 1000) + "K");

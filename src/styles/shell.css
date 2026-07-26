@@ -49,7 +49,7 @@
   flex-shrink: 0;
   position: relative;
   z-index: 5;
-  transition: background 0.15s;
+  transition: background var(--transition-fast);
 }
 .resize-divider:hover,
 .resize-divider.dragging {
@@ -88,7 +88,7 @@
   color: var(--text-secondary);
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--transition-fast);
 }
 .panel-toggle-btn:hover {
   background: var(--bg-card);
@@ -157,7 +157,7 @@
 .panel-title {
   font-size: var(--font-ui);
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -189,7 +189,7 @@ button.btn {
   font-weight: 500;
   font-size: var(--font-small);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--transition-fast);
   outline: none;
   box-shadow: var(--shadow-card);
 }
@@ -256,7 +256,7 @@ button.btn-reject:hover:not(:disabled) {
   border: 1px solid var(--border-default);
   background: var(--bg-card);
   color: var(--text-primary);
-  transition: all 0.15s ease;
+  transition: all var(--transition-fast);
   outline: none;
   font-family: inherit;
   font-size: var(--font-ui);
@@ -305,7 +305,7 @@ button.btn-reject:hover:not(:disabled) {
   color: var(--text-tertiary);
   cursor: pointer;
   border-radius: var(--radius-sm);
-  transition: color 0.15s ease, background 0.15s ease;
+  transition: color var(--transition-fast), background var(--transition-fast);
 }
 
 .secret-input-toggle:hover {
@@ -361,7 +361,7 @@ select.input-text {
   font-size: var(--font-caption);
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--transition-fast);
   text-align: center;
 }
 
@@ -420,8 +420,8 @@ select.input-text {
   justify-content: space-between;
   gap: 6px;
   color: var(--text-secondary);
-  transition: background 0.15s ease, color 0.15s ease,
-    box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+  transition: background var(--transition-fast), color var(--transition-fast),
+    box-shadow var(--transition-fast), transform var(--transition-fast), border-color var(--transition-fast);
   font-size: var(--font-small);
   flex: 0 0 auto;
   min-height: 50px;
@@ -439,7 +439,7 @@ select.input-text {
   bottom: -1px;
   height: 1px;
   background: var(--border-light);
-  transition: opacity 0.15s ease;
+  transition: opacity var(--transition-fast);
 }
 
 .history-item:last-child::after,
@@ -580,7 +580,7 @@ select.input-text {
   font-size: var(--font-caption);
   font-weight: 700;
   cursor: pointer;
-  transition: all 0.12s;
+  transition: all var(--transition-fast);
 }
 
 .tool-chip.active {
@@ -616,7 +616,7 @@ select.input-text {
   font-size: var(--font-caption);
   text-align: left;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
 
 .sidebar-tools-summary:hover,
@@ -664,7 +664,7 @@ select.input-text {
   background: transparent;
   color: var(--text-tertiary);
   cursor: pointer;
-  transition: all 0.12s;
+  transition: all var(--transition-fast);
   text-align: center;
 }
 

@@ -44,6 +44,7 @@ import {
 import { SecretInput } from "../shared/SecretInput";
 import { McpAddForm } from "../mcp/McpAddForm";
 import { McpServerManager, type McpServerView } from "../mcp/McpServerManager";
+import type { ConfirmationOptions } from "../shared/ConfirmDialog";
 
 type SettingsTab = "model" | "chat" | "agent" | "search" | "data";
 
@@ -52,7 +53,7 @@ export interface SettingsModalProps {
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   models: ModelInfo[];
-  setModels: React.Dispatch<React.SetStateAction<ModelInfo[]>>;
+  setModels: (models: ModelInfo[]) => void;
   modelsLoading: boolean;
   settingsTab: SettingsTab;
   setSettingsTab: React.Dispatch<React.SetStateAction<SettingsTab>>;
@@ -83,6 +84,7 @@ export interface SettingsModalProps {
   sessionMutationLocked: boolean;
   hasAttachmentLoading: boolean;
   replaceAllSessions: (sessions: ChatSession[], currentId: string) => void;
+  requestConfirmation: (options: ConfirmationOptions) => Promise<boolean>;
 }
 
 export function SettingsModal(props: SettingsModalProps) {
@@ -96,7 +98,7 @@ export function SettingsModal(props: SettingsModalProps) {
     customGlobalContextBudget, setCustomGlobalContextBudget,
     toggleTool, removeTrustedPattern, mcpStatusByName, testMcpServer,
     deleteMcpServer, presets, applyPreset, sessionMutationLocked,
-    hasAttachmentLoading, replaceAllSessions,
+    hasAttachmentLoading, replaceAllSessions, requestConfirmation,
   } = props;
 
   return (
@@ -765,7 +767,13 @@ export function SettingsModal(props: SettingsModalProps) {
                     addLog(t("ui.stop-the-active-task-and-3", lang), "error", true);
                     return;
                   }
-                  if (!window.confirm(t("settings.clearSessionsConfirm", lang))) return;
+                  if (!await requestConfirmation({
+                    title: t("ui.clear-all-title", lang),
+                    message: t("settings.clearSessionsConfirm", lang),
+                    confirmLabel: t("settings.clearSessions", lang),
+                    cancelLabel: t("ui.cancel", lang),
+                    danger: true,
+                  })) return;
                   try {
                     const replacement = createDefaultSession();
                     await replaceAllSessions([replacement], replacement.id);

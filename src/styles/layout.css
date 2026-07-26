@@ -16,7 +16,7 @@
   border-radius: var(--radius-xl);
   display: flex;
   align-items: center;
-  transition: background 0.2s;
+  transition: background var(--transition-normal);
 }
 
 .settings-btn:hover {
