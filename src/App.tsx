@@ -48,11 +48,16 @@ import {
   Type,
   Brain,
 } from "lucide-react";
-import "./styles/modern.css";
+// Order matters: tokens first, a11y last (it clamps/overrides earlier rules).
+import "./styles/tokens.css";
 import "./styles/components.css";
 import "./styles/layout.css";
 import "./styles/enhancements.css";
-import "./App.css";
+import "./styles/themes.css";
+import "./styles/shell.css";
+import "./styles/chat.css";
+import "./styles/overlays.css";
+import "./styles/a11y.css";
 import CaturtleLogo from "./assets/logo.png";
 import { ROLE_PRESETS, ROLE_CATEGORIES, RolePreset } from "./rolePresets";
 import { countTokens, parseCommand, sessionToMarkdown } from "./utils/helpers";
@@ -663,7 +668,7 @@ const ThinkingBubble = ({ lang }: { lang: string }) => (
         <span className="loading-dot" />
         <span className="loading-dot" />
       </div>
-      <span style={{ fontSize: "0.8rem", color: "var(--accent)" }}>{t("thinking", lang)}</span>
+      <span style={{ fontSize: "var(--font-small)", color: "var(--accent)" }}>{t("thinking", lang)}</span>
     </div>
   </div>
 );
@@ -3748,8 +3753,8 @@ function App() {
         </div>
         {pendingApprovals.tool_calls.map((tc) => (
           <div key={tc.id} className="approval-item">
-            <span style={{ fontWeight: 600, color: "var(--accent)", fontSize: "0.8rem" }}>{tc.name}</span>
-            <pre style={{ fontSize: "0.72rem", color: "var(--text-secondary)", marginTop: 3, whiteSpace: "pre-wrap" }}>
+            <span style={{ fontWeight: 600, color: "var(--accent)", fontSize: "var(--font-small)" }}>{tc.name}</span>
+            <pre style={{ fontSize: "var(--font-caption)", color: "var(--text-secondary)", marginTop: 3, whiteSpace: "pre-wrap" }}>
               {tc.arguments}
             </pre>
           </div>
@@ -4248,7 +4253,7 @@ function App() {
 
                     {expandedActions[act.id] && (
                       <div className="agent-action-body">
-                        <div style={{ fontSize: "0.65rem", color: "var(--accent)", fontWeight: 700, marginBottom: 3 }}>
+                        <div style={{ fontSize: "var(--font-caption)", color: "var(--accent)", fontWeight: 700, marginBottom: 3 }}>
                           {t("action.arguments", lang)}:
                         </div>
                         <pre className="tool-arguments">
@@ -4256,7 +4261,7 @@ function App() {
                         </pre>
                         {act.output && (
                           <>
-                            <div style={{ fontSize: "0.65rem", color: "var(--success)", fontWeight: 700, marginTop: 6, marginBottom: 3 }}>
+                            <div style={{ fontSize: "var(--font-caption)", color: "var(--success)", fontWeight: 700, marginTop: 6, marginBottom: 3 }}>
                               {t("action.output", lang)}:
                             </div>
                             <pre className="tool-output">
@@ -4724,7 +4729,7 @@ function App() {
                   </span>
                 )}
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <span className="truncate" style={{ fontSize: "0.8rem", display: "block" }}>
+                  <span className="truncate" style={{ fontSize: "var(--font-small)", display: "block" }}>
                     {s.title || t("session.new", lang)}
                   </span>
                   <span className="history-meta">
@@ -5000,7 +5005,7 @@ function App() {
               ) : (
                 <span
                   className="panel-title"
-                  style={{ fontSize: "0.82rem", cursor: "pointer" }}
+                  style={{ fontSize: "var(--font-ui)", cursor: "pointer" }}
                   onDoubleClick={() => setEditingSessionTitle(true)}
                   title="双击编辑标题"
                 >
@@ -5072,7 +5077,7 @@ function App() {
               tabIndex={-1}
             >
               <div className="session-settings-header">
-                <span id="session-settings-title" style={{ fontWeight: 600, fontSize: "0.82rem" }}>{t("session.settings", lang)}</span>
+                <span id="session-settings-title" style={{ fontWeight: 600, fontSize: "var(--font-ui)" }}>{t("session.settings", lang)}</span>
                 <button
                   className="panel-toggle-btn"
                   onClick={() => closeSessionSettings(true)}
@@ -5903,10 +5908,10 @@ function App() {
             <div className={`canvas-content-pane ${activeTab === "files" ? "active" : ""}`}>
               <div className="files-panel">
                 <div className="files-header">
-                  <span style={{ fontSize: "0.65rem", color: "var(--accent)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                  <span style={{ fontSize: "var(--font-caption)", color: "var(--accent)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" }}>
                     {t("files.workspace", lang)}
                   </span>
-                  <button className="btn" style={{ padding: "3px 8px", fontSize: "0.72rem" }} onClick={() => { void refreshWorkspace(); }}>
+                  <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={() => { void refreshWorkspace(); }}>
                     <RefreshCw size={11} /> {t("files.refresh", lang)}
                   </button>
                 </div>
@@ -5942,7 +5947,7 @@ function App() {
                       <FileText size={12} />
                       <span title={selectedFile || undefined}>{selectedFile}</span>
                       {selectedFile && modifiedFiles[selectedFile] && (
-                        <button className="btn" style={{ padding: "2px 8px", fontSize: "0.68rem", marginLeft: "auto" }} onClick={() => setDiffView(!diffView)}>
+                        <button className="btn" style={{ padding: "2px 8px", fontSize: "var(--font-caption)", marginLeft: "auto" }} onClick={() => setDiffView(!diffView)}>
                           {diffView ? t("files.current", lang) : t("files.diff", lang)}
                         </button>
                       )}
@@ -5979,10 +5984,10 @@ function App() {
                   >
                     <Smartphone size={14} />
                   </button>
-                  <button className="btn" style={{ padding: "3px 8px", fontSize: "0.72rem" }} onClick={() => setPreviewSrc(previewSrc + " ")} title={t("files.refresh", lang)}>
+                  <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={() => setPreviewSrc(previewSrc + " ")} title={t("files.refresh", lang)}>
                     <RefreshCw size={11} />
                   </button>
-                  <button className="btn" style={{ padding: "3px 8px", fontSize: "0.72rem", marginLeft: "auto" }} onClick={() => setPreviewConsoleLogs([])} title="Clear console">
+                  <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)", marginLeft: "auto" }} onClick={() => setPreviewConsoleLogs([])} title="Clear console">
                     <Trash2 size={11} />
                   </button>
                 </div>
@@ -6104,13 +6109,13 @@ function App() {
                       </div>
                       <div className="profile-actions">
                         {config.active_profile !== p.name ? (
-                          <button className="btn" style={{ padding: "2px 8px", fontSize: "0.68rem" }} onClick={() => handleActivateProfile(p.name)}>
+                          <button className="btn" style={{ padding: "2px 8px", fontSize: "var(--font-caption)" }} onClick={() => handleActivateProfile(p.name)}>
                             {t("profile.activate", lang)}
                           </button>
                         ) : (
                           <span className="profile-active-badge">{t("profile.active", lang)}</span>
                         )}
-                        <button className="btn" style={{ padding: "2px 6px", fontSize: "0.68rem", color: "var(--error)" }} onClick={() => handleDeleteProfile(p.name)}>
+                        <button className="btn" style={{ padding: "2px 6px", fontSize: "var(--font-caption)", color: "var(--error)" }} onClick={() => handleDeleteProfile(p.name)}>
                           <Trash2 size={11} />
                         </button>
                       </div>
@@ -6121,7 +6126,7 @@ function App() {
                   )}
                 </div>
                 {config.active_profile && (
-                  <button className="btn" style={{ padding: "3px 8px", fontSize: "0.72rem", marginTop: 4 }} onClick={handleClearActiveProfile}>
+                  <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)", marginTop: 4 }} onClick={handleClearActiveProfile}>
                     {t("profile.clearActive", lang)}
                   </button>
                 )}
@@ -6129,12 +6134,12 @@ function App() {
                   <input
                     type="text"
                     className="input-text"
-                    style={{ fontSize: "0.72rem" }}
+                    style={{ fontSize: "var(--font-caption)" }}
                     placeholder={t("profile.newName", lang)}
                     value={newProfileName}
                     onChange={(e) => setNewProfileName(e.target.value)}
                   />
-                  <button className="btn" style={{ padding: "3px 8px", fontSize: "0.72rem" }} onClick={handleSaveProfile} disabled={!newProfileName.trim()}>
+                  <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={handleSaveProfile} disabled={!newProfileName.trim()}>
                     <Plus size={11} /> {t("profile.save", lang)}
                   </button>
                 </div>
@@ -6316,7 +6321,7 @@ function App() {
                   >
                     {config.show_advanced_reply_info ? t("settings.on", lang) : t("settings.off", lang)}
                   </button>
-                  <span style={{ fontSize: "0.68rem", color: "var(--text-tertiary)" }}>
+                  <span style={{ fontSize: "var(--font-caption)", color: "var(--text-tertiary)" }}>
                     {t("settings.advancedReplyInfoDesc", lang)}
                   </span>
                 </div>
@@ -6326,7 +6331,7 @@ function App() {
                 <label className="form-label">{t("settings.systemPrompt", lang)}</label>
                 <textarea
                   className="input-text"
-                  style={{ height: "64px", resize: "none", fontSize: "0.78rem" }}
+                  style={{ height: "64px", resize: "none", fontSize: "var(--font-small)" }}
                   value={config.system_prompt}
                   onChange={(e) => setConfig((prev) => ({ ...prev, system_prompt: e.target.value }))}
                 />
@@ -6475,7 +6480,7 @@ function App() {
                   >
                     {config.preview_sandbox ? t("settings.sandbox.on", lang) : t("settings.sandbox.off", lang)}
                   </button>
-                  <span style={{ fontSize: "0.68rem", opacity: 0.6 }}>
+                  <span style={{ fontSize: "var(--font-caption)", opacity: 0.6 }}>
                     {config.preview_sandbox ? t("settings.sandbox.onDesc", lang) : t("settings.sandbox.offDesc", lang)}
                   </span>
                 </div>
@@ -6564,7 +6569,7 @@ function App() {
                     hideLabel={t("secret.hide", lang)}
                   />
                   {config.search_provider !== "tavily" && (
-                    <span style={{ fontSize: "0.66rem", opacity: 0.5, display: "block", marginTop: 2 }}>
+                    <span style={{ fontSize: "var(--font-caption)", opacity: 0.5, display: "block", marginTop: 2 }}>
                       {t("ui.api-key-for-fallback-search", lang)}
                     </span>
                   )}
@@ -6709,7 +6714,7 @@ function App() {
             </div>
 
             <div className="modal-footer settings-modal-footer">
-              <span role="status" style={{ marginRight: "auto", fontSize: "0.72rem", color: configSaveStatus === "error" ? "var(--error)" : "var(--text-secondary)" }}>
+              <span role="status" style={{ marginRight: "auto", fontSize: "var(--font-caption)", color: configSaveStatus === "error" ? "var(--error)" : "var(--text-secondary)" }}>
                 {configSaveStatus === "saving" && (t("ui.auto-saving", lang))}
                 {configSaveStatus === "saved" && (t("ui.saved", lang))}
                 {configSaveStatus === "error" && (t("ui.auto-save-failed", lang))}
@@ -6738,7 +6743,7 @@ function App() {
               <h3 className="stats-modal-title">
                 <BarChart3 size={15} /> {t("stats.title", lang)}
               </h3>
-              <button className="btn" style={{ padding: "3px 8px", fontSize: "0.72rem" }} onClick={() => setToolStatsDialog(null)}>
+              <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={() => setToolStatsDialog(null)}>
                 {t("settings.close", lang)}
               </button>
             </div>

@@ -1,0 +1,485 @@
+/* ========================================================
+   Theme palettes — light/dark plus the four accent themes.
+   ======================================================== */
+
+/* ========================================================
+   gxAgent v2.0 — Hybrid UI Design System
+   App shell structure + Antigravity warm sandy beige palette
+   ======================================================== */
+
+/* ========================================================
+   Light Theme — Warm Sandy Beige (Default)
+   ======================================================== */
+
+:root,
+[data-theme="light"] {
+  font-family: var(--app-font-family);
+  font-size: var(--font-body);
+  line-height: 1.6;
+  font-weight: 400;
+
+  /* Modern Card Style - Light (warm white, matches the sandy palette) */
+  --bg-main: #f8f7f4;
+  --bg-sidebar: #f1efea;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f4f2ee;
+  --bg-input: #ffffff;
+  --bg-code: #f5f3ef;
+  --bg-primary: var(--bg-card);
+  --bg-overlay: rgba(0, 0, 0, 0.4);
+  --bg-user-bubble: #f1efea;
+  --bg-assistant-bubble: transparent;
+
+  /* B-system aliases so component styles that use --bg-surface / --border-medium
+     etc. resolve to the same palette as the chat surface (single source of truth). */
+  --bg-app: var(--bg-main);
+  --bg-surface: var(--bg-card);
+  --bg-surface-hover: var(--bg-card-hover);
+  --bg-elevated: var(--bg-card);
+  --border-light: #ededee;
+  --border-medium: var(--border-default);
+  --border-strong: var(--border-focus);
+  --accent-light: var(--accent-subtle);
+  --success-light: var(--success-subtle);
+  --warning-light: var(--warning-subtle);
+  --error-light: var(--error-subtle);
+
+  --border-default: #e2ded6;
+  --border-focus: #ccc6ba;
+
+  --text-primary: #0d0d0d;
+  --text-secondary: #565656;
+  --text-tertiary: #6e6e6e;
+  --text-inverse: #ffffff;
+  --text-code: #24292e;
+
+  --accent: #2f9e6f; /* warm green — matches the sandy palette */
+  --accent-hover: #268560;
+  --accent-subtle: rgba(47, 158, 111, 0.1);
+  --accent-border: rgba(47, 158, 111, 0.2);
+
+  --success: #2f9e6f;
+  --success-subtle: rgba(47, 158, 111, 0.1);
+  --success-border: rgba(47, 158, 111, 0.2);
+
+  --warning: #f59e0b;
+  --warning-subtle: rgba(245, 158, 11, 0.1);
+  --warning-border: rgba(245, 158, 11, 0.2);
+
+  --error: #ef4444;
+  --error-subtle: rgba(239, 68, 68, 0.1);
+  --error-border: rgba(239, 68, 68, 0.2);
+
+  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+
+  --scrollbar-thumb: rgba(0, 0, 0, 0.2);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.3);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ========================================================
+   Dark Theme — Low-contrast warm dark
+   ======================================================== */
+
+[data-theme="dark"] {
+  /* Modern Card Style - Dark */
+  --bg-main: #212121;
+  --bg-sidebar: #171717;
+  --bg-card: #2a2a2a;
+  --bg-card-hover: #343434;
+  --bg-input: #2a2a2a;
+  --bg-code: #000000;
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+  --bg-user-bubble: #2f2f2f;
+  --bg-assistant-bubble: transparent;
+
+  /* B-system aliases → single source of truth with the chat surface. */
+  --bg-app: var(--bg-main);
+  --bg-surface: var(--bg-card);
+  --bg-surface-hover: var(--bg-card-hover);
+  --bg-elevated: #343434;
+  --border-light: #333333;
+  --border-medium: var(--border-default);
+  --border-strong: var(--border-focus);
+  --accent-light: var(--accent-subtle);
+  --success-light: var(--success-subtle);
+  --warning-light: var(--warning-subtle);
+  --error-light: var(--error-subtle);
+
+  --border-default: #424242;
+  --border-focus: #5a5a5a;
+
+  --text-primary: #ececec;
+  --text-secondary: #b4b4b4;
+  --text-tertiary: #9a9a9a;
+  --text-inverse: #ffffff;
+  --text-code: #ececec;
+
+  --accent: #45b385;
+  --accent-hover: #5ac298;
+  --accent-subtle: rgba(69, 179, 133, 0.15);
+  --accent-border: rgba(69, 179, 133, 0.3);
+
+  --success: #45b385;
+  --success-subtle: rgba(69, 179, 133, 0.15);
+  --success-border: rgba(69, 179, 133, 0.3);
+
+  --warning: #f59e0b;
+  --warning-subtle: rgba(245, 158, 11, 0.15);
+  --warning-border: rgba(245, 158, 11, 0.3);
+
+  --error: #ef4444;
+  --error-subtle: rgba(239, 68, 68, 0.15);
+  --error-border: rgba(239, 68, 68, 0.3);
+
+  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.4), 0 1px 2px 0 rgba(0, 0, 0, 0.2);
+  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+
+  --scrollbar-thumb: rgba(255, 255, 255, 0.2);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+/* ========================================================
+   柚木书房 / Yuzu Study — warm cream light theme
+   ======================================================== */
+
+[data-theme="yuzu"] {
+  --bg-main: #fcf7ed;
+  --bg-sidebar: #f3e8d6;
+  --bg-card: #fffaf0;
+  --bg-card-hover: #f6ecda;
+  --bg-input: #fffaf0;
+  --bg-code: #f0e4cf;
+  --bg-overlay: rgba(52, 37, 25, 0.35);
+  --bg-user-bubble: #f0e4cf;
+  --bg-assistant-bubble: transparent;
+
+  --bg-app: #fcf7ed;
+  --bg-surface: #fffaf0;
+  --bg-surface-hover: #f6ecda;
+  --bg-elevated: #fffaf0;
+
+  --border-default: #ddcaa8;
+  --border-focus: #c9ad7e;
+  --border-light: #ece0c8;
+  --border-medium: #ddcaa8;
+  --border-strong: #cbb487;
+
+  --text-primary: #342519;
+  --text-secondary: #6b5640;
+  --text-tertiary: #93795c;
+  --text-inverse: #fffaf0;
+  --text-code: #4a3826;
+
+  --accent: #a9743f;
+  --accent-hover: #8c5d30;
+  --accent-light: rgba(169, 116, 63, 0.12);
+  --accent-subtle: rgba(169, 116, 63, 0.12);
+  --accent-border: rgba(169, 116, 63, 0.28);
+
+  --success: #5f8a3f;
+  --success-subtle: rgba(95, 138, 63, 0.14);
+  --success-light: rgba(95, 138, 63, 0.14);
+  --success-border: rgba(95, 138, 63, 0.3);
+
+  --warning: #c2870c;
+  --warning-subtle: rgba(194, 135, 12, 0.14);
+  --warning-light: rgba(194, 135, 12, 0.14);
+  --warning-border: rgba(194, 135, 12, 0.3);
+
+  --error: #c0492f;
+  --error-subtle: rgba(192, 73, 47, 0.12);
+  --error-light: rgba(192, 73, 47, 0.12);
+  --error-border: rgba(192, 73, 47, 0.28);
+
+  --shadow-soft: 0 4px 6px -1px rgba(82, 58, 35, 0.08), 0 2px 4px -1px rgba(82, 58, 35, 0.05);
+  --shadow-card: 0 1px 3px 0 rgba(82, 58, 35, 0.12), 0 1px 2px 0 rgba(82, 58, 35, 0.08);
+  --shadow-elevated: 0 10px 15px -3px rgba(82, 58, 35, 0.15), 0 4px 6px -2px rgba(82, 58, 35, 0.1);
+
+  --scrollbar-thumb: rgba(82, 58, 35, 0.2);
+  --scrollbar-thumb-hover: rgba(82, 58, 35, 0.32);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+/* ========================================================
+   炭火终端 / Ember Terminal — charcoal + green dark theme
+   ======================================================== */
+
+[data-theme="ember"] {
+  --bg-main: #111210;
+  --bg-sidebar: #0c0d0b;
+  --bg-card: #1b1d19;
+  --bg-card-hover: #282b24;
+  --bg-input: #1b1d19;
+  --bg-code: #000000;
+  --bg-overlay: rgba(0, 0, 0, 0.72);
+  --bg-user-bubble: #1b1d19;
+  --bg-assistant-bubble: transparent;
+
+  --bg-app: #111210;
+  --bg-surface: #1b1d19;
+  --bg-surface-hover: #282b24;
+  --bg-elevated: #22251e;
+
+  --border-default: #3a3f33;
+  --border-focus: #4f5544;
+  --border-light: #282b24;
+  --border-medium: #3a3f33;
+  --border-strong: #4f5544;
+
+  --text-primary: #ecf6df;
+  --text-secondary: #aab89a;
+  --text-tertiary: #7c886e;
+  --text-inverse: #111210;
+  --text-code: #ecf6df;
+
+  --accent: #9bcf5f;
+  --accent-hover: #b2dd80;
+  --accent-light: rgba(155, 207, 95, 0.16);
+  --accent-subtle: rgba(155, 207, 95, 0.16);
+  --accent-border: rgba(155, 207, 95, 0.32);
+
+  --success: #9bcf5f;
+  --success-subtle: rgba(155, 207, 95, 0.16);
+  --success-light: rgba(155, 207, 95, 0.16);
+  --success-border: rgba(155, 207, 95, 0.32);
+
+  --warning: #e0b341;
+  --warning-subtle: rgba(224, 179, 65, 0.16);
+  --warning-light: rgba(224, 179, 65, 0.16);
+  --warning-border: rgba(224, 179, 65, 0.3);
+
+  --error: #e57158;
+  --error-subtle: rgba(229, 113, 88, 0.16);
+  --error-light: rgba(229, 113, 88, 0.16);
+  --error-border: rgba(229, 113, 88, 0.32);
+
+  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+
+  --scrollbar-thumb: rgba(236, 246, 223, 0.18);
+  --scrollbar-thumb-hover: rgba(236, 246, 223, 0.3);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+/* ========================================================
+   午夜葡萄 / Midnight Grape — deep purple dark theme
+   ======================================================== */
+
+[data-theme="grape"] {
+  --bg-main: #160e20;
+  --bg-sidebar: #100a18;
+  --bg-card: #221631;
+  --bg-card-hover: #311f45;
+  --bg-input: #221631;
+  --bg-code: #0d0814;
+  --bg-overlay: rgba(0, 0, 0, 0.72);
+  --bg-user-bubble: #221631;
+  --bg-assistant-bubble: transparent;
+
+  --bg-app: #160e20;
+  --bg-surface: #221631;
+  --bg-surface-hover: #311f45;
+  --bg-elevated: #2a1c3c;
+
+  --border-default: #3e2a52;
+  --border-focus: #543a6c;
+  --border-light: #2e1f40;
+  --border-medium: #3e2a52;
+  --border-strong: #543a6c;
+
+  --text-primary: #faeeff;
+  --text-secondary: #c4b0d6;
+  --text-tertiary: #94809f;
+  --text-inverse: #160e20;
+  --text-code: #faeeff;
+
+  --accent: #c084fc;
+  --accent-hover: #d0a0ff;
+  --accent-light: rgba(192, 132, 252, 0.16);
+  --accent-subtle: rgba(192, 132, 252, 0.16);
+  --accent-border: rgba(192, 132, 252, 0.32);
+
+  --success: #6fd49b;
+  --success-subtle: rgba(111, 212, 155, 0.16);
+  --success-light: rgba(111, 212, 155, 0.16);
+  --success-border: rgba(111, 212, 155, 0.3);
+
+  --warning: #e6b455;
+  --warning-subtle: rgba(230, 180, 85, 0.16);
+  --warning-light: rgba(230, 180, 85, 0.16);
+  --warning-border: rgba(230, 180, 85, 0.3);
+
+  --error: #f06a8a;
+  --error-subtle: rgba(240, 106, 138, 0.16);
+  --error-light: rgba(240, 106, 138, 0.16);
+  --error-border: rgba(240, 106, 138, 0.32);
+
+  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+
+  --scrollbar-thumb: rgba(250, 238, 255, 0.18);
+  --scrollbar-thumb-hover: rgba(250, 238, 255, 0.3);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+/* ========================================================
+   暮光琥珀 / Twilight Amber — warm amber dark theme
+   ======================================================== */
+
+[data-theme="amber"] {
+  --bg-main: #18120e;
+  --bg-sidebar: #120d09;
+  --bg-card: #221a14;
+  --bg-card-hover: #2e231b;
+  --bg-input: #221a14;
+  --bg-code: #0e0a07;
+  --bg-overlay: rgba(0, 0, 0, 0.72);
+  --bg-user-bubble: #221a14;
+  --bg-assistant-bubble: transparent;
+
+  --bg-app: #18120e;
+  --bg-surface: #221a14;
+  --bg-surface-hover: #2e231b;
+  --bg-elevated: #2a2018;
+
+  --border-default: #46352b;
+  --border-focus: #5c473a;
+  --border-light: #342820;
+  --border-medium: #46352b;
+  --border-strong: #5c473a;
+
+  --text-primary: #fff4e6;
+  --text-secondary: #d3bca5;
+  --text-tertiary: #9f8771;
+  --text-inverse: #18120e;
+  --text-code: #fff4e6;
+
+  --accent: #f0a868;
+  --accent-hover: #ffbd82;
+  --accent-light: rgba(240, 168, 104, 0.16);
+  --accent-subtle: rgba(240, 168, 104, 0.16);
+  --accent-border: rgba(240, 168, 104, 0.32);
+
+  --success: #9ec96b;
+  --success-subtle: rgba(158, 201, 107, 0.16);
+  --success-light: rgba(158, 201, 107, 0.16);
+  --success-border: rgba(158, 201, 107, 0.3);
+
+  --warning: #e6b455;
+  --warning-subtle: rgba(230, 180, 85, 0.16);
+  --warning-light: rgba(230, 180, 85, 0.16);
+  --warning-border: rgba(230, 180, 85, 0.3);
+
+  --error: #e8745a;
+  --error-subtle: rgba(232, 116, 90, 0.16);
+  --error-light: rgba(232, 116, 90, 0.16);
+  --error-border: rgba(232, 116, 90, 0.32);
+
+  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+
+  --scrollbar-thumb: rgba(255, 244, 230, 0.18);
+  --scrollbar-thumb-hover: rgba(255, 244, 230, 0.3);
+
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Unified keyboard focus ring — replaces scattered `outline: none` with a single
+   accessible, theme-aware affordance. Only shows for keyboard nav, never on click. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: var(--app-font-family);
+}
+
+body {
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+  background: var(--bg-main);
+  font-family: var(--app-font-family);
+}
+
+.toast-stack {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 300;
+  pointer-events: none;
+}
+
+.toast-item {
+  min-width: 220px;
+  max-width: min(520px, calc(100vw - 32px));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-card) 94%, transparent);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-elevated);
+  font-size: var(--font-small);
+  animation: toastIn 0.18s ease-out;
+}
+
+.toast-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.toast-item.success .toast-dot { background: var(--success); }
+.toast-item.error .toast-dot { background: var(--error); }
+.toast-item.info .toast-dot { background: var(--accent); }
+
+.toast-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}

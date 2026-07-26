@@ -2,7 +2,7 @@
   position: fixed;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
   padding: var(--space-1);
   min-width: 200px;
@@ -14,9 +14,9 @@
   padding: var(--space-2) var(--space-3);
   background: transparent;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--font-body);
   text-align: left;
   cursor: pointer;
   display: flex;
