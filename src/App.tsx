@@ -74,6 +74,7 @@ import { McpServerManager, type McpServerView } from "./components/mcp/McpServer
 import { WorkspaceTree, type DirectoryNode } from "./components/workspace/WorkspaceTree";
 import { WorkspaceChanges, type GitStatusEntry } from "./components/workspace/WorkspaceChanges";
 import { MarkdownContent } from "./components/markdown/MarkdownContent";
+import { t } from "./i18n";
 import {
   OnboardingWizard,
   type ConnectionCheck,
@@ -83,554 +84,6 @@ import {
 const SETTINGS_TAB_ORDER = ["model", "chat", "agent", "search", "data"] as const;
 type SettingsTab = (typeof SETTINGS_TAB_ORDER)[number];
 
-// ==========================================
-// i18n
-// ==========================================
-
-const i18n: Record<string, Record<string, string>> = {
-  zh: {
-    "app.name": "gxAgent",
-    "session.new": "新对话",
-    "settings.title": "设置",
-    "settings.save": "保存设置",
-    "settings.close": "关闭",
-    "settings.tab.model": "模型与 API",
-    "settings.tab.chat": "聊天体验",
-    "settings.tab.agent": "Agent 与工具",
-    "settings.tab.search": "搜索",
-    "settings.tab.data": "数据与高级",
-    "settings.theme": "主题",
-    "settings.theme.light": "浅色",
-    "settings.theme.dark": "深色",
-    "settings.language": "语言",
-    "settings.provider": "API 提供商",
-    "settings.wireFormat": "请求格式",
-    "settings.wire.openai": "OpenAI 兼容",
-    "settings.wire.anthropic": "Claude (Anthropic)",
-    "settings.wire.gemini": "Gemini (官方)",
-    "settings.wire.ollama": "Ollama",
-    "settings.wireFormat.hint": "实际使用的 API 协议格式，与供应商解耦。多数中转/第三方服务用 OpenAI 兼容；只有直连 Anthropic / Google 官方端点才选 Claude / Gemini。",
-    "settings.baseUrl": "API 地址",
-    "settings.apiKey": "API 密钥",
-    "settings.model": "模型",
-    "settings.systemPrompt": "系统提示词",
-    "settings.approvalPolicy": "审批策略",
-    "settings.approval.standard": "标准 — 确认写入和命令",
-    "settings.approval.strict": "严格 — 除读取外均需确认",
-    "settings.approval.relaxed": "宽松 — 自动批准工作区内文件编辑，命令仍需确认",
-    "settings.workDir": "默认工作目录",
-    "settings.tools": "启用工具",
-    "welcome.title": "有什么可以帮你的？",
-    "welcome.desc": "执行命令、读写文件、运行 Python、搜索网页。",
-    "input.placeholder": "让 Agent 构建、搜索或执行...",
-    "approval.title": "需要工具审批",
-    "approval.approve": "批准",
-    "approval.reject": "拒绝",
-    "reasoning.label": "思考过程",
-    "preview": "预览",
-    "preview.empty": "写入 HTML 文件后自动预览",
-    "profile.title": "API 配置项",
-    "profile.empty": "暂无配置项，保存当前配置以新建",
-    "profile.newName": "新配置项名称",
-    "profile.save": "保存",
-    "profile.activate": "启用",
-    "profile.active": "使用中",
-    "profile.clearActive": "取消使用配置项",
-    "profile.saved": "配置项已保存",
-    "profile.activated": "已切换到: ",
-    "compact.start": "正在压缩对话历史...",
-    "compact.done": "对话历史已压缩",
-    "compact.failed": "压缩失败: ",
-    "compact.tooShort": "对话太短，无需压缩",
-    "search.toggle": "联网搜索",
-    "search.modeOff": "搜索: 关闭",
-    "search.modeAuto": "搜索: 自动",
-    "search.modeForce": "搜索: 强制",
-    "search.provider": "搜索引擎",
-    "search.provider.ddg": "DuckDuckGo (免费免Key)",
-    "search.provider.tavily": "Tavily (专业搜索)",
-    "search.provider.searxng": "SearXNG (免费免Key)",
-    "search.apiKey": "API Key",
-    "search.apiKeyPlaceholder": "输入 Tavily API Key",
-    "secret.reveal": "显示",
-    "secret.hide": "隐藏",
-    "search.settings.desc": "配置搜索行为和搜索引擎。搜索模式可在输入框旁切换：关闭=不搜索，自动=模型判断，强制=每次必搜。",
-    "search.settings.fallbackDesc": "使用 DuckDuckGo 时，搜索失败或超时会自动尝试 Tavily 备用路径（需配置 API Key）。SearXNG 无自动备用。",
-    "search.settings.ollamaNote": "注意：Ollama 本地模型暂不支持工具调用，搜索功能对 Ollama 不生效。",
-    "code.copy": "复制代码",
-    "code.save": "保存为文件",
-    "code.copied": "已复制",
-    "code.saved": "已保存",
-    "attach.drop": "拖放文件到此处",
-    "attach.image": "图片",
-    "attach.file": "文件",
-    "attach.remove": "移除附件",
-    "window.pin": "置顶窗口",
-    "window.unpin": "取消置顶",
-    "tools.active": "已启用工具",
-    "terminal": "终端",
-    "activity": "活动",
-    "activity.empty": "暂无工具活动",
-    "activity.searchSources": "搜索来源",
-    "activity.toolCalls": "工具调用",
-    "files": "文件",
-    "files.workspace": "工作区",
-    "files.refresh": "刷新",
-    "files.modified": "已修改",
-    "files.diff": "查看差异",
-    "files.current": "查看当前",
-    "status.parsing": "解析中",
-    "status.running": "运行中",
-    "status.done": "完成",
-    "status.blocked": "已阻止",
-    "status.awaiting": "等待审批",
-    "action.arguments": "参数",
-    "action.output": "输出",
-    "thinking": "思考中...",
-    "log.init": "gxAgent v1.0 已初始化。",
-    "log.backend": "本地 Rust 后端就绪。",
-    "log.complete": "Agent 循环完成。",
-    "log.configSaved": "配置已保存。",
-    "log.configFailed": "保存配置失败：",
-    "log.needApiKey": "请先在设置中配置 API Key。",
-    "log.modelsFetched": "从 {url} 获取了 {count} 个模型",
-    "log.modelsFailed": "获取模型列表失败：",
-    "usage.tokens": "Token",
-    "usage.prompt": "输入",
-    "usage.completion": "输出",
-    "usage.total": "累计",
-    "usage.ttft": "首字延迟",
-    "usage.responseTime": "响应时间",
-    "usage.loops": "轮次",
-    "session.name": "名称",
-    "session.systemPrompt": "系统提示（角色设定）",
-    "session.model": "模型",
-    "session.contextLimit": "上下文 Token 预算",
-    "session.temperature": "温度",
-    "session.topP": "Top P",
-    "session.maxTokens": "最大输出Token数",
-    "session.streaming": "流式输出",
-    "session.thinkingLevel": "思考级别",
-    "session.thinkingLow": "低",
-    "session.thinkingMedium": "中",
-    "session.thinkingHigh": "高",
-    "session.background": "背景设置",
-    "session.backgroundImage": "背景图片",
-    "session.reset": "重置",
-    "session.settings": "会话设置",
-    "msg.edit": "修改",
-    "msg.copy": "复制",
-    "msg.delete": "删除",
-    "msg.retry": "重试",
-    "role.title": "角色预设",
-    "context.isolate": "插入上下文截断线",
-    "export.title": "导出会话",
-    "input.steering": "智能体执行中，输入可随时干预方向...",
-    "msg.copied": "已复制",
-    "approval.approveAndTrust": "批准并信任",
-    "approval.trustHint": "将此命令加入白名单，以后自动批准",
-    "approval.trustPreview": "「批准并信任」将白名单：{patterns}",
-    "whitelist.title": "白名单管理",
-    "whitelist.empty": "暂无白名单规则",
-    "whitelist.toolName": "工具名",
-    "whitelist.pattern": "匹配模式",
-    "whitelist.remove": "移除",
-    "whitelist.default": "默认",
-    "whitelist.custom": "自定义",
-    "mcp.title": "MCP 插件服务器",
-    "mcp.empty": "暂无 MCP 服务器配置",
-    "mcp.addServer": "添加服务器",
-    "mcp.serverName": "服务器名称",
-    "mcp.command": "启动命令",
-    "mcp.args": "参数（逗号分隔）",
-    "mcp.envVars": "环境变量 (KEY=VALUE，每行一个)",
-    "mcp.remove": "移除",
-    "mcp.fetchModels": "获取 Ollama 模型",
-    "settings.fontSize": "字体大小",
-    "settings.commandTimeout": "命令超时 (秒)",
-    "settings.maxAgentLoops": "最大 Agent 轮次",
-    "settings.maxToolCalls": "单次最大工具调用",
-    "settings.previewSandbox": "预览沙箱",
-    "settings.sandbox.on": "沙箱已开启",
-    "settings.sandbox.off": "沙箱已关闭",
-    "settings.sandbox.onDesc": "预览在沙箱中运行，限制访问本地资源（推荐）",
-    "settings.sandbox.offDesc": "预览直接在系统中运行，可访问本地资源",
-    "settings.exportConfig": "导出配置",
-    "settings.importConfig": "导入配置",
-    "settings.clearSessions": "清除所有会话",
-    "settings.clearSessionsConfirm": "确定要清除所有会话吗？此操作不可撤销。",
-    "settings.cleared": "所有会话已清除",
-    "settings.exported": "配置已导出",
-    "settings.imported": "配置已导入",
-    "settings.importFailed": "导入配置失败：",
-    "spotlight.hint": "Ctrl+Shift+G 快速唤起",
-    "context.delete": "删除会话",
-    "context.export": "导出会话",
-    "context.editPreset": "编辑角色预设",
-    "context.clearPreset": "清除角色预设",
-    "role.custom": "自定义预设",
-    "role.customName": "预设名称",
-    "role.customEmoji": "图标 (Emoji)",
-    "role.customPrompt": "系统提示词",
-    "role.customTemp": "温度",
-    "role.customSave": "保存",
-    "role.customDelete": "删除",
-    "role.activePreset": "当前角色",
-    "mode.chat": "对话模式",
-    "mode.code": "编程模式",
-    "context.import": "导入会话",
-    "context.rename": "重命名",
-    "context.moveUp": "上移",
-    "context.moveDown": "下移",
-    "shortcuts.title": "快捷键",
-    "shortcuts.ctrlN": "Ctrl+N 新建会话",
-    "shortcuts.ctrlComma": "Ctrl+, 设置",
-    "shortcuts.ctrlShiftN": "Ctrl+Shift+N 切换模式",
-    "shortcuts.escape": "Esc 关闭弹窗",
-    "shortcuts.shiftEnter": "Shift+Enter 换行",
-  },
-  en: {
-    "app.name": "gxAgent",
-    "session.new": "New Conversation",
-    "settings.title": "Settings",
-    "settings.save": "Save Settings",
-    "settings.close": "Close",
-    "settings.tab.model": "Model & API",
-    "settings.tab.chat": "Chat Experience",
-    "settings.tab.agent": "Agent & Tools",
-    "settings.tab.search": "Search",
-    "settings.tab.data": "Data & Advanced",
-    "settings.theme": "Theme",
-    "settings.theme.light": "Light",
-    "settings.theme.dark": "Dark",
-    "settings.language": "Language",
-    "settings.provider": "Provider Preset",
-    "settings.wireFormat": "Request Format",
-    "settings.wire.openai": "OpenAI compatible",
-    "settings.wire.anthropic": "Claude (Anthropic)",
-    "settings.wire.gemini": "Gemini (Google)",
-    "settings.wire.ollama": "Ollama",
-    "settings.wireFormat.hint": "The on-the-wire protocol. Decoupled from the model brand: choose OpenAI compatible for most relays/proxies; pick Claude or Gemini only for their official native endpoints.",
-    "settings.baseUrl": "API Base URL",
-    "settings.apiKey": "API Key",
-    "settings.model": "Model",
-    "settings.systemPrompt": "System Prompt",
-    "settings.approvalPolicy": "Approval Policy",
-    "settings.approval.standard": "Standard — confirm writes & commands",
-    "settings.approval.strict": "Strict — confirm everything except reads",
-    "settings.approval.relaxed": "Relaxed — auto-approve workspace file edits; commands still confirm",
-    "settings.workDir": "Default Work Directory",
-    "settings.tools": "Enabled Tools",
-    "welcome.title": "How can I help you?",
-    "welcome.desc": "Execute commands, read/write files, run Python, or search the web.",
-    "input.placeholder": "Ask Agent to build, search, or execute...",
-    "approval.title": "Tool Approval Required",
-    "approval.approve": "Approve",
-    "approval.reject": "Reject",
-    "reasoning.label": "Thinking Process",
-    "preview": "Preview",
-    "preview.empty": "Auto-preview when HTML is written",
-    "profile.title": "API Profiles",
-    "profile.empty": "No profiles yet. Save current config to create one.",
-    "profile.newName": "New profile name",
-    "profile.save": "Save",
-    "profile.activate": "Activate",
-    "profile.active": "Active",
-    "profile.clearActive": "Deactivate profile",
-    "profile.saved": "Profile saved",
-    "profile.activated": "Switched to: ",
-    "compact.start": "Compressing conversation history...",
-    "compact.done": "History compressed",
-    "compact.failed": "Compression failed: ",
-    "compact.tooShort": "Conversation too short to compress",
-    "search.toggle": "Web Search",
-    "search.modeOff": "Search: Off",
-    "search.modeAuto": "Search: Auto",
-    "search.modeForce": "Search: Force",
-    "search.provider": "Search Engine",
-    "search.provider.ddg": "DuckDuckGo (Free, No Key)",
-    "search.provider.tavily": "Tavily (Professional)",
-    "search.provider.searxng": "SearXNG (Free, No Key)",
-    "search.apiKey": "API Key",
-    "search.apiKeyPlaceholder": "Enter Tavily API Key",
-    "secret.reveal": "Show",
-    "secret.hide": "Hide",
-    "search.settings.desc": "Configure search behavior and search engine. Toggle search mode next to the input: Off=No search, Auto=Model decides, Force=Always search.",
-    "search.settings.fallbackDesc": "When using DuckDuckGo, failed or timed-out searches will automatically try Tavily as fallback (requires API Key). SearXNG has no automatic fallback.",
-    "search.settings.ollamaNote": "Note: Ollama local models do not support tool calls, so search does not work with Ollama.",
-    "code.copy": "Copy Code",
-    "code.save": "Save to File",
-    "code.copied": "Copied",
-    "code.saved": "Saved",
-    "attach.drop": "Drop files here",
-    "attach.image": "Image",
-    "attach.file": "File",
-    "attach.remove": "Remove attachment",
-    "window.pin": "Pin Window",
-    "window.unpin": "Unpin Window",
-    "tools.active": "Active Tools",
-    "terminal": "Terminal",
-    "activity": "Activity",
-    "activity.empty": "No tool activity yet",
-    "activity.searchSources": "Search Sources",
-    "activity.toolCalls": "Tool Calls",
-    "files": "Files",
-    "files.workspace": "Workspace",
-    "files.refresh": "Refresh",
-    "files.modified": "Modified",
-    "files.diff": "View Diff",
-    "files.current": "View Current",
-    "status.parsing": "parsing",
-    "status.running": "running",
-    "status.done": "done",
-    "status.blocked": "blocked",
-    "status.awaiting": "awaiting approval",
-    "action.arguments": "Arguments",
-    "action.output": "Output",
-    "thinking": "Thinking...",
-    "log.init": "gxAgent v1.0 initialized.",
-    "log.backend": "Local Rust backend ready.",
-    "log.complete": "Agent loop complete.",
-    "log.configSaved": "Configuration saved.",
-    "log.configFailed": "Failed to save config: ",
-    "log.needApiKey": "Please configure your API Key in settings first.",
-    "log.modelsFetched": "Fetched {count} models from {url}",
-    "log.modelsFailed": "Failed to fetch models: ",
-    "usage.tokens": "Tokens",
-    "usage.prompt": "Input",
-    "usage.completion": "Output",
-    "usage.total": "Total",
-    "usage.ttft": "TTFT",
-    "usage.responseTime": "Response",
-    "usage.loops": "Loops",
-    "session.name": "Name",
-    "session.systemPrompt": "System Prompt (Role)",
-    "session.model": "Model",
-    "session.contextLimit": "Context Token Budget",
-    "session.temperature": "Temperature",
-    "session.topP": "Top P",
-    "session.maxTokens": "Max Output Tokens",
-    "session.streaming": "Streaming",
-    "session.thinkingLevel": "Thinking Level",
-    "session.thinkingLow": "Low",
-    "session.thinkingMedium": "Medium",
-    "session.thinkingHigh": "High",
-    "session.background": "Background",
-    "session.backgroundImage": "Background Image",
-    "session.reset": "Reset",
-    "session.settings": "Session Settings",
-    "msg.edit": "Edit",
-    "msg.copy": "Copy",
-    "msg.delete": "Delete",
-    "msg.retry": "Retry",
-    "role.title": "Role Presets",
-    "context.isolate": "Insert Context Divider",
-    "export.title": "Export Session",
-    "input.steering": "Agent running, type to steer...",
-    "msg.copied": "Copied",
-    "approval.approveAndTrust": "Approve & Trust",
-    "approval.trustHint": "Add this command to whitelist for auto-approval",
-    "approval.trustPreview": "\"Approve & Trust\" whitelists: {patterns}",
-    "whitelist.title": "Whitelist Management",
-    "whitelist.empty": "No whitelist rules yet",
-    "whitelist.toolName": "Tool Name",
-    "whitelist.pattern": "Pattern",
-    "whitelist.remove": "Remove",
-    "whitelist.default": "Default",
-    "whitelist.custom": "Custom",
-    "mcp.title": "MCP Plugin Servers",
-    "mcp.empty": "No MCP server configured",
-    "mcp.addServer": "Add Server",
-    "mcp.serverName": "Server Name",
-    "mcp.command": "Start Command",
-    "mcp.args": "Arguments (comma-separated)",
-    "mcp.envVars": "Environment Variables (KEY=VALUE per line)",
-    "mcp.remove": "Remove",
-    "mcp.fetchModels": "Fetch Ollama Models",
-    "settings.fontSize": "Font Size",
-    "settings.commandTimeout": "Command Timeout (seconds)",
-    "settings.maxAgentLoops": "Max Agent Loops",
-    "settings.maxToolCalls": "Max Tool Calls per Request",
-    "settings.previewSandbox": "Preview Sandbox",
-    "settings.sandbox.on": "Sandbox On",
-    "settings.sandbox.off": "Sandbox Off",
-    "settings.sandbox.onDesc": "Preview runs in sandbox, restricted from local resources (Recommended)",
-    "settings.sandbox.offDesc": "Preview runs directly on system, can access local resources",
-    "settings.exportConfig": "Export Config",
-    "settings.importConfig": "Import Config",
-    "settings.clearSessions": "Clear All Sessions",
-    "settings.clearSessionsConfirm": "Are you sure you want to clear all sessions? This cannot be undone.",
-    "settings.cleared": "All sessions cleared",
-    "settings.exported": "Config exported",
-    "settings.imported": "Config imported",
-    "settings.importFailed": "Failed to import config: ",
-    "spotlight.hint": "Ctrl+Shift+G to quick launch",
-    "context.delete": "Delete Session",
-    "context.export": "Export Session",
-    "context.editPreset": "Edit Role Preset",
-    "context.clearPreset": "Clear Role Preset",
-    "role.custom": "Custom Presets",
-    "role.customName": "Preset Name",
-    "role.customEmoji": "Icon (Emoji)",
-    "role.customPrompt": "System Prompt",
-    "role.customTemp": "Temperature",
-    "role.customSave": "Save",
-    "role.customDelete": "Delete",
-    "role.activePreset": "Active Role",
-    "mode.chat": "Chat Mode",
-    "mode.code": "Code Mode",
-    "context.import": "Import Session",
-    "context.rename": "Rename",
-    "context.moveUp": "Move Up",
-    "context.moveDown": "Move Down",
-    "shortcuts.title": "Shortcuts",
-    "shortcuts.ctrlN": "Ctrl+N New Session",
-    "shortcuts.ctrlComma": "Ctrl+, Settings",
-    "shortcuts.ctrlShiftN": "Ctrl+Shift+N Toggle Mode",
-    "shortcuts.escape": "Esc Close Dialog",
-    "shortcuts.shiftEnter": "Shift+Enter Newline",
-  },
-};
-
-i18n.ja = {
-  ...i18n.en,
-  "session.new": "新しい会話",
-  "settings.title": "設定",
-  "settings.save": "設定を保存",
-  "settings.close": "閉じる",
-  "settings.language": "言語",
-  "settings.fontSize": "フォントサイズ",
-  "settings.fontFamily": "フォント",
-  "settings.advancedReplyInfo": "AI応答の詳細情報",
-  "settings.advancedReplyInfoDesc": "応答時にモデル、トークン、所要時間を表示します",
-  "settings.on": "オン",
-  "settings.off": "オフ",
-  "input.placeholder": "Agent に依頼する...",
-  "thinking": "考え中...",
-  "usage.tokens": "トークン",
-  "usage.prompt": "入力",
-  "usage.completion": "出力",
-  "usage.total": "合計",
-  "usage.context": "コンテキスト",
-  "usage.modelLimit": "モデル上限",
-  "usage.compress": "コンテキストを圧縮",
-  "context.pin": "会話を固定",
-  "context.unpin": "固定を解除",
-};
-
-i18n.ko = {
-  ...i18n.en,
-  "session.new": "새 대화",
-  "settings.title": "설정",
-  "settings.save": "설정 저장",
-  "settings.close": "닫기",
-  "settings.language": "언어",
-  "settings.fontSize": "글꼴 크기",
-  "settings.fontFamily": "글꼴",
-  "settings.advancedReplyInfo": "AI 응답 상세 정보",
-  "settings.advancedReplyInfoDesc": "응답에 모델, 토큰, 소요 시간을 표시합니다",
-  "settings.on": "켜기",
-  "settings.off": "끄기",
-  "input.placeholder": "Agent에게 요청...",
-  "thinking": "생각 중...",
-  "usage.tokens": "토큰",
-  "usage.prompt": "입력",
-  "usage.completion": "출력",
-  "usage.total": "합계",
-  "usage.context": "컨텍스트",
-  "usage.modelLimit": "모델 한도",
-  "usage.compress": "컨텍스트 압축",
-  "context.pin": "대화 고정",
-  "context.unpin": "고정 해제",
-};
-
-i18n.es = {
-  ...i18n.en,
-  "session.new": "Nueva conversación",
-  "settings.title": "Configuración",
-  "settings.save": "Guardar configuración",
-  "settings.close": "Cerrar",
-  "settings.language": "Idioma",
-  "settings.fontSize": "Tamaño de fuente",
-  "settings.fontFamily": "Fuente",
-  "settings.advancedReplyInfo": "Información avanzada de respuestas",
-  "settings.advancedReplyInfoDesc": "Muestra modelo, tokens y duración en las respuestas",
-  "settings.on": "Activado",
-  "settings.off": "Desactivado",
-  "input.placeholder": "Pide algo al Agent...",
-  "thinking": "Pensando...",
-  "usage.tokens": "Tokens",
-  "usage.prompt": "Entrada",
-  "usage.completion": "Salida",
-  "usage.total": "Total",
-  "usage.context": "Contexto",
-  "usage.modelLimit": "Límite del modelo",
-  "usage.compress": "Comprimir contexto",
-  "context.pin": "Fijar conversación",
-  "context.unpin": "Desfijar conversación",
-};
-
-Object.assign(i18n.zh, {
-  "settings.fontFamily": "字体",
-  "settings.advancedReplyInfo": "AI 回复高级信息",
-  "settings.advancedReplyInfoDesc": "在回复旁显示模型、上下文 token、输出 token 和耗时",
-  "settings.on": "开启",
-  "settings.off": "关闭",
-  "usage.context": "上下文",
-  "usage.modelLimit": "模型限制",
-  "usage.compress": "压缩上下文",
-  "context.pin": "置顶会话",
-  "context.unpin": "取消置顶",
-  "context.exportAll": "导出所有会话",
-  "context.importSessions": "导入会话",
-  "context.toolStats": "工具统计",
-  "session.untitled": "未命名会话",
-  "session.exportedAll": "会话已导出",
-  "session.importedCount": "已导入 {count} 个会话",
-  "session.importFailed": "导入失败",
-  "stats.title": "工具调用统计",
-  "stats.allSessions": "所有会话",
-  "stats.total": "总计 {count} 次",
-  "stats.empty": "暂无工具调用",
-  "stats.count": "{count} 次",
-  "status.error": "出错",
-});
-
-Object.assign(i18n.en, {
-  "settings.fontFamily": "Font",
-  "settings.advancedReplyInfo": "Advanced reply info",
-  "settings.advancedReplyInfoDesc": "Show model, context tokens, output tokens, and duration on replies",
-  "settings.on": "On",
-  "settings.off": "Off",
-  "usage.context": "Context",
-  "usage.modelLimit": "Model limit",
-  "usage.compress": "Compress context",
-  "context.pin": "Pin conversation",
-  "context.unpin": "Unpin conversation",
-  "context.exportAll": "Export All Sessions",
-  "context.importSessions": "Import Sessions",
-  "context.toolStats": "Tool Stats",
-  "session.untitled": "Untitled Session",
-  "session.exportedAll": "Sessions exported",
-  "session.importedCount": "Imported {count} sessions",
-  "session.importFailed": "Import failed",
-  "stats.title": "Tool Call Stats",
-  "stats.allSessions": "All Sessions",
-  "stats.total": "{count} total",
-  "stats.empty": "No tool calls yet",
-  "stats.count": "{count} calls",
-  "status.error": "error",
-});
-
-function t(key: string, lang: string, vars?: Record<string, string>): string {
-  let text = (i18n[lang] || i18n["en"])[key] || (i18n["en"][key]) || key;
-  if (vars) {
-    Object.entries(vars).forEach(([k, v]) => {
-      text = text.replace(`{${k}}`, v);
-    });
-  }
-  return text;
-}
 
 // ==========================================
 // Types
@@ -2268,9 +1721,7 @@ function App() {
     const name = file.name || (file.type.startsWith("image/") ? pastedImageName(file.type || "image/png") : "pasted-file.txt");
     if (file.type.startsWith("image/")) {
       if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
-        throw new Error(lang === "zh"
-          ? `${name} 超过 20 MB 图片上限。`
-          : `${name} exceeds the 20 MB image limit.`);
+        throw new Error(t("ui.image-too-large", lang, { name }));
       }
       const data = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -2284,14 +1735,10 @@ function App() {
     const extension = name.split(".").pop()?.toLowerCase() || "";
     const nativeDocuments = ["pdf", "docx", "xlsx", "pptx"];
     if (nativeDocuments.includes(extension)) {
-      throw new Error(lang === "zh"
-        ? `${name} 是二进制文档，请使用附件按钮通过原生解析器添加。`
-        : `${name} is a binary document. Use the attachment button so it can be parsed.`);
+      throw new Error(t("ui.binary-document", lang, { name }));
     }
     if (["doc", "xls", "ppt", "zip", "7z"].includes(extension)) {
-      throw new Error(lang === "zh"
-        ? `${name} 的格式暂不支持，请先转换为 PDF、DOCX、XLSX、PPTX 或文本。`
-        : `${name} is not supported yet. Convert it to PDF, DOCX, XLSX, PPTX, or text first.`);
+      throw new Error(t("ui.unsupported-format", lang, { name }));
     }
 
     const textSlice = file.slice(0, MAX_ATTACHMENT_TEXT_PER_FILE * 4);
@@ -2314,14 +1761,10 @@ function App() {
   ) => {
     const unexplainedInvalid = fitted.invalid.filter((name) => !warnedNames.has(name));
     if (unexplainedInvalid.length > 0) {
-      addLog(lang === "zh"
-        ? `没有可发送内容，未添加：${unexplainedInvalid.join("、")}`
-        : `No sendable content was found. Not added: ${unexplainedInvalid.join(", ")}`, "error", true, sessionId);
+      addLog(t("ui.nothing-sendable-not-added", lang, { names: unexplainedInvalid.join(lang === "zh" ? "、" : ", ") }), "error", true, sessionId);
     }
     if (fitted.overBudget.length > 0) {
-      addLog(lang === "zh"
-        ? `附件超出限制（文本共 100,000 字符；图片单张 20 MB、最多 8 张且共 40 MB），未添加：${fitted.overBudget.join("、")}`
-        : `Attachment limits were exceeded (100,000 text characters; images: 20 MB each, 8 files and 40 MB total). Not added: ${fitted.overBudget.join(", ")}`, "error", true, sessionId);
+      addLog(t("ui.attachment-limits-exceeded", lang, { names: fitted.overBudget.join(lang === "zh" ? "、" : ", ") }), "error", true, sessionId);
     }
   };
 
@@ -2362,7 +1805,7 @@ function App() {
       reportAttachmentFit(fitted, targetSessionId);
       for (const result of results) {
         if (result.status === "rejected") {
-          addLog(`${lang === "zh" ? "添加附件失败" : "Failed to attach file"}: ${result.reason}`, "error", true, targetSessionId);
+          addLog(`${t("ui.failed-to-attach-file", lang)}: ${result.reason}`, "error", true, targetSessionId);
         }
       }
     } finally {
@@ -2399,7 +1842,7 @@ function App() {
         }
         const data = file.content.slice(0, MAX_ATTACHMENT_TEXT_PER_FILE);
         const emptyWarning = !file.warning && !data.trim()
-          ? (lang === "zh" ? "没有提取到可发送的文本；扫描版 PDF 需要先做 OCR。" : "No sendable text was extracted. Scanned PDFs need OCR first.")
+          ? (t("ui.no-sendable-text-was-extracted", lang))
           : undefined;
         return {
           name: file.name,
@@ -2422,11 +1865,11 @@ function App() {
       const warnedNames = new Set(next.filter((file) => file.warning).map((file) => file.name));
       for (const file of next) {
         if (file.warning) addLog(`${file.name}: ${file.warning}`, "error", true, targetSessionId);
-        else if (file.truncated) addLog(`${file.name}: ${lang === "zh" ? "内容过长，已截断" : "content was truncated"}`, "info", true, targetSessionId);
+        else if (file.truncated) addLog(`${file.name}: ${t("ui.content-was-truncated", lang)}`, "info", true, targetSessionId);
       }
       reportAttachmentFit(fitted, targetSessionId, warnedNames);
     } catch (error) {
-      addLog(`${lang === "zh" ? "添加附件失败" : "Failed to attach files"}: ${error}`, "error", true, targetSessionId);
+      addLog(`${t("ui.failed-to-attach-files", lang)}: ${error}`, "error", true, targetSessionId);
     } finally {
       setAttachmentLoadingBySession((previous) => ({ ...previous, [targetSessionId]: false }));
     }
@@ -2497,7 +1940,7 @@ function App() {
           selectedPath: null,
           diff: "",
           loading: false,
-          treeError: lang === "zh" ? "请先设置工作目录" : "Choose a working directory first",
+          treeError: t("ui.choose-a-working-directory-first", lang),
           changesError: "",
         },
       }));
@@ -2558,7 +2001,7 @@ function App() {
     const sessionId = currentSessionId;
     const workDir = effectiveWorkDir;
     if (attachmentLoadingBySession[sessionId] || sessionMutationLocked) {
-      notify(lang === "zh" ? "请等待附件处理或请求准备完成。" : "Wait for attachment processing or request preparation to finish.", "info");
+      notify(t("ui.wait-for-attachment-processing-or", lang), "info");
       return;
     }
     setAttachmentLoadingBySession((previous) => ({ ...previous, [sessionId]: true }));
@@ -2607,10 +2050,10 @@ function App() {
           : Promise.resolve(""),
       ]);
       const sections = [
-        stagedResult ? `${lang === "zh" ? "--- 已暂存 ---" : "--- Staged ---"}\n${stagedResult}` : "",
-        worktreeResult ? `${lang === "zh" ? "--- 工作区 ---" : "--- Worktree ---"}\n${worktreeResult}` : "",
+        stagedResult ? `${t("ui.staged", lang)}\n${stagedResult}` : "",
+        worktreeResult ? `${t("ui.worktree", lang)}\n${worktreeResult}` : "",
       ].filter(Boolean);
-      const diff = sections.join("\n\n") || (lang === "zh" ? "没有可显示的文本差异。" : "No textual diff to display.");
+      const diff = sections.join("\n\n") || (t("ui.no-textual-diff-to-display", lang));
       setWorkspaceBySession((previous) => {
         if (previous[sessionId]?.workDir !== workDir
           || previous[sessionId]?.selectedPath !== entry.path) return previous;
@@ -2629,10 +2072,10 @@ function App() {
     const workDir = effectiveWorkDir;
     const repositoryRoot = currentWorkspace.repositoryRoot || workDir;
     if (sessionMutationLocked) {
-      notify(lang === "zh" ? "任务运行中不能恢复文件。" : "Files cannot be restored while the task is running.", "error");
+      notify(t("ui.files-cannot-be-restored-while", lang), "error");
       return;
     }
-    if (!window.confirm(lang === "zh" ? `恢复 ${entry.path}？未提交改动会丢失。` : `Restore ${entry.path}? Uncommitted changes will be lost.`)) return;
+    if (!window.confirm(t("ui.confirm-restore-file", lang, { path: entry.path }))) return;
     try {
       if (entry.indexStatus.trim() && entry.indexStatus !== "?") {
         await invoke("restore_git_path", { workDir, path: entry.path, staged: true });
@@ -2672,12 +2115,10 @@ function App() {
     const checkpoint = checkpointBySession[sessionId];
     if (!checkpoint) return;
     if (sessionMutationLocked) {
-      notify(lang === "zh" ? "请先停止当前任务，再恢复本轮。" : "Stop the current task before restoring the run.", "error");
+      notify(t("ui.stop-the-current-task-before", lang), "error");
       return;
     }
-    if (!window.confirm(lang === "zh"
-      ? `恢复 ${checkpoint.workDir} 到本轮工具执行前？当前未提交改动会丢失。`
-      : `Restore ${checkpoint.workDir} to before this run?`)) return;
+    if (!window.confirm(t("ui.confirm-restore-checkpoint", lang, { dir: checkpoint.workDir }))) return;
     try {
       await invoke("restore_git_checkpoint", { workDir: checkpoint.workDir, commit: checkpoint.commit });
       if (currentSessionIdRef.current === sessionId && effectiveWorkDirRef.current === checkpoint.workDir) {
@@ -2703,13 +2144,13 @@ function App() {
     const checkpoint = checkpointBySession[sessionId];
     if (!checkpoint) return;
     if (sessionMutationLocked) {
-      notify(lang === "zh" ? "任务完成后才能保留本轮改动。" : "Run changes can be kept after the task finishes.", "error");
+      notify(t("ui.run-changes-can-be-kept", lang), "error");
       return;
     }
     try {
       await invoke("delete_git_checkpoint", { workDir: checkpoint.workDir, reference: checkpoint.reference });
       setCheckpointBySession((previous) => ({ ...previous, [sessionId]: null }));
-      notify(lang === "zh" ? "已保留本轮改动。" : "Run changes kept.", "success");
+      notify(t("ui.run-changes-kept", lang), "success");
     } catch (error) {
       addLog(String(error), "error", true, sessionId);
     }
@@ -2732,7 +2173,7 @@ function App() {
       const selected = await invoke<string | null>("pick_workspace_directory");
       if (selected) updateOnboardingValues({ workDir: selected });
     } catch (error) {
-      notify(`${lang === "zh" ? "无法打开目录选择器" : "Could not open the folder picker"}: ${error}`, "error");
+      notify(`${t("ui.could-not-open-the-folder", lang)}: ${error}`, "error");
     }
   };
 
@@ -2756,17 +2197,15 @@ function App() {
       if (!selectedModelExists) {
         setOnboardingConnection({
           state: "error",
-          message: lang === "zh"
-            ? `端点可访问，但模型列表中没有 ${snapshot.model}。`
-            : `The endpoint is reachable, but ${snapshot.model} is not in its model list.`,
+          message: t("ui.model-not-in-list", lang, { model: snapshot.model }),
         });
         return;
       }
       setOnboardingConnection({
         state: "success",
         message: list.length > 0
-          ? (lang === "zh" ? `端点可用，发现 ${list.length} 个模型。` : `Endpoint ready. Found ${list.length} models.`)
-          : (lang === "zh" ? "端点可用，模型列表为空。" : "Endpoint ready. The model list is empty."),
+          ? t("ui.endpoint-found-models", lang, { count: String(list.length) })
+          : (t("ui.endpoint-ready-the-model-list", lang)),
       });
     } catch (error) {
       if (onboardingTestSequenceRef.current !== sequence || onboardingValuesRef.current !== snapshot) return;
@@ -2811,9 +2250,9 @@ function App() {
       try { localStorage.setItem("gx_onboarding_v1", "complete"); } catch { /* ignore */ }
       try { sessionStorage.removeItem("gx_onboarding_v1_dismissed"); } catch { /* ignore */ }
       setOnboardingOpen(false);
-      notify(lang === "zh" ? "首次设置已保存。" : "Setup saved.", "success");
+      notify(t("ui.setup-saved", lang), "success");
     } catch (error) {
-      notify(`${lang === "zh" ? "无法保存首次设置" : "Could not save setup"}: ${error}`, "error");
+      notify(`${t("ui.could-not-save-setup", lang)}: ${error}`, "error");
     }
   };
 
@@ -3022,7 +2461,7 @@ function App() {
     } catch (e) {
       const message = String(e);
       if (message.toLowerCase().includes("cancelled")) {
-        addLog(lang === "zh" ? "已取消压缩上下文。" : "History compaction cancelled.", "info", false, sessionId);
+        addLog(t("ui.history-compaction-cancelled", lang), "info", false, sessionId);
       } else {
         addLog(t("compact.failed", lang) + message, "error", true, sessionId);
       }
@@ -3041,7 +2480,7 @@ function App() {
       compactBackupContextSummary: undefined,
       updatedAt: Date.now(),
     } : session));
-    notify(lang === "zh" ? "已恢复压缩前的对话。" : "Conversation restored.", "success");
+    notify(t("ui.conversation-restored", lang), "success");
   };
 
   const saveConfig = async () => {
@@ -3741,9 +3180,7 @@ function App() {
 
   const summaryAsOutboundMessage = (summary: ContextSummary) => ({
     role: "user" as const,
-    content: `${lang === "zh"
-      ? "[前情提要——更早的对话已压缩为以下摘要]"
-      : "[Earlier conversation, compacted into this summary]"}\n${summary.summary}`,
+    content: `${t("ui.summary-preamble", lang)}\n${summary.summary}`,
   });
 
   const resolveSessionRequest = (sessionConfig: SessionConfig) => {
@@ -3847,9 +3284,7 @@ function App() {
       const boundarySource = coveredPairs[coveredPairs.length - 1]?.source;
       if (boundarySource?.id) {
         addLog(
-          lang === "zh"
-            ? `上下文约 ${formatTokenCount(estimatedRequestTokens)} tokens，自动压缩 ${cutOutbound} 条早期消息…`
-            : `Context is ~${formatTokenCount(estimatedRequestTokens)} tokens; auto-compacting ${cutOutbound} earlier messages…`,
+          t("ui.auto-compacting", lang, { tokens: formatTokenCount(estimatedRequestTokens), count: String(cutOutbound) }),
           "info",
           false,
           targetSessionId,
@@ -3900,9 +3335,7 @@ function App() {
             sessionMessages = [summaryAsOutboundMessage(nextSummary), ...sessionMessages.slice(cutOutbound)];
             estimatedRequestTokens = estimateOutboundTokens(sessionMessages);
             addLog(
-              lang === "zh"
-                ? `已压缩为摘要，当前上下文约 ${formatTokenCount(estimatedRequestTokens)} tokens。`
-                : `Compacted into a summary; context is now ~${formatTokenCount(estimatedRequestTokens)} tokens.`,
+              t("ui.compacted-summary", lang, { tokens: formatTokenCount(estimatedRequestTokens) }),
               "success",
               false,
               targetSessionId,
@@ -3910,9 +3343,7 @@ function App() {
           }
         } catch (error) {
           addLog(
-            lang === "zh"
-              ? `自动压缩失败（继续使用完整历史）：${error}`
-              : `Auto-compact failed (continuing with full history): ${error}`,
+            t("ui.auto-compact-failed", lang, { error: String(error) }),
             "error",
             false,
             targetSessionId,
@@ -3924,9 +3355,7 @@ function App() {
     if (estimatedRequestTokens > requestContextLimit * 0.9) {
       finishPreparingRequest();
       addLog(
-        lang === "zh"
-          ? `预计上下文 ${formatTokenCount(estimatedRequestTokens)} tokens，接近或超过模型上限 ${formatTokenCount(requestContextLimit)}。请先压缩上下文或移除附件。`
-          : `Estimated context is ${formatTokenCount(estimatedRequestTokens)} tokens, near or above the ${formatTokenCount(requestContextLimit)} model limit. Compact the context or remove attachments first.`,
+        t("ui.context-near-limit", lang, { tokens: formatTokenCount(estimatedRequestTokens), limit: formatTokenCount(requestContextLimit) }),
         "error",
         true,
         targetSessionId,
@@ -3947,7 +3376,7 @@ function App() {
         setCheckpointBySession((previous) => ({ ...previous, [targetSessionId]: null }));
       } catch (error) {
         finishPreparingRequest();
-        addLog(`${lang === "zh" ? "无法接受上一轮改动" : "Could not accept the previous run"}: ${error}`, "error", true, targetSessionId);
+        addLog(`${t("ui.could-not-accept-the-previous", lang)}: ${error}`, "error", true, targetSessionId);
         return false;
       }
     }
@@ -3956,7 +3385,7 @@ function App() {
       onAccepted?.();
     } catch (error) {
       finishPreparingRequest();
-      addLog(`${lang === "zh" ? "无法启动请求" : "Could not start request"}: ${error}`, "error", true, targetSessionId);
+      addLog(`${t("ui.could-not-start-request", lang)}: ${error}`, "error", true, targetSessionId);
       return false;
     }
 
@@ -4015,7 +3444,7 @@ function App() {
   const createBranchSession = (source: ChatSession, messages: Message[]) => {
     const branch = createSession(
       source.sessionConfig.mode,
-      `${source.title || t("session.new", lang)} ${lang === "zh" ? "(分支)" : "(branch)"}`,
+      `${source.title || t("session.new", lang)} ${t("ui.branch", lang)}`,
       messages,
     );
     branch.sessionConfig = { ...source.sessionConfig };
@@ -4149,7 +3578,7 @@ function App() {
         [sessionId]: { requestId, status: "stopping" },
       }));
       await invoke("cancel_agent_session", { requestId });
-      addLog(lang === "zh" ? "已请求停止当前输出。" : "Stop requested for current output.", "info", false, sessionId);
+      addLog(t("ui.stop-requested-for-current-output", lang), "info", false, sessionId);
     } catch (e) {
       addLog(`Stop request failed: ${e}`, "error", true, sessionId);
       if (activeRequestIdRef.current === requestId) {
@@ -4174,7 +3603,7 @@ function App() {
         updatedAt: Date.now(),
       } : s));
       setPrompt("");
-      addLog(lang === "zh" ? "干预指令已发送" : "Steering message sent", "info", false, sessionId);
+      addLog(t("ui.steering-message-sent", lang), "info", false, sessionId);
     } catch (e) {
       addLog(`Steering error: ${e}`, "error", true, sessionId);
     }
@@ -4360,7 +3789,7 @@ function App() {
       try {
         workDir = await invoke<string | null>("pick_workspace_directory");
       } catch (error) {
-        notify((lang === "zh" ? "无法打开目录选择器：" : "Could not open the folder picker: ") + error, "error");
+        notify((t("ui.could-not-open-the-folder-2", lang)) + error, "error");
         return null;
       }
       if (!workDir) return null;
@@ -4492,15 +3921,15 @@ function App() {
     if (!sessionStorageReady) return;
     if (sessions.length <= 1) return;
     if (attachmentLoadingBySession[id] || preparingRequestSessionId === id) {
-      notify(lang === "zh" ? "附件仍在解析，请稍候再删除会话。" : "Wait for attachments to finish parsing before deleting this session.", "error");
+      notify(t("ui.wait-for-attachments-to-finish", lang), "error");
       return;
     }
     if (runtimeBySession[id]) {
-      notify(lang === "zh" ? "运行中的会话不能删除，请先停止任务。" : "Stop the running task before deleting this session.", "error");
+      notify(t("ui.stop-the-running-task-before", lang), "error");
       return;
     }
     const target = sessions.find(s => s.id === id);
-    if (!window.confirm(lang === "zh" ? `确定删除会话"${target?.title || "未命名"}"吗？` : `Delete session "${target?.title || "Untitled"}"?`)) return;
+    if (!window.confirm(t("ui.confirm-delete-session", lang, { title: target?.title || t("session.untitled", lang) }))) return;
     const remaining = sessions.filter((s) => s.id !== id);
     const targetMode = target?.sessionConfig.mode || sidebarNav;
     const orderedModeSessions = sessions
@@ -4523,7 +3952,7 @@ function App() {
       delete sessionObjCacheRef.current[id];
       delete sessionJsonCacheRef.current[id];
     } catch (error) {
-      addLog(`${lang === "zh" ? "删除失败" : "Delete failed"}: ${error}`, "error", true);
+      addLog(`${t("ui.delete-failed", lang)}: ${error}`, "error", true);
       return;
     }
     if (currentSessionId === id) {
@@ -4531,7 +3960,7 @@ function App() {
       setSidebarNav(fallbackSession.sessionConfig.mode || "chat");
     }
     notify(
-      lang === "zh" ? `已删除会话：${target?.title || "未命名"}` : `Deleted session: ${target?.title || "Untitled"}`,
+      t("ui.deleted-session", lang, { title: target?.title || t("session.untitled", lang) }),
       "success",
     );
   };
@@ -4550,9 +3979,7 @@ function App() {
         : [...prev.tools_enabled, tool],
     }));
     addLog(
-      lang === "zh"
-        ? `${meta?.label || tool} 已${wasEnabled ? "禁用" : "启用"}`
-        : `${meta?.label || tool} ${wasEnabled ? "disabled" : "enabled"}`,
+      t(wasEnabled ? "ui.tool-disabled" : "ui.tool-enabled", lang, { label: meta?.label || tool }),
       wasEnabled ? "info" : "success",
       true
     );
@@ -4582,9 +4009,9 @@ function App() {
       if (isStreaming && currentMode === "code") {
         handleSteeringMessage();
       } else if (hasPendingRequest && !isStreaming) {
-        notify(lang === "zh" ? "另一个会话正在运行，请先查看或停止该任务。" : "Another session is running. View or stop that task first.", "info");
+        notify(t("ui.another-session-is-running-view", lang), "info");
       } else if (isAttachmentLoading) {
-        notify(lang === "zh" ? "请等待附件解析完成。" : "Wait for attachments to finish parsing.", "info");
+        notify(t("ui.wait-for-attachments-to-finish-2", lang), "info");
       } else {
         handleSendMessage();
       }
@@ -4675,14 +4102,14 @@ function App() {
         <div className="context-divider-line" />
         <span className="context-divider-label">{
           currentSession.contextSummary?.dividerId === msg.id
-            ? (lang === "zh" ? "已压缩为摘要 · 模型可见摘要与后续消息" : "Compacted to summary · model sees summary + newer messages")
-            : (lang === "zh" ? "上方上下文已忽略" : "Context Ignored Above")
+            ? (t("ui.compacted-to-summary-model-sees", lang))
+            : (t("ui.context-ignored-above", lang))
         }</span>
         <div className="context-divider-line" />
         <button
           className="context-divider-remove"
           disabled={sessionMutationLocked}
-          aria-label={lang === "zh" ? "移除上下文分隔线" : "Remove context divider"}
+          aria-label={t("ui.remove-context-divider", lang)}
           onClick={() => {
             setSessions(prev => prev.map(s => s.id === currentSessionId ? {
               ...s,
@@ -4723,9 +4150,9 @@ function App() {
           />
           <div className="edit-message-actions">
             <button className="btn btn-primary btn-sm" disabled={sessionMutationLocked} onClick={() => { void handleEditBranch(mIdx); }}>
-              {lang === "zh" ? "创建分支" : "Create branch"}
+              {t("ui.create-branch", lang)}
             </button>
-            <button className="btn btn-secondary btn-sm" onClick={() => setEditingMessageIdx(null)}>{lang === "zh" ? "取消" : "Cancel"}</button>
+            <button className="btn btn-secondary btn-sm" onClick={() => setEditingMessageIdx(null)}>{t("ui.cancel", lang)}</button>
           </div>
         </div>
       ) : (
@@ -4790,13 +4217,13 @@ function App() {
               <>
                 {/* Tool actions — rendered BEFORE content, in order */}
                 {msg.actions && msg.actions.length > 0 && <div className="agent-action-timeline">
-                <div className="agent-action-timeline-label">{lang === "zh" ? ("工具轨迹 · " + msg.actions.length) : ("Tool activity · " + msg.actions.length)}</div>
+                <div className="agent-action-timeline-label">{t("ui.tool-activity-count", lang, { count: String(msg.actions.length) })}</div>
                 {msg.actions.map((act, aIdx) => (
                   <Fragment key={`${act.id}-${aIdx}`}>
                     {act.name === "todo_write" && (
                       <TaskProgress
                         argumentsJson={act.arguments}
-                        title={lang === "zh" ? "任务进度" : "Task progress"}
+                        title={t("ui.task-progress", lang)}
                       />
                     )}
                     <div className={`agent-action-card ${act.status}`}>
@@ -4901,7 +4328,7 @@ function App() {
                               <span className="search-card-icon">&#128270;</span>
                               <span className="search-card-query">{ss.query}</span>
                               <span className="search-card-meta-inline">
-                                {ss.resultCount ?? sources.length} {lang === "zh" ? "个结果" : "results"}
+                                {ss.resultCount ?? sources.length} {t("ui.results", lang)}
                                 {ss.duration != null && ` · ${ss.duration.toFixed(1)}s`}
                                 {ss.provider && ` · ${ss.provider}`}
                               </span>
@@ -4955,7 +4382,7 @@ function App() {
                       ) : (
                         <div key={aIdx} className="message-attachment-file">
                           <FileText size={12} />
-                          <span title={att.warning || (att.truncated ? (lang === "zh" ? "内容已截断" : "Content truncated") : att.path)}>
+                          <span title={att.warning || (att.truncated ? (t("ui.content-truncated", lang)) : att.path)}>
                             {att.name}{att.warning ? " !" : att.truncated ? " …" : ""}
                           </span>
                         </div>
@@ -4974,12 +4401,12 @@ function App() {
               aria-live="polite"
             >
               {messageHasPendingApproval(msg) ? (
-                <><ShieldAlert size={11} /> <span>{lang === "zh" ? "等待确认" : "Awaiting approval"}</span></>
+                <><ShieldAlert size={11} /> <span>{t("ui.awaiting-approval", lang)}</span></>
               ) : currentRuntime?.status === "stopping" ? (
-                <><Loader2 size={11} className="animate-spin" /> <span>{lang === "zh" ? "正在停止" : "Stopping"}</span></>
+                <><Loader2 size={11} className="animate-spin" /> <span>{t("ui.stopping", lang)}</span></>
               ) : (
                 <>
-                  <span>{lang === "zh" ? "正在回答" : "Answering"}</span>
+                  <span>{t("ui.answering", lang)}</span>
                   <span className="streaming-answer-dots" aria-hidden="true">
                     <i />
                     <i />
@@ -5105,7 +4532,7 @@ function App() {
 
   const handleImportSessions = () => {
     if (sessionMutationLocked || hasAttachmentLoading) {
-      notify(lang === "zh" ? "请先停止任务并等待附件解析完成，再导入会话。" : "Stop the active task and wait for attachments to finish parsing before importing sessions.", "error");
+      notify(t("ui.stop-the-active-task-and", lang), "error");
       closeMenu();
       return;
     }
@@ -5131,7 +4558,7 @@ function App() {
 
   const handleClearAll = async () => {
     if (sessionMutationLocked || hasAttachmentLoading) {
-      notify(lang === "zh" ? "请先停止任务并等待附件解析完成，再清空会话。" : "Stop the active task and wait for attachments to finish parsing before clearing sessions.", "error");
+      notify(t("ui.stop-the-active-task-and-2", lang), "error");
       closeMenu();
       return;
     }
@@ -5141,7 +4568,7 @@ function App() {
         await replaceAllSessions([replacement], replacement.id);
         notify(t("settings.cleared", lang), "success");
       } catch (error) {
-        notify(`${lang === "zh" ? "清空失败" : "Clear failed"}: ${error}`, "error");
+        notify(`${t("ui.clear-failed", lang)}: ${error}`, "error");
       }
     }
     closeMenu();
@@ -5237,15 +4664,15 @@ function App() {
             <input
               type="text"
               className="session-search-input"
-              placeholder={lang === "zh" ? "搜索会话..." : "Search sessions..."}
+              placeholder={t("ui.search-sessions", lang)}
               value={sessionSearch}
               onChange={(e) => setSessionSearch(e.target.value)}
-              aria-label={lang === "zh" ? "搜索会话" : "Search sessions"}
+              aria-label={t("ui.search-sessions-2", lang)}
             />
             {sessionSearch && (
               <button
                 className="session-search-clear"
-                aria-label={lang === "zh" ? "清除会话搜索" : "Clear session search"}
+                aria-label={t("ui.clear-session-search", lang)}
                 onClick={() => setSessionSearch("")}
               >
                 <X size={10} />
@@ -5255,7 +4682,7 @@ function App() {
         </div>
 
         {/* Session List */}
-        <div ref={historyListRef} className="history-list" aria-label={lang === "zh" ? "会话列表" : "Conversation list"}>
+        <div ref={historyListRef} className="history-list" aria-label={t("ui.conversation-list", lang)}>
           {visibleSessions.map((s) => {
               const activePreset = ALL_PRESETS.find(p => p.id === s.sessionConfig.activeRolePresetId);
               const runtime = runtimeBySession[s.id];
@@ -5311,11 +4738,11 @@ function App() {
                     {s.title || t("session.new", lang)}
                   </span>
                   <span className="history-meta">
-                    {s.messages.filter(m => m.role !== "context_divider").length}{lang === "zh" ? "条" : " msgs"}
-                    {runtime && <> · {runtime.status === "stopping" ? (lang === "zh" ? "停止中" : "stopping") : (lang === "zh" ? "运行中" : "running")}</>}
-                    {awaitingApproval && <> · {lang === "zh" ? "待审批" : "approval"}</>}
+                    {s.messages.filter(m => m.role !== "context_divider").length}{t("ui.msgs", lang)}
+                    {runtime && <> · {runtime.status === "stopping" ? (t("ui.stopping-2", lang)) : (t("ui.running", lang))}</>}
+                    {awaitingApproval && <> · {t("ui.approval", lang)}</>}
                     {s.messages.length > 0 && s.messages[s.messages.length - 1].timestamp && (
-                      <> · {new Date(s.messages[s.messages.length - 1].timestamp!).toLocaleTimeString(lang === "zh" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit" })}</>
+                      <> · {new Date(s.messages[s.messages.length - 1].timestamp!).toLocaleTimeString(t("ui.en-us", lang), { hour: "2-digit", minute: "2-digit" })}</>
                     )}
                   </span>
                 </div>
@@ -5328,7 +4755,7 @@ function App() {
           })}
           {visibleSessions.length === 0 && debouncedSearch.trim() && (
             <div className="search-empty-hint">
-              {lang === "zh" ? "没有匹配的会话" : "No matching sessions"}
+              {t("ui.no-matching-sessions", lang)}
             </div>
           )}
         </div>
@@ -5454,7 +4881,7 @@ function App() {
                           }
                         }
                       } catch (e) {
-                        addLog(`${lang === "zh" ? "导入失败" : "Import failed"}: ${e}`, "error");
+                        addLog(`${t("ui.import-failed", lang)}: ${e}`, "error");
                       }
                     };
                     input.click();
@@ -5465,7 +4892,7 @@ function App() {
                   <button className="context-menu-item" onClick={() => {
                     const s = sessions.find(s => s.id === contextMenu.sessionId);
                     if (!s) return;
-                    const newTitle = window.prompt(lang === "zh" ? "重命名会话:" : "Rename session:", s.title);
+                    const newTitle = window.prompt(t("ui.rename-session", lang), s.title);
                     if (newTitle !== null && newTitle.trim()) {
                       setSessions(prev => prev.map(sess => sess.id === contextMenu.sessionId ? { ...sess, title: newTitle.trim() } : sess));
                     }
@@ -5504,10 +4931,10 @@ function App() {
           <button
             className="sidebar-tools-summary"
             onClick={() => { setSettingsTab("agent"); setSettingsOpen(true); }}
-            title={lang === "zh" ? "管理 Agent 与工具" : "Manage agent and tools"}
+            title={t("ui.manage-agent-and-tools", lang)}
           >
             <span className="sidebar-tools-summary-icon"><Zap size={13} /></span>
-            <span>{lang === "zh" ? "已启用工具" : "Enabled tools"}</span>
+            <span>{t("ui.enabled-tools", lang)}</span>
             <strong>{config.tools_enabled.length}</strong>
             <ChevronRight size={12} aria-hidden="true" />
           </button>
@@ -5525,10 +4952,10 @@ function App() {
             <ConnectionStatus
               compact
               state={resolvedCurrentConfig.base_url && resolvedCurrentConfig.model && (resolvedCurrentConfig.provider === "ollama" || Boolean(resolvedCurrentConfig.api_key)) ? "configured" : "unconfigured"}
-              label={lang === "zh" ? "模型配置" : "Model configuration"}
+              label={t("ui.model-configuration", lang)}
               detail={resolvedCurrentConfig.base_url
-                ? `${lang === "zh" ? "已配置" : "Configured"}: ${resolvedCurrentConfig.base_url}`
-                : (lang === "zh" ? "尚未配置" : "Not configured")}
+                ? `${t("ui.configured", lang)}: ${resolvedCurrentConfig.base_url}`
+                : (t("ui.not-configured", lang))}
               onClick={() => { setSettingsTab("model"); setSettingsOpen(true); }}
             />
             <button className="panel-toggle-btn" onClick={() => setSettingsOpen(true)} title={t("settings.title", lang)}>
@@ -5544,7 +4971,7 @@ function App() {
         onMouseDown={handleSidebarDrag}
         role="separator"
         aria-orientation="vertical"
-        aria-label={lang === "zh" ? "调整会话栏宽度" : "Resize conversation sidebar"}
+        aria-label={t("ui.resize-conversation-sidebar", lang)}
         aria-valuemin={180}
         aria-valuemax={400}
         aria-valuenow={sidebarWidth}
@@ -5590,8 +5017,8 @@ function App() {
               )}
               <div className="panel-subtitle">
                 {effectiveWorkDir || "."}
-                {sessionSaveStatus === "saving" && ` · ${lang === "zh" ? "保存中" : "saving"}`}
-                {sessionSaveStatus === "error" && ` · ${lang === "zh" ? "保存失败" : "save failed"}`}
+                {sessionSaveStatus === "saving" && ` · ${t("ui.saving", lang)}`}
+                {sessionSaveStatus === "error" && ` · ${t("ui.save-failed", lang)}`}
               </div>
             </div>
             <div className="panel-header-controls">
@@ -5606,7 +5033,7 @@ function App() {
                   className="panel-toggle-btn"
                   onClick={toggleTheme}
                   title="Toggle theme"
-                  aria-label={lang === "zh" ? "切换主题" : "Toggle theme"}
+                  aria-label={t("ui.toggle-theme", lang)}
                 >
                   {config.theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
                 </button>
@@ -5709,7 +5136,7 @@ function App() {
                       } : session));
                     }}
                   >
-                    <option value="">{lang === "zh" ? "继承全局连接" : "Inherit global connection"}</option>
+                    <option value="">{t("ui.inherit-global-connection", lang)}</option>
                     {Object.entries(config.profiles).map(([profileId, profile]) => (
                       <option key={profileId} value={profileId}>{profile.name} ({profile.default_model})</option>
                     ))}
@@ -5729,9 +5156,9 @@ function App() {
                       } : s));
                     }}
                   >
-                    <option value="">{lang === "zh" ? `继承 (${resolvedCurrentConfig.model})` : `Inherit (${resolvedCurrentConfig.model})`}</option>
+                    <option value="">{t("ui.inherit-value", lang, { value: resolvedCurrentConfig.model })}</option>
                     {models.length > 0 && (
-                      <optgroup label={lang === "zh" ? "模型" : "Available Models"}>
+                      <optgroup label={t("ui.available-models", lang)}>
                         {models.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).map((m) => (
                           <option key={m.id} value={m.id}>{m.id}</option>
                         ))}
@@ -5755,18 +5182,18 @@ function App() {
                     const value = event.target.value === "inherit" ? null : Number(event.target.value);
                     setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, contextLimit: value }, updatedAt: Date.now() } : s));
                   }}>
-                    <option value="inherit">{lang === "zh" ? ("继承全局（" + formatContextBudget(config.context_limit) + "）") : ("Inherit global (" + formatContextBudget(config.context_limit) + ")")}</option>
+                    <option value="inherit">{t("ui.inherit-global-value", lang, { value: formatContextBudget(config.context_limit) })}</option>
                     {CONTEXT_BUDGET_OPTIONS.map((value) => <option key={value} value={value}>{formatContextBudget(value)}</option>)}
-                    <option value="custom">{lang === "zh" ? "自定义" : "Custom"}</option>
+                    <option value="custom">{t("ui.custom", lang)}</option>
                   </select>
                   {(customSessionContextBudget[currentSessionId] || (currentSession.sessionConfig.contextLimit !== null && !CONTEXT_BUDGET_OPTIONS.includes(currentSession.sessionConfig.contextLimit as typeof CONTEXT_BUDGET_OPTIONS[number]))) && <input type="number" className="session-input session-input-sm" min={1000} max={MAX_CONTEXT_BUDGET} step={1000} value={currentSession.sessionConfig.contextLimit ?? resolvedCurrentConfig.context_limit} onChange={(event) => setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, contextLimit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1000, Number(event.target.value) || 1000)) }, updatedAt: Date.now() } : s))} />}
                 </label>
                 <details className="session-settings-advanced">
-                  <summary>{lang === "zh" ? "高级生成参数" : "Advanced generation"}</summary>
+                  <summary>{t("ui.advanced-generation", lang)}</summary>
                   <div className="session-settings-advanced-grid">
                 {/* Temperature */}
                 <label className="session-field">
-                  <span className="session-label">{t("session.temperature", lang)}: {resolvedCurrentConfig.temperature}{currentSession.sessionConfig.temperature === null ? ` (${lang === "zh" ? "继承" : "inherit"})` : ""}</span>
+                  <span className="session-label">{t("session.temperature", lang)}: {resolvedCurrentConfig.temperature}{currentSession.sessionConfig.temperature === null ? ` (${t("ui.inherit", lang)})` : ""}</span>
                   <input
                     type="range"
                     min={0}
@@ -5787,11 +5214,11 @@ function App() {
                       sessionConfig: { ...session.sessionConfig, temperature: null },
                       updatedAt: Date.now(),
                     } : session));
-                  }}>{lang === "zh" ? "继承" : "Inherit"}</button>
+                  }}>{t("ui.inherit-2", lang)}</button>
                 </label>
                 {/* Top P */}
                 <label className="session-field">
-                  <span className="session-label">{t("session.topP", lang)}: {resolvedCurrentConfig.top_p}{currentSession.sessionConfig.topP === null ? ` (${lang === "zh" ? "继承" : "inherit"})` : ""}</span>
+                  <span className="session-label">{t("session.topP", lang)}: {resolvedCurrentConfig.top_p}{currentSession.sessionConfig.topP === null ? ` (${t("ui.inherit", lang)})` : ""}</span>
                   <input
                     type="range"
                     min={0}
@@ -5812,7 +5239,7 @@ function App() {
                       sessionConfig: { ...session.sessionConfig, topP: null },
                       updatedAt: Date.now(),
                     } : session));
-                  }}>{lang === "zh" ? "继承" : "Inherit"}</button>
+                  }}>{t("ui.inherit-2", lang)}</button>
                 </label>
                 {/* Max Tokens */}
                 <label className="session-field">
@@ -5825,9 +5252,9 @@ function App() {
                       updatedAt: Date.now(),
                     } : session));
                   }}>
-                    <option value="inherit">{lang === "zh" ? "继承全局" : "Inherit global"}</option>
-                    <option value="unlimited">{lang === "zh" ? "不限制" : "Unlimited"}</option>
-                    <option value="custom">{lang === "zh" ? "自定义" : "Custom"}</option>
+                    <option value="inherit">{t("ui.inherit-global", lang)}</option>
+                    <option value="unlimited">{t("ui.unlimited", lang)}</option>
+                    <option value="custom">{t("ui.custom", lang)}</option>
                   </select>
                   {typeof currentSession.sessionConfig.maxTokens === "number" && <input type="number" className="session-input session-input-sm" min={1} value={currentSession.sessionConfig.maxTokens} onChange={(event) => {
                     setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
@@ -5848,15 +5275,15 @@ function App() {
                       updatedAt: Date.now(),
                     } : session));
                   }}>
-                    <option value="inherit">{lang === "zh" ? `继承 (${resolvedCurrentConfig.streaming ? "开" : "关"})` : `Inherit (${resolvedCurrentConfig.streaming ? "on" : "off"})`}</option>
-                    <option value="true">{lang === "zh" ? "开启" : "On"}</option>
-                    <option value="false">{lang === "zh" ? "关闭" : "Off"}</option>
+                    <option value="inherit">{t("ui.inherit-value", lang, { value: t(resolvedCurrentConfig.streaming ? "settings.on" : "settings.off", lang) })}</option>
+                    <option value="true">{t("ui.on", lang)}</option>
+                    <option value="false">{t("ui.off", lang)}</option>
                   </select>
                 </label>
                   </div>
                 </details>
                 <label className="session-field">
-                  <span className="session-label">{lang === "zh" ? "工作目录" : "Working directory"}</span>
+                  <span className="session-label">{t("ui.working-directory", lang)}</span>
                   <div className="session-workspace-row">
                     <input disabled={Boolean(runtimeBySession[currentSessionId])} className="session-input" value={currentSession.sessionConfig.workDir ?? ""} placeholder={config.default_work_dir || "."} onChange={(event) => {
                       setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
@@ -5868,21 +5295,21 @@ function App() {
                     <button type="button" className="session-btn" disabled={Boolean(runtimeBySession[currentSessionId])} onClick={async () => {
                       const selected = await invoke<string | null>("pick_workspace_directory");
                       if (selected) setSessions((previous) => previous.map((session) => session.id === currentSessionId ? { ...session, sessionConfig: { ...session.sessionConfig, workDir: selected }, updatedAt: Date.now() } : session));
-                    }}>{lang === "zh" ? "选择…" : "Choose…"}</button>
+                    }}>{t("ui.choose", lang)}</button>
                   </div>
                 </label>
                 {currentMode === "code" && (
                   <label className="session-field session-field-row trust-all-field">
-                    <span><span className="session-label">{lang === "zh" ? "信任所有操作" : "Trust all operations"}</span><small>{lang === "zh" ? "跳过普通工具审批；危险命令仍会被拦截" : "Skip ordinary approvals; hard-dangerous commands remain blocked"}</small></span>
+                    <span><span className="session-label">{t("ui.trust-all-operations", lang)}</span><small>{t("ui.skip-ordinary-approvals-hard-dangerous", lang)}</small></span>
                     <input type="checkbox" checked={Boolean(currentSession.sessionConfig.trustAllOperations)} onChange={(event) => {
-                      if (event.target.checked && !window.confirm(lang === "zh" ? "危险操作：编程模式将不再逐次询问工具审批。确定继续吗？" : "Danger: code mode will stop asking for tool approvals. Continue?")) return;
+                      if (event.target.checked && !window.confirm(t("ui.danger-code-mode-will-stop", lang))) return;
                       setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, trustAllOperations: event.target.checked }, updatedAt: Date.now() } : s));
                     }} />
                   </label>
                 )}
                 {/* Thinking Level */}
                 <details className="session-settings-advanced">
-                  <summary>{lang === "zh" ? "显示与推理" : "Display & reasoning"}</summary>
+                  <summary>{t("ui.display-reasoning", lang)}</summary>
                   <div className="session-settings-advanced-grid">
                 <label className="session-field">
                   <span className="session-label">{t("session.thinkingLevel", lang)}</span>
@@ -5896,7 +5323,7 @@ function App() {
                         updatedAt: Date.now(),
                       } : session))}
                     >
-                      {lang === "zh" ? "继承" : "Inherit"}
+                      {t("ui.inherit-2", lang)}
                     </button>
                     {(["low", "medium", "high"] as const).map(level => (
                       <button
@@ -5947,7 +5374,7 @@ function App() {
                 </button>
                 {currentSession.compactBackup && (
                   <button className="btn btn-secondary" disabled={sessionMutationLocked} style={{ marginTop: 8, width: "100%" }} onClick={undoCompact}>
-                    <RotateCcw size={13} /> {lang === "zh" ? "撤销历史压缩" : "Undo history compact"}
+                    <RotateCcw size={13} /> {t("ui.undo-history-compact", lang)}
                   </button>
                 )}
               </div>
@@ -6025,22 +5452,20 @@ function App() {
               >
                 <Loader2 size={13} className="spin" />
                 <span>
-                  {lang === "zh"
-                    ? `“${activeRunSession.title || "未命名"}”${activeRunRuntime?.status === "stopping" ? "正在停止" : "正在运行"}，点击查看`
-                    : `“${activeRunSession.title || "Untitled"}” is ${activeRunRuntime?.status === "stopping" ? "stopping" : "running"} — view task`}
+                  {t(activeRunRuntime?.status === "stopping" ? "ui.run-status-stopping" : "ui.run-status-running", lang, { title: activeRunSession.title || t("session.untitled", lang) })}
                 </span>
               </button>
             )}
             {preparingRequestSessionId !== null && !hasActiveRequest && (
               <div className="attachment-loading-status" role="status">
                 <Loader2 size={13} className="spin" />
-                {lang === "zh" ? "正在校验并准备请求…" : "Validating and preparing request…"}
+                {t("ui.validating-and-preparing-request", lang)}
               </div>
             )}
             {isAttachmentLoading && (
               <div className="attachment-loading-status" role="status">
                 <Loader2 size={13} className="spin" />
-                {lang === "zh" ? "正在解析附件…" : "Parsing attachments…"}
+                {t("ui.parsing-attachments", lang)}
               </div>
             )}
             {pendingApprovals && (
@@ -6057,13 +5482,13 @@ function App() {
                     ) : (
                       <FileText size={11} />
                     )}
-                    <span className="attachment-name" title={att.warning || (att.truncated ? (lang === "zh" ? "内容已截断" : "Content truncated") : att.path)}>
+                    <span className="attachment-name" title={att.warning || (att.truncated ? (t("ui.content-truncated", lang)) : att.path)}>
                       {att.name}{att.warning ? " !" : att.truncated ? " …" : ""}
                     </span>
                     <button
                       className="attachment-remove"
                       disabled={!sessionStorageReady || isAttachmentLoading || preparingRequestSessionId !== null}
-                      aria-label={`${lang === "zh" ? "移除附件" : "Remove attachment"}: ${att.name}`}
+                      aria-label={`${t("ui.remove-attachment", lang)}: ${att.name}`}
                       onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
                     >
                       <X size={10} />
@@ -6087,7 +5512,7 @@ function App() {
                 }}
                 onPaste={handlePasteImage}
                 onKeyDown={handleKeyPress}
-                placeholder={isStreaming && currentMode === "code" ? t("input.steering", lang) : `${t("input.placeholder", lang)} (Shift+Enter ${lang === "zh" ? "换行" : "newline"})`}
+                placeholder={isStreaming && currentMode === "code" ? t("input.steering", lang) : `${t("input.placeholder", lang)} (Shift+Enter ${t("ui.newline", lang)})`}
                 disabled={!sessionStorageReady || (isStreaming && currentMode === "chat") || preparingRequestSessionId === currentSessionId}
                 rows={1}
               />
@@ -6110,7 +5535,7 @@ function App() {
               {rolePresetsOpen && (
                 <div className="role-presets-panel">
                   <div className="role-presets-header">
-                    <span>{lang === "zh" ? "角色预设" : "Role Presets"}</span>
+                    <span>{t("ui.role-presets", lang)}</span>
                     <button className="role-presets-close" onClick={() => { setRolePresetsOpen(false); setCustomPresetForm(false); setEditingCustomPreset(null); }}>
                       <X size={12} />
                     </button>
@@ -6152,7 +5577,7 @@ function App() {
                                 }
                               } : s));
                               setRolePresetsOpen(false);
-                              addLog(lang === "zh" ? `已应用角色: ${role.nameZh}` : `Applied role: ${role.name}`, "info");
+                              addLog(t("ui.applied-role", lang, { name: lang === "zh" ? role.nameZh : role.name }), "info");
                             }}
                           >
                             <span className="role-preset-emoji">{role.emoji}</span>
@@ -6181,7 +5606,7 @@ function App() {
                                   }
                                 } : s));
                                 setRolePresetsOpen(false);
-                                addLog(lang === "zh" ? `已应用角色: ${role.nameZh}` : `Applied role: ${role.name}`, "info");
+                                addLog(t("ui.applied-role", lang, { name: lang === "zh" ? role.nameZh : role.name }), "info");
                               }}
                             >
                               <span className="role-preset-emoji">{role.emoji}</span>
@@ -6244,9 +5669,9 @@ function App() {
                     className="btn btn-icon input-attach-btn"
                     disabled={!sessionStorageReady || isAttachmentLoading || preparingRequestSessionId !== null}
                     title={isAttachmentLoading
-                      ? (lang === "zh" ? "正在解析附件" : "Attachments are being parsed")
+                      ? (t("ui.attachments-are-being-parsed", lang))
                       : preparingRequestSessionId !== null
-                        ? (lang === "zh" ? "正在准备请求" : "A request is being prepared")
+                        ? (t("ui.a-request-is-being-prepared", lang))
                       : t("attach.drop", lang)}
                     onClick={() => { void pickAndParseAttachments(); }}
               >
@@ -6267,7 +5692,7 @@ function App() {
                   <button
                     className={`input-icon-btn ${effectiveSearchMode !== "off" ? "active" : ""}`}
                     disabled={!webSearchAvailable}
-                    title={!webSearchAvailable ? (lang === "zh" ? "请先在设置中启用 Web Search 工具" : "Enable the Web Search tool in settings") : searchMode === "off" ? t("search.modeOff", lang) : searchMode === "auto" ? t("search.modeAuto", lang) : t("search.modeForce", lang)}
+                    title={!webSearchAvailable ? (t("ui.enable-the-web-search-tool", lang)) : searchMode === "off" ? t("search.modeOff", lang) : searchMode === "auto" ? t("search.modeAuto", lang) : t("search.modeForce", lang)}
                     onClick={() => {
                       const next = searchMode === "off" ? "auto" : searchMode === "auto" ? "force" : "off";
                       setSessions((prev) => prev.map((s) =>
@@ -6279,7 +5704,7 @@ function App() {
                     {effectiveSearchMode !== "off" && <span className={`search-active-dot ${effectiveSearchMode === "force" ? "force" : ""}`} />}
                   </button>
                   {config.provider === "ollama" && searchMode !== "off" && (
-                    <span className="ollama-search-hint" title={lang === "zh" ? "Ollama 本地模型不支持工具调用，搜索功能可能不会生效" : "Ollama local models don't support tool calls, search may not work"}>
+                    <span className="ollama-search-hint" title={t("ui.ollama-local-models-don-t", lang)}>
                       !
                     </span>
                   )}
@@ -6330,7 +5755,7 @@ function App() {
                       ))}
                       {models.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).length > 0 && (
                         <>
-                          <div className="model-picker-divider">{lang === "zh" ? "其他模型" : "Other Models"}</div>
+                          <div className="model-picker-divider">{t("ui.other-models", lang)}</div>
                           {models.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).map((m) => (
                             <button
                               key={m.id}
@@ -6371,8 +5796,8 @@ function App() {
                 <button
                   className={`btn btn-primary btn-icon input-send-btn ${isStreaming ? "stop-active" : ""}`}
                   aria-label={isStreaming
-                    ? (lang === "zh" ? "停止当前输出" : "Stop current output")
-                    : (lang === "zh" ? "发送消息" : "Send message")}
+                    ? (t("ui.stop-current-output", lang))
+                    : (t("ui.send-message", lang))}
                   onClick={isStreaming ? handleStopStreaming : handleSendMessage}
                   disabled={isStreaming
                     ? currentRuntime?.status === "stopping"
@@ -6383,14 +5808,14 @@ function App() {
                       || (!prompt.trim() && !attachments.some(isSendableAttachment))}
                   title={isStreaming
                     ? currentRuntime?.status === "stopping"
-                      ? (lang === "zh" ? "正在停止…" : "Stopping…")
-                      : (lang === "zh" ? "停止当前输出" : "Stop current output")
+                      ? (t("ui.stopping-3", lang))
+                      : (t("ui.stop-current-output", lang))
                     : isAttachmentLoading
-                      ? (lang === "zh" ? "请等待附件解析完成" : "Wait for attachments to finish parsing")
+                      ? (t("ui.wait-for-attachments-to-finish-3", lang))
                       : preparingRequestSessionId !== null
-                        ? (lang === "zh" ? "正在准备请求" : "Preparing request")
+                        ? (t("ui.preparing-request", lang))
                       : hasActiveRequest
-                        ? (lang === "zh" ? "另一个会话正在运行" : "Another session is running")
+                        ? (t("ui.another-session-is-running", lang))
                         : undefined}
                 >
                   {isStreaming ? <CircleStop size={14} /> : <Send size={13} />}
@@ -6416,7 +5841,7 @@ function App() {
             onMouseDown={handleRightDrag}
             role="separator"
             aria-orientation="vertical"
-            aria-label={lang === "zh" ? "调整工作区面板宽度" : "Resize workspace panel"}
+            aria-label={t("ui.resize-workspace-panel", lang)}
             aria-valuemin={200}
             aria-valuemax={600}
             aria-valuenow={rightPanelWidth}
@@ -6435,7 +5860,7 @@ function App() {
           <button
             type="button"
             className="canvas-backdrop"
-            aria-label={lang === "zh" ? "关闭工作区面板" : "Close workspace panel"}
+            aria-label={t("ui.close-workspace-panel", lang)}
             onClick={() => setRightPanelOpen(false)}
           />
         )}
@@ -6445,7 +5870,7 @@ function App() {
           className={`canvas-panel ${rightPanelOpen ? "" : "collapsed"}`}
           style={{ width: rightPanelWidth }}
         >
-          <div className="canvas-tab-bar" role="tablist" aria-label={lang === "zh" ? "工作区面板" : "Workspace panel"}>
+          <div className="canvas-tab-bar" role="tablist" aria-label={t("ui.workspace-panel", lang)}>
             <button
               role="tab"
               aria-selected={activeTab === "activity"}
@@ -6473,8 +5898,8 @@ function App() {
             <button
               type="button"
               className="canvas-close-btn"
-              title={lang === "zh" ? "关闭工作区面板" : "Close workspace panel"}
-              aria-label={lang === "zh" ? "关闭工作区面板" : "Close workspace panel"}
+              title={t("ui.close-workspace-panel", lang)}
+              aria-label={t("ui.close-workspace-panel", lang)}
               onClick={() => setRightPanelOpen(false)}
             >
               <X size={14} />
@@ -6527,7 +5952,7 @@ function App() {
                       .flatMap(m => m.searchStatus || []);
                     const resultsWithSources = allSearchStatus.filter(s => s.type === "results" && s.sources && s.sources.length > 0);
                     if (resultsWithSources.length === 0) {
-                      return <div className="activity-empty">{lang === "zh" ? "暂无搜索来源" : "No search sources yet"}</div>;
+                      return <div className="activity-empty">{t("ui.no-search-sources-yet", lang)}</div>;
                     }
                     // Deduplicate sources by link
                     const allSources = resultsWithSources.flatMap(ss => ss.sources || []);
@@ -6877,7 +6302,7 @@ function App() {
                       <option key={p.name} value={p.default_model}>{p.name} ({p.default_model})</option>
                     ))}
                     {models.length > 0 && (
-                      <optgroup label={lang === "zh" ? "可用模型" : "Available Models"}>
+                      <optgroup label={t("ui.available-models-2", lang)}>
                         {models.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).map((m) => (
                           <option key={m.id} value={m.id}>{m.id}</option>
                         ))}
@@ -6891,7 +6316,7 @@ function App() {
                     className="btn btn-icon"
                     onClick={fetchModelList}
                     disabled={modelsLoading}
-                    title={lang === "zh" ? "获取模型列表" : "Fetch model list"}
+                    title={t("ui.fetch-model-list", lang)}
                   >
                     {modelsLoading ? (
                       <Loader2 size={13} className="animate-spin" />
@@ -7046,7 +6471,7 @@ function App() {
                   if (event.target.value !== "custom") setConfig((prev) => ({ ...prev, context_limit: Number(event.target.value) }));
                 }}>
                   {CONTEXT_BUDGET_OPTIONS.map((value) => <option key={value} value={value}>{formatContextBudget(value)}</option>)}
-                  <option value="custom">{lang === "zh" ? "自定义" : "Custom"}</option>
+                  <option value="custom">{t("ui.custom", lang)}</option>
                 </select>
                 {(customGlobalContextBudget || !CONTEXT_BUDGET_OPTIONS.includes(config.context_limit as typeof CONTEXT_BUDGET_OPTIONS[number])) && <input type="number" className="input-text" min={1000} max={MAX_CONTEXT_BUDGET} step={1000} value={config.context_limit} onChange={(event) => setConfig((prev) => ({ ...prev, context_limit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1000, Number(event.target.value) || 1000)) }))} />}
               </div>
@@ -7105,9 +6530,7 @@ function App() {
                   ))}
                 </div>
                 <div className="tool-suggestion-note">
-                  {lang === "zh"
-                    ? "可考虑后续新增：Git 专用工具、网页抓取、SQLite/CSV 查询、PDF/Office 解析。现在先把高风险能力收敛在 Shell/Write，并保留审批策略。"
-                    : "Good next additions: dedicated Git, web fetch, SQLite/CSV query, and PDF/Office parsing. For now, high-risk actions stay behind Shell/Write and approval policy."}
+                  {t("ui.tool-suggestion-note", lang)}
                 </div>
               </div>
 
@@ -7214,7 +6637,7 @@ function App() {
                   <option value="searxng">{t("search.provider.searxng", lang)}</option>
                 </select>
                 {config.search_provider === "tavily" && (
-                  <span className="settings-recommend-tag">{lang === "zh" ? "推荐 · 官方合规路径" : "Recommended · Official API"}</span>
+                  <span className="settings-recommend-tag">{t("ui.recommended-official-api", lang)}</span>
                 )}
               </div>
 
@@ -7236,7 +6659,7 @@ function App() {
                   />
                   {config.search_provider !== "tavily" && (
                     <span style={{ fontSize: "0.66rem", opacity: 0.5, display: "block", marginTop: 2 }}>
-                      {lang === "zh" ? "作为备用搜索引擎的 API Key" : "API Key for fallback search provider"}
+                      {t("ui.api-key-for-fallback-search", lang)}
                     </span>
                   )}
                 </div>
@@ -7357,7 +6780,7 @@ function App() {
                     className="settings-action-card danger"
                     onClick={async () => {
                       if (sessionMutationLocked || hasAttachmentLoading) {
-                        addLog(lang === "zh" ? "请先停止任务并等待附件解析完成。" : "Stop the active task and wait for attachments to finish parsing.", "error", true);
+                        addLog(t("ui.stop-the-active-task-and-3", lang), "error", true);
                         return;
                       }
                       if (!window.confirm(t("settings.clearSessionsConfirm", lang))) return;
@@ -7381,9 +6804,9 @@ function App() {
 
             <div className="modal-footer settings-modal-footer">
               <span role="status" style={{ marginRight: "auto", fontSize: "0.72rem", color: configSaveStatus === "error" ? "var(--error)" : "var(--text-secondary)" }}>
-                {configSaveStatus === "saving" && (lang === "zh" ? "正在自动保存..." : "Auto-saving...")}
-                {configSaveStatus === "saved" && (lang === "zh" ? "已自动保存" : "Saved")}
-                {configSaveStatus === "error" && (lang === "zh" ? "自动保存失败" : "Auto-save failed")}
+                {configSaveStatus === "saving" && (t("ui.auto-saving", lang))}
+                {configSaveStatus === "saved" && (t("ui.saved", lang))}
+                {configSaveStatus === "error" && (t("ui.auto-save-failed", lang))}
               </span>
               <button
                 className="btn btn-primary"
