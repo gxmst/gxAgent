@@ -119,7 +119,9 @@ export function useSessionLifecycle({
     if (currentSession.sessionConfig.mode === mode) return;
     const rememberedSessionId = lastSessionByModeRef.current[mode];
     const target = sessions.find((session) => (
-      session.id === rememberedSessionId && session.sessionConfig.mode === mode
+      session.id === rememberedSessionId
+      && session.sessionConfig.mode === mode
+      && !session.archived
     )) || sessions
       .filter((session) => session.sessionConfig.mode === mode && !session.archived)
       .sort(compareSidebarSessions)[0];

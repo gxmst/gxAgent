@@ -95,6 +95,11 @@ export function Sidebar(props: SidebarProps) {
   } = props;
 
   const [archivedOpen, setArchivedOpen] = useState(false);
+  const archivedTabbableSessionId = archivedOpen
+    ? archivedSessions.find((session) => session.id === currentSessionId)?.id
+      ?? archivedSessions[0]?.id
+      ?? null
+    : null;
 
   return (
     <aside className="sidebar" style={{ width: sidebarWidth }}>
@@ -150,12 +155,15 @@ export function Sidebar(props: SidebarProps) {
   {/* Session List */}
   <div ref={historyListRef} className="history-list" aria-label={t("ui.conversation-list", lang)}>
     {(() => {
-      const renderSessionRow = (s: ChatSession) => {
+      const renderSessionRow = (s: ChatSession, group: "visible" | "archived") => {
         const activePreset = ALL_PRESETS.find(p => p.id === s.sessionConfig.activeRolePresetId);
         const runtime = runtimeBySession[s.id];
         const awaitingApproval = Boolean(pendingApprovalsBySession[s.id]);
         const searchActive = Boolean(debouncedSearch.trim());
         const snippet = searchActive ? searchSnippets[s.id] : null;
+        const groupTabbableSessionId = group === "archived"
+          ? archivedTabbableSessionId
+          : tabbableSessionId;
         const openSession = () => {
           setCurrentSessionId(s.id);
         };
@@ -165,7 +173,7 @@ export function Sidebar(props: SidebarProps) {
         className={`history-item ${s.id === currentSessionId ? "active" : ""} ${s.pinned ? "pinned" : ""}`}
         role="button"
         data-session-id={s.id}
-        tabIndex={s.id === tabbableSessionId ? 0 : -1}
+        tabIndex={s.id === groupTabbableSessionId ? 0 : -1}
         aria-current={s.id === currentSessionId ? "true" : undefined}
         onClick={openSession}
         onKeyDown={(event) => {
@@ -233,7 +241,7 @@ export function Sidebar(props: SidebarProps) {
 
       return (
         <>
-          {visibleSessions.map(renderSessionRow)}
+          {visibleSessions.map((session) => renderSessionRow(session, "visible"))}
           {visibleSessions.length === 0 && debouncedSearch.trim() && (
             <div className="search-empty-hint">
               <Search size={16} aria-hidden="true" />
@@ -254,7 +262,7 @@ export function Sidebar(props: SidebarProps) {
               </button>
               {archivedOpen && (
                 <div className="archived-section-list">
-                  {archivedSessions.map(renderSessionRow)}
+                  {archivedSessions.map((session) => renderSessionRow(session, "archived"))}
                 </div>
               )}
             </div>

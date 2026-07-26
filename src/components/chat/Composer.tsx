@@ -562,7 +562,7 @@ export function Composer({
                 || isAttachmentLoading
                 || preparingRequestSessionId !== null
                 || (hasActiveRequest && activeRunSessionId !== currentSessionId)
-                || (!prompt.trim() && !attachments.some(isSendableAttachment))}
+                || (!prompt.trim() && !attachments.some(isSendableAttachment) && !quoteDraft)}
             title={isStreaming
               ? currentRuntime?.status === "stopping"
                 ? (t("ui.stopping-3", lang))

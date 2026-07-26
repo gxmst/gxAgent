@@ -514,7 +514,7 @@ export function useAgentRequest({
   const handleSendMessage = async () => {
     if (!sessionStorageReady) return;
     const sendableAttachments = fitAttachmentBudget([], attachments).accepted;
-    if ((!prompt.trim() && sendableAttachments.length === 0) || runtime.isStreaming || requestStartingRef.current || isAttachmentLoading) return;
+    if ((!prompt.trim() && sendableAttachments.length === 0 && !currentQuote) || runtime.isStreaming || requestStartingRef.current || isAttachmentLoading) return;
 
     // Quick commands using helper
     const { isCommand, command } = parseCommand(prompt.trim());
