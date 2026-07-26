@@ -4171,6 +4171,16 @@ select.input-text {
   background: var(--accent-subtle);
 }
 
+/* A session-level override is active on this control (vs inheriting the
+   global default). Same signal on every quick control in the composer. */
+.override-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
 .input-send-btn {
   width: 28px;
   height: 28px;

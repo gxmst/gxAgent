@@ -2235,17 +2235,7 @@ function App() {
       await invoke("save_config", { config: nextConfig });
       lastSavedConfigRef.current = JSON.stringify(nextConfig);
       setConfig(nextConfig);
-      setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-        ...session,
-        sessionConfig: {
-          ...session.sessionConfig,
-          mode: onboardingValues.mode,
-          profileId: onboardingValues.profileId,
-          model: null,
-          workDir: onboardingValues.mode === "code" ? onboardingValues.workDir.trim() : null,
-        },
-        updatedAt: Date.now(),
-      } : session));
+      patchSessionConfig({ mode: onboardingValues.mode, profileId: onboardingValues.profileId, model: null, workDir: onboardingValues.mode === "code" ? onboardingValues.workDir.trim() : null });
       setSidebarNav(onboardingValues.mode);
       try { localStorage.setItem("gx_onboarding_v1", "complete"); } catch { /* ignore */ }
       try { sessionStorage.removeItem("gx_onboarding_v1_dismissed"); } catch { /* ignore */ }
@@ -4021,19 +4011,19 @@ function App() {
   const thinkingLevelLabel = (level: NonNullable<SessionConfig["thinkingLevel"]>) =>
     t(`session.thinking${level.charAt(0).toUpperCase() + level.slice(1)}`, lang);
 
-  const setCurrentThinkingLevel = (level: NonNullable<SessionConfig["thinkingLevel"]>) => {
-    setSessions((prev) => prev.map((s) =>
-      s.id === currentSessionId
-        ? { ...s, sessionConfig: { ...s.sessionConfig, thinkingLevel: level }, updatedAt: Date.now() }
-        : s
-    ));
+  /** The one canonical way to write session-level overrides. Every quick
+   *  control and settings field goes through here so "override vs inherit"
+   *  semantics stay identical everywhere; null always means inherit. */
+  const patchSessionConfig = (patch: Partial<SessionConfig>) => {
+    patchSessionConfig({ ...patch });
   };
 
+  // The cycle passes through "inherit" so the quick button can never strand a
+  // session on a permanent override (the old cycle skipped null entirely).
   const cycleThinkingLevel = () => {
-    const currentLevel = currentSession.sessionConfig.thinkingLevel || "medium";
-    const currentIndex = THINKING_LEVELS.indexOf(currentLevel);
-    const nextLevel = THINKING_LEVELS[(currentIndex + 1) % THINKING_LEVELS.length];
-    setCurrentThinkingLevel(nextLevel);
+    const cycle: SessionConfig["thinkingLevel"][] = [null, ...THINKING_LEVELS];
+    const index = cycle.indexOf(currentSession.sessionConfig.thinkingLevel);
+    patchSessionConfig({ thinkingLevel: cycle[(index + 1) % cycle.length] });
   };
 
   const statusIcon = (status: ToolAction["status"]) => {
@@ -4939,22 +4929,24 @@ function App() {
             <ChevronRight size={12} aria-hidden="true" />
           </button>
           {/* Profile Card */}
-          <div className="sidebar-profile-card">
+          {/* Shows the GLOBAL default connection (what settings edits), never the
+              per-session override — that lives on the composer's model button. */}
+          <div className="sidebar-profile-card" title={t("ui.global-default-model", lang)}>
             <div className="sidebar-profile-avatar">
               {config.model ? getModelDisplayName(config.model).charAt(0).toUpperCase() : "G"}
             </div>
             <div className="sidebar-profile-info">
-              <span className="sidebar-profile-name">{getModelDisplayName(resolvedCurrentConfig.model) || "gxAgent"}</span>
+              <span className="sidebar-profile-name">{getModelDisplayName(config.model) || "gxAgent"}</span>
               <span className="sidebar-profile-meta">
-                {resolvedCurrentConfig.base_url.replace(/^https?:\/\//, "").split("/")[0]}
+                {config.base_url.replace(/^https?:\/\//, "").split("/")[0]}
               </span>
             </div>
             <ConnectionStatus
               compact
-              state={resolvedCurrentConfig.base_url && resolvedCurrentConfig.model && (resolvedCurrentConfig.provider === "ollama" || Boolean(resolvedCurrentConfig.api_key)) ? "configured" : "unconfigured"}
+              state={config.base_url && config.model && (config.provider === "ollama" || Boolean(config.api_key)) ? "configured" : "unconfigured"}
               label={t("ui.model-configuration", lang)}
-              detail={resolvedCurrentConfig.base_url
-                ? `${t("ui.configured", lang)}: ${resolvedCurrentConfig.base_url}`
+              detail={config.base_url
+                ? `${t("ui.configured", lang)}: ${config.base_url}`
                 : (t("ui.not-configured", lang))}
               onClick={() => { setSettingsTab("model"); setSettingsOpen(true); }}
             />
@@ -5110,15 +5102,7 @@ function App() {
                     value={currentSession.sessionConfig.systemPrompt ?? ""}
                     placeholder={config.system_prompt}
                     onChange={(e) => {
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                        ...s,
-                        sessionConfig: {
-                          ...s.sessionConfig,
-                          systemPrompt: e.target.value || null,
-                          activeRolePresetId: null,
-                        },
-                        updatedAt: Date.now(),
-                      } : s));
+                      patchSessionConfig({ systemPrompt: e.target.value || null, activeRolePresetId: null });
                     }}
                   />
                 </label>
@@ -5129,11 +5113,7 @@ function App() {
                     value={currentSession.sessionConfig.profileId || ""}
                     onChange={(event) => {
                       const profileId = event.target.value || null;
-                      setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                        ...session,
-                        sessionConfig: { ...session.sessionConfig, profileId, model: null },
-                        updatedAt: Date.now(),
-                      } : session));
+                      patchSessionConfig({ profileId, model: null });
                     }}
                   >
                     <option value="">{t("ui.inherit-global-connection", lang)}</option>
@@ -5149,11 +5129,7 @@ function App() {
                     className="session-select"
                     value={currentSession.sessionConfig.model || ""}
                     onChange={(e) => {
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                        ...s,
-                        sessionConfig: { ...s.sessionConfig, model: e.target.value || null },
-                        updatedAt: Date.now(),
-                      } : s));
+                      patchSessionConfig({ model: e.target.value || null });
                     }}
                   >
                     <option value="">{t("ui.inherit-value", lang, { value: resolvedCurrentConfig.model })}</option>
@@ -5175,18 +5151,18 @@ function App() {
                   <select className="session-select" value={customSessionContextBudget[currentSessionId] || (currentSession.sessionConfig.contextLimit !== null && !CONTEXT_BUDGET_OPTIONS.includes(currentSession.sessionConfig.contextLimit as typeof CONTEXT_BUDGET_OPTIONS[number])) ? "custom" : currentSession.sessionConfig.contextLimit === null ? "inherit" : String(currentSession.sessionConfig.contextLimit)} onChange={(event) => {
                     if (event.target.value === "custom") {
                       setCustomSessionContextBudget((previous) => ({ ...previous, [currentSessionId]: true }));
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, contextLimit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1_000, s.sessionConfig.contextLimit ?? resolvedCurrentConfig.context_limit)) }, updatedAt: Date.now() } : s));
+                      patchSessionConfig({ contextLimit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1_000, currentSession.sessionConfig.contextLimit ?? resolvedCurrentConfig.context_limit)) });
                       return;
                     }
                     setCustomSessionContextBudget((previous) => ({ ...previous, [currentSessionId]: false }));
                     const value = event.target.value === "inherit" ? null : Number(event.target.value);
-                    setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, contextLimit: value }, updatedAt: Date.now() } : s));
+                    patchSessionConfig({ contextLimit: value });
                   }}>
                     <option value="inherit">{t("ui.inherit-global-value", lang, { value: formatContextBudget(config.context_limit) })}</option>
                     {CONTEXT_BUDGET_OPTIONS.map((value) => <option key={value} value={value}>{formatContextBudget(value)}</option>)}
                     <option value="custom">{t("ui.custom", lang)}</option>
                   </select>
-                  {(customSessionContextBudget[currentSessionId] || (currentSession.sessionConfig.contextLimit !== null && !CONTEXT_BUDGET_OPTIONS.includes(currentSession.sessionConfig.contextLimit as typeof CONTEXT_BUDGET_OPTIONS[number]))) && <input type="number" className="session-input session-input-sm" min={1000} max={MAX_CONTEXT_BUDGET} step={1000} value={currentSession.sessionConfig.contextLimit ?? resolvedCurrentConfig.context_limit} onChange={(event) => setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, contextLimit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1000, Number(event.target.value) || 1000)) }, updatedAt: Date.now() } : s))} />}
+                  {(customSessionContextBudget[currentSessionId] || (currentSession.sessionConfig.contextLimit !== null && !CONTEXT_BUDGET_OPTIONS.includes(currentSession.sessionConfig.contextLimit as typeof CONTEXT_BUDGET_OPTIONS[number]))) && <input type="number" className="session-input session-input-sm" min={1000} max={MAX_CONTEXT_BUDGET} step={1000} value={currentSession.sessionConfig.contextLimit ?? resolvedCurrentConfig.context_limit} onChange={(event) => patchSessionConfig({ contextLimit: Math.min(MAX_CONTEXT_BUDGET, Math.max(1000, Number(event.target.value) || 1000)) })} />}
                 </label>
                 <details className="session-settings-advanced">
                   <summary>{t("ui.advanced-generation", lang)}</summary>
@@ -5201,19 +5177,11 @@ function App() {
                     step={0.1}
                     value={currentSession.sessionConfig.temperature ?? resolvedCurrentConfig.temperature}
                     onChange={(e) => {
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                        ...s,
-                        sessionConfig: { ...s.sessionConfig, temperature: parseFloat(e.target.value) },
-                        updatedAt: Date.now(),
-                      } : s));
+                      patchSessionConfig({ temperature: parseFloat(e.target.value) });
                     }}
                   />
                   <button type="button" className={`session-btn ${currentSession.sessionConfig.temperature === null ? "active" : ""}`} onClick={() => {
-                    setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                      ...session,
-                      sessionConfig: { ...session.sessionConfig, temperature: null },
-                      updatedAt: Date.now(),
-                    } : session));
+                    patchSessionConfig({ temperature: null });
                   }}>{t("ui.inherit-2", lang)}</button>
                 </label>
                 {/* Top P */}
@@ -5226,19 +5194,11 @@ function App() {
                     step={0.05}
                     value={currentSession.sessionConfig.topP ?? resolvedCurrentConfig.top_p}
                     onChange={(e) => {
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                        ...s,
-                        sessionConfig: { ...s.sessionConfig, topP: parseFloat(e.target.value) },
-                        updatedAt: Date.now(),
-                      } : s));
+                      patchSessionConfig({ topP: parseFloat(e.target.value) });
                     }}
                   />
                   <button type="button" className={`session-btn ${currentSession.sessionConfig.topP === null ? "active" : ""}`} onClick={() => {
-                    setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                      ...session,
-                      sessionConfig: { ...session.sessionConfig, topP: null },
-                      updatedAt: Date.now(),
-                    } : session));
+                    patchSessionConfig({ topP: null });
                   }}>{t("ui.inherit-2", lang)}</button>
                 </label>
                 {/* Max Tokens */}
@@ -5246,22 +5206,14 @@ function App() {
                   <span className="session-label">{t("session.maxTokens", lang)}</span>
                   <select className="session-select" value={currentSession.sessionConfig.maxTokens === "inherit" ? "inherit" : currentSession.sessionConfig.maxTokens === null ? "unlimited" : "custom"} onChange={(event) => {
                     const maxTokens = event.target.value === "inherit" ? "inherit" : event.target.value === "unlimited" ? null : (resolvedCurrentConfig.max_tokens || 4096);
-                    setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                      ...session,
-                      sessionConfig: { ...session.sessionConfig, maxTokens },
-                      updatedAt: Date.now(),
-                    } : session));
+                    patchSessionConfig({ maxTokens });
                   }}>
                     <option value="inherit">{t("ui.inherit-global", lang)}</option>
                     <option value="unlimited">{t("ui.unlimited", lang)}</option>
                     <option value="custom">{t("ui.custom", lang)}</option>
                   </select>
                   {typeof currentSession.sessionConfig.maxTokens === "number" && <input type="number" className="session-input session-input-sm" min={1} value={currentSession.sessionConfig.maxTokens} onChange={(event) => {
-                    setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                      ...session,
-                      sessionConfig: { ...session.sessionConfig, maxTokens: Math.max(1, parseInt(event.target.value) || 1) },
-                      updatedAt: Date.now(),
-                    } : session));
+                    patchSessionConfig({ maxTokens: Math.max(1, parseInt(event.target.value) || 1) });
                   }} />}
                 </label>
                 {/* Streaming */}
@@ -5269,11 +5221,7 @@ function App() {
                   <span className="session-label">{t("session.streaming", lang)}</span>
                   <select className="session-select" value={currentSession.sessionConfig.streaming === null ? "inherit" : String(currentSession.sessionConfig.streaming)} onChange={(event) => {
                     const streaming = event.target.value === "inherit" ? null : event.target.value === "true";
-                    setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                      ...session,
-                      sessionConfig: { ...session.sessionConfig, streaming },
-                      updatedAt: Date.now(),
-                    } : session));
+                    patchSessionConfig({ streaming });
                   }}>
                     <option value="inherit">{t("ui.inherit-value", lang, { value: t(resolvedCurrentConfig.streaming ? "settings.on" : "settings.off", lang) })}</option>
                     <option value="true">{t("ui.on", lang)}</option>
@@ -5286,15 +5234,11 @@ function App() {
                   <span className="session-label">{t("ui.working-directory", lang)}</span>
                   <div className="session-workspace-row">
                     <input disabled={Boolean(runtimeBySession[currentSessionId])} className="session-input" value={currentSession.sessionConfig.workDir ?? ""} placeholder={config.default_work_dir || "."} onChange={(event) => {
-                      setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                        ...session,
-                        sessionConfig: { ...session.sessionConfig, workDir: event.target.value || null },
-                        updatedAt: Date.now(),
-                      } : session));
+                      patchSessionConfig({ workDir: event.target.value || null });
                     }} />
                     <button type="button" className="session-btn" disabled={Boolean(runtimeBySession[currentSessionId])} onClick={async () => {
                       const selected = await invoke<string | null>("pick_workspace_directory");
-                      if (selected) setSessions((previous) => previous.map((session) => session.id === currentSessionId ? { ...session, sessionConfig: { ...session.sessionConfig, workDir: selected }, updatedAt: Date.now() } : session));
+                      if (selected) patchSessionConfig({ workDir: selected });
                     }}>{t("ui.choose", lang)}</button>
                   </div>
                 </label>
@@ -5303,7 +5247,7 @@ function App() {
                     <span><span className="session-label">{t("ui.trust-all-operations", lang)}</span><small>{t("ui.skip-ordinary-approvals-hard-dangerous", lang)}</small></span>
                     <input type="checkbox" checked={Boolean(currentSession.sessionConfig.trustAllOperations)} onChange={(event) => {
                       if (event.target.checked && !window.confirm(t("ui.danger-code-mode-will-stop", lang))) return;
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, trustAllOperations: event.target.checked }, updatedAt: Date.now() } : s));
+                      patchSessionConfig({ trustAllOperations: event.target.checked });
                     }} />
                   </label>
                 )}
@@ -5317,11 +5261,7 @@ function App() {
                     <button
                       type="button"
                       className={`session-btn ${currentSession.sessionConfig.thinkingLevel === null ? "active" : ""}`}
-                      onClick={() => setSessions((previous) => previous.map((session) => session.id === currentSessionId ? {
-                        ...session,
-                        sessionConfig: { ...session.sessionConfig, thinkingLevel: null },
-                        updatedAt: Date.now(),
-                      } : session))}
+                      onClick={() => patchSessionConfig({ thinkingLevel: null })}
                     >
                       {t("ui.inherit-2", lang)}
                     </button>
@@ -5330,10 +5270,7 @@ function App() {
                         key={level}
                         className={`session-btn ${currentSession.sessionConfig.thinkingLevel === level ? "active" : ""}`}
                         onClick={() => {
-                          setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                            ...s,
-                            sessionConfig: { ...s.sessionConfig, thinkingLevel: level }
-                          } : s));
+                          patchSessionConfig({ thinkingLevel: level });
                         }}
                       >
                         {t(`session.thinking${level.charAt(0).toUpperCase() + level.slice(1)}`, lang)}
@@ -5349,10 +5286,7 @@ function App() {
                     placeholder="URL or path"
                     value={currentSession.sessionConfig.backgroundImage}
                     onChange={(e) => {
-                      setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                        ...s,
-                        sessionConfig: { ...s.sessionConfig, backgroundImage: e.target.value }
-                      } : s));
+                      patchSessionConfig({ backgroundImage: e.target.value });
                     }}
                   />
                 </label>
@@ -5547,11 +5481,7 @@ function App() {
                         <span>{ap.emoji}</span>
                         <span>{lang === "zh" ? ap.nameZh : ap.name}</span>
                         <button className="role-active-clear" onClick={() => {
-                          setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                            ...s,
-                            sessionConfig: { ...s.sessionConfig, activeRolePresetId: null, systemPrompt: null, temperature: null },
-                            updatedAt: Date.now(),
-                          } : s));
+                          patchSessionConfig({ activeRolePresetId: null, systemPrompt: null, temperature: null });
                         }}>
                           <X size={10} />
                         </button>
@@ -5567,15 +5497,7 @@ function App() {
                             key={role.id}
                             className={`role-preset-card ${currentSession.sessionConfig.activeRolePresetId === role.id ? "active" : ""}`}
                             onClick={() => {
-                              setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                ...s,
-                                sessionConfig: {
-                                  ...s.sessionConfig,
-                                  systemPrompt: role.prompt,
-                                  temperature: role.temperature,
-                                  activeRolePresetId: role.id,
-                                }
-                              } : s));
+                              patchSessionConfig({ systemPrompt: role.prompt, temperature: role.temperature, activeRolePresetId: role.id });
                               setRolePresetsOpen(false);
                               addLog(t("ui.applied-role", lang, { name: lang === "zh" ? role.nameZh : role.name }), "info");
                             }}
@@ -5596,15 +5518,7 @@ function App() {
                             <button
                               className={`role-preset-card ${currentSession.sessionConfig.activeRolePresetId === role.id ? "active" : ""}`}
                               onClick={() => {
-                                setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                  ...s,
-                                  sessionConfig: {
-                                    ...s.sessionConfig,
-                                    systemPrompt: role.prompt,
-                                    temperature: role.temperature,
-                                    activeRolePresetId: role.id,
-                                  }
-                                } : s));
+                                patchSessionConfig({ systemPrompt: role.prompt, temperature: role.temperature, activeRolePresetId: role.id });
                                 setRolePresetsOpen(false);
                                 addLog(t("ui.applied-role", lang, { name: lang === "zh" ? role.nameZh : role.name }), "info");
                               }}
@@ -5695,9 +5609,7 @@ function App() {
                     title={!webSearchAvailable ? (t("ui.enable-the-web-search-tool", lang)) : searchMode === "off" ? t("search.modeOff", lang) : searchMode === "auto" ? t("search.modeAuto", lang) : t("search.modeForce", lang)}
                     onClick={() => {
                       const next = searchMode === "off" ? "auto" : searchMode === "auto" ? "force" : "off";
-                      setSessions((prev) => prev.map((s) =>
-                        s.id === currentSessionId ? { ...s, sessionConfig: { ...s.sessionConfig, searchMode: next }, updatedAt: Date.now() } : s
-                      ));
+                      patchSessionConfig({ searchMode: next });
                     }}
                   >
                     <Globe size={12} />
@@ -5714,23 +5626,29 @@ function App() {
                 <div className="input-run-group">
                 <button
                   type="button"
-                  className={`input-thinking-btn ${currentThinkingLevel}`}
+                  className={`input-thinking-btn ${currentThinkingLevel} ${currentSession.sessionConfig.thinkingLevel !== null ? "overridden" : ""}`}
                   onClick={cycleThinkingLevel}
-                  title={`${t("session.thinkingLevel", lang)}: ${thinkingLevelLabel(currentThinkingLevel)}`}
+                  title={currentSession.sessionConfig.thinkingLevel !== null
+                    ? `${t("session.thinkingLevel", lang)}: ${thinkingLevelLabel(currentThinkingLevel)} (${t("ui.session-override", lang)})`
+                    : `${t("session.thinkingLevel", lang)}: ${t("ui.inherit-value", lang, { value: thinkingLevelLabel(currentThinkingLevel) })}`}
                 >
                   <Brain size={12} />
                   <span>{thinkingLevelLabel(currentThinkingLevel)}</span>
+                  {currentSession.sessionConfig.thinkingLevel !== null && <span className="override-dot" aria-hidden="true" />}
                 </button>
                 <div style={{ position: "relative" }}>
                   <button
-                    className="input-model-btn"
+                    className={`input-model-btn ${currentSession.sessionConfig.model !== null || currentSession.sessionConfig.profileId !== null ? "overridden" : ""}`}
                     onClick={() => {
                       setRolePresetsOpen(false);
                       setModelPickerOpen((open) => !open);
                     }}
-                    title={t("session.model", lang)}
+                    title={currentSession.sessionConfig.model !== null || currentSession.sessionConfig.profileId !== null
+                      ? `${t("session.model", lang)}: ${getModelDisplayName(resolvedCurrentConfig.model)} (${t("ui.session-override", lang)})`
+                      : `${t("session.model", lang)}: ${t("ui.inherit-value", lang, { value: getModelDisplayName(resolvedCurrentConfig.model) })}`}
                   >
                     <span>{getModelDisplayName(resolvedCurrentConfig.model)}</span>
+                    {(currentSession.sessionConfig.model !== null || currentSession.sessionConfig.profileId !== null) && <span className="override-dot" aria-hidden="true" />}
                     <ChevronDown size={9} />
                   </button>
                   {modelPickerOpen && (
@@ -5741,11 +5659,7 @@ function App() {
                           className={`model-picker-item ${currentSession.sessionConfig.profileId === profileId && currentSession.sessionConfig.model === null ? "active" : ""}`}
                           onClick={() => {
                             cacheModelDisplayName(p.default_model, p.name);
-                            setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                              ...s,
-                              sessionConfig: { ...s.sessionConfig, profileId, model: null },
-                              updatedAt: Date.now(),
-                            } : s));
+                            patchSessionConfig({ profileId, model: null });
                             setModelPickerOpen(false);
                           }}
                         >
@@ -5761,11 +5675,7 @@ function App() {
                               key={m.id}
                               className={`model-picker-item ${currentSession.sessionConfig.model === m.id ? "active" : ""}`}
                               onClick={() => {
-                                setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                                  ...s,
-                                  sessionConfig: { ...s.sessionConfig, model: m.id },
-                                  updatedAt: Date.now(),
-                                } : s));
+                                patchSessionConfig({ model: m.id });
                                 setModelPickerOpen(false);
                               }}
                             >
@@ -5778,11 +5688,7 @@ function App() {
                         <button
                           className={`model-picker-item ${currentSession.sessionConfig.profileId === null && currentSession.sessionConfig.model === null ? "active" : ""}`}
                           onClick={() => {
-                            setSessions(prev => prev.map(s => s.id === currentSessionId ? {
-                              ...s,
-                              sessionConfig: { ...s.sessionConfig, profileId: null, model: null },
-                              updatedAt: Date.now(),
-                            } : s));
+                            patchSessionConfig({ profileId: null, model: null });
                             setModelPickerOpen(false);
                           }}
                         >

@@ -795,6 +795,9 @@ Object.assign(i18n.zh, {
   "ui.run-status-stopping": "“{title}”正在停止，点击查看",
   "ui.applied-role": "已应用角色: {name}",
   "ui.tool-suggestion-note": "可考虑后续新增：Git 专用工具、网页抓取、SQLite/CSV 查询、PDF/Office 解析。现在先把高风险能力收敛在 Shell/Write，并保留审批策略。",
+  "ui.session-override": "本会话覆盖",
+  "ui.clear-override": "恢复继承全局",
+  "ui.global-default-model": "全局默认模型（新会话的初始值；当前会话如有覆盖，见输入框旁的模型按钮）",
 });
 
 Object.assign(i18n.en, {
@@ -823,6 +826,9 @@ Object.assign(i18n.en, {
   "ui.run-status-stopping": "“{title}” is stopping — view task",
   "ui.applied-role": "Applied role: {name}",
   "ui.tool-suggestion-note": "Good next additions: dedicated Git, web fetch, SQLite/CSV query, and PDF/Office parsing. For now, high-risk actions stay behind Shell/Write and approval policy.",
+  "ui.session-override": "session override",
+  "ui.clear-override": "Reset to global",
+  "ui.global-default-model": "Global default model (initial value for new sessions; a session override, if any, shows on the composer's model button)",
 });
 
 /** Look up `key` in `lang`'s catalog, falling back to English and then to the
