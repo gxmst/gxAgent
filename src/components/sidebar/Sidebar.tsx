@@ -27,6 +27,7 @@ import {
   Zap,
 } from "lucide-react";
 import { t } from "../../i18n";
+import { DropdownMenu } from "radix-ui";
 import type { AppConfig, ChatSession, Message, SessionConfig } from "../../types";
 import type { RolePreset } from "../../rolePresets";
 import {
@@ -278,49 +279,59 @@ export function Sidebar(props: SidebarProps) {
       x={contextMenu.x}
       y={contextMenu.y}
       className="context-menu"
+      onClose={() => setContextMenu(null)}
     >
       {(() => {
         const targetSession = sessions.find(s => s.id === contextMenu.sessionId);
         const hasPreset = targetSession?.sessionConfig.activeRolePresetId;
         return (
           <>
-            <button className="context-menu-item" onClick={() => {
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               setSessionSettingsOpen(true);
               setCurrentSessionId(contextMenu.sessionId);
               setContextMenu(null);
-            }}>
-              <Pencil size={12} /> {t("context.editPreset", lang)}
-            </button>
-            <button className="context-menu-item" onClick={() => {
+              }}>
+                <Pencil size={12} /> {t("context.editPreset", lang)}
+              </button>
+            </DropdownMenu.Item>
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               setSessions(prev => prev.map(s => s.id === contextMenu.sessionId ? {
                 ...s,
                 pinned: !s.pinned,
               } : s));
               setContextMenu(null);
-            }}>
-              <Pin size={12} /> {targetSession?.pinned ? t("context.unpin", lang) : t("context.pin", lang)}
-            </button>
-            <button className="context-menu-item" onClick={() => {
+              }}>
+                <Pin size={12} /> {targetSession?.pinned ? t("context.unpin", lang) : t("context.pin", lang)}
+              </button>
+            </DropdownMenu.Item>
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               setSessionArchived(contextMenu.sessionId, !targetSession?.archived);
               setContextMenu(null);
-            }}>
-              {targetSession?.archived
-                ? <><ArchiveRestore size={12} /> {t("context.unarchive", lang)}</>
-                : <><Archive size={12} /> {t("context.archive", lang)}</>}
-            </button>
+              }}>
+                {targetSession?.archived
+                  ? <><ArchiveRestore size={12} /> {t("context.unarchive", lang)}</>
+                  : <><Archive size={12} /> {t("context.archive", lang)}</>}
+              </button>
+            </DropdownMenu.Item>
             {hasPreset && (
-              <button className="context-menu-item" onClick={() => {
+              <DropdownMenu.Item asChild>
+                <button className="context-menu-item" onClick={() => {
                 setSessions(prev => prev.map(s => s.id === contextMenu.sessionId ? {
                   ...s,
                   sessionConfig: { ...s.sessionConfig, activeRolePresetId: null, systemPrompt: null, temperature: null },
                   updatedAt: Date.now(),
                 } : s));
                 setContextMenu(null);
-              }}>
-                <X size={12} /> {t("context.clearPreset", lang)}
-              </button>
+                }}>
+                  <X size={12} /> {t("context.clearPreset", lang)}
+                </button>
+              </DropdownMenu.Item>
             )}
-            <button className="context-menu-item" onClick={() => {
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               const s = sessions.find(s => s.id === contextMenu.sessionId);
               if (!s) return;
               const md = s.messages
@@ -340,10 +351,12 @@ export function Sidebar(props: SidebarProps) {
               a.click();
               URL.revokeObjectURL(url);
               setContextMenu(null);
-            }}>
-              <Download size={12} /> {t("context.export", lang)}
-            </button>
-            <button className="context-menu-item" onClick={() => {
+              }}>
+                <Download size={12} /> {t("context.export", lang)}
+              </button>
+            </DropdownMenu.Item>
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               const s = sessions.find(s => s.id === contextMenu.sessionId);
               if (!s) return;
               setToolStatsDialog({
@@ -351,11 +364,13 @@ export function Sidebar(props: SidebarProps) {
                 stats: getToolStats([s]),
               });
               setContextMenu(null);
-            }}>
-              <BarChart3 size={12} /> {t("context.toolStats", lang)}
-            </button>
-            <div className="context-menu-divider" />
-            <button className="context-menu-item" onClick={() => {
+              }}>
+                <BarChart3 size={12} /> {t("context.toolStats", lang)}
+              </button>
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator className="context-menu-divider" />
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               const input = document.createElement("input");
               input.type = "file";
               input.accept = ".json,.md";
@@ -406,10 +421,12 @@ export function Sidebar(props: SidebarProps) {
               };
               input.click();
               setContextMenu(null);
-            }}>
-              <Upload size={12} /> {t("context.import", lang)}
-            </button>
-            <button className="context-menu-item" onClick={() => {
+              }}>
+                <Upload size={12} /> {t("context.import", lang)}
+              </button>
+            </DropdownMenu.Item>
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               const s = sessions.find(s => s.id === contextMenu.sessionId);
               if (!s) return;
               const newTitle = window.prompt(t("ui.rename-session", lang), s.title);
@@ -417,28 +434,35 @@ export function Sidebar(props: SidebarProps) {
                 setSessions(prev => prev.map(sess => sess.id === contextMenu.sessionId ? { ...sess, title: newTitle.trim() } : sess));
               }
               setContextMenu(null);
-            }}>
-              <Pencil size={12} /> {t("context.rename", lang)}
-            </button>
-            <button className="context-menu-item" onClick={() => {
+              }}>
+                <Pencil size={12} /> {t("context.rename", lang)}
+              </button>
+            </DropdownMenu.Item>
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               moveSessionInList(contextMenu.sessionId, "up");
               setContextMenu(null);
-            }}>
-              <ChevronLeft size={12} style={{ transform: "rotate(90deg)" }} /> {t("context.moveUp", lang)}
-            </button>
-            <button className="context-menu-item" onClick={() => {
+              }}>
+                <ChevronLeft size={12} style={{ transform: "rotate(90deg)" }} /> {t("context.moveUp", lang)}
+              </button>
+            </DropdownMenu.Item>
+            <DropdownMenu.Item asChild>
+              <button className="context-menu-item" onClick={() => {
               moveSessionInList(contextMenu.sessionId, "down");
               setContextMenu(null);
-            }}>
-              <ChevronRight size={12} style={{ transform: "rotate(90deg)" }} /> {t("context.moveDown", lang)}
-            </button>
+              }}>
+                <ChevronRight size={12} style={{ transform: "rotate(90deg)" }} /> {t("context.moveDown", lang)}
+              </button>
+            </DropdownMenu.Item>
             {sessions.length > 1 && (
-              <button className="context-menu-item context-menu-item-danger" onClick={() => {
+              <DropdownMenu.Item asChild>
+                <button className="context-menu-item context-menu-item-danger" onClick={() => {
                 void deleteSession(contextMenu.sessionId, { stopPropagation: () => {} } as React.MouseEvent);
                 setContextMenu(null);
-              }}>
-                <Trash2 size={12} /> {t("context.delete", lang)}
-              </button>
+                }}>
+                  <Trash2 size={12} /> {t("context.delete", lang)}
+                </button>
+              </DropdownMenu.Item>
             )}
           </>
         );

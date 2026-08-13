@@ -41,6 +41,8 @@ export interface AppConfig {
   max_agent_loops: number;
   max_tool_calls_per_request: number;
   preview_sandbox: boolean;
+  /** Keep the agent in read-only planning mode until the user turns it off. */
+  plan_mode: boolean;
   tools_migration_version: number;
 }
 

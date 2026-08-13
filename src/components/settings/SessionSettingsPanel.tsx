@@ -8,6 +8,7 @@
  */
 import type { RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Popover } from "radix-ui";
 import { RotateCcw, X } from "lucide-react";
 import { t } from "../../i18n";
 import type { AppConfig, ChatSession, ModelInfo, SessionConfig } from "../../types";
@@ -19,6 +20,7 @@ import {
   type SessionRuntime,
 } from "../../appDefaults";
 import type { ConfirmationOptions } from "../shared/ConfirmDialog";
+import { sortModels, sortProfileEntries } from "../../utils/modelSorting";
 
 export interface SessionSettingsPanelProps {
   lang: string;
@@ -47,16 +49,43 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
     sessionSettingsPanelRef, closeSessionSettings, patchSessionConfig,
     setSessions, undoCompact, requestConfirmation,
   } = props;
+  const profileEntries = sortProfileEntries(Object.entries(config.profiles), lang);
+  const configuredModelIds = new Set(profileEntries.map(([, profile]) => profile.default_model));
+  const otherModels = sortModels(
+    models.filter((model) => !configuredModelIds.has(model.id)),
+    lang,
+  );
 
   return (
-          <div
-            ref={sessionSettingsPanelRef}
-            className="session-settings-panel"
-            role="dialog"
-            aria-labelledby="session-settings-title"
-            tabIndex={-1}
-          >
-            <div className="session-settings-header">
+    <Popover.Root
+      open
+      modal={false}
+      onOpenChange={(next) => {
+        if (!next) closeSessionSettings(true);
+      }}
+    >
+      <Popover.Anchor asChild>
+        <span className="session-settings-anchor" aria-hidden="true" />
+      </Popover.Anchor>
+      <Popover.Portal>
+        <Popover.Content
+          ref={sessionSettingsPanelRef}
+          className="session-settings-panel"
+          side="bottom"
+          align="end"
+          sideOffset={8}
+          collisionPadding={12}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            sessionSettingsPanelRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="session-settings-title"
+          tabIndex={-1}
+        >
+          <div className="session-settings-header">
               <span id="session-settings-title" style={{ fontWeight: 600, fontSize: "var(--font-ui)" }}>{t("session.settings", lang)}</span>
               <button
                 className="panel-toggle-btn"
@@ -65,8 +94,8 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
               >
                 <X size={14} />
               </button>
-            </div>
-            <div className="session-settings-body">
+          </div>
+          <div className="session-settings-body">
               {/* Name */}
               <label className="session-field">
                 <span className="session-label">{t("session.name", lang)}</span>
@@ -102,7 +131,7 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
                   }}
                 >
                   <option value="">{t("ui.inherit-global-connection", lang)}</option>
-                  {Object.entries(config.profiles).map(([profileId, profile]) => (
+                  {profileEntries.map(([profileId, profile]) => (
                     <option key={profileId} value={profileId}>{profile.name} ({profile.default_model})</option>
                   ))}
                 </select>
@@ -120,7 +149,7 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
                   <option value="">{t("ui.inherit-value", lang, { value: resolvedCurrentConfig.model })}</option>
                   {models.length > 0 && (
                     <optgroup label={t("ui.available-models", lang)}>
-                      {models.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).map((m) => (
+                      {otherModels.map((m) => (
                         <option key={m.id} value={m.id}>{m.id}</option>
                       ))}
                     </optgroup>
@@ -303,7 +332,9 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
                   <RotateCcw size={13} /> {t("ui.undo-history-compact", lang)}
                 </button>
               )}
-            </div>
           </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

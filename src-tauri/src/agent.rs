@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Window};
+use tokio::sync::{oneshot, watch, Semaphore};
 
 /// Sanitize arguments for logging - redact sensitive information
 fn sanitize_args_for_log(args: &str) -> String {
@@ -79,6 +80,15 @@ const ABSOLUTE_MAX_TOOL_CALLS_PER_REQUEST: u32 = 500;
 const SEARCH_FOLLOWUP_INSTRUCTION: &str = "You have just received web search results. You MUST base your answer on these search results. Cite the sources by mentioning the title and link when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing and what you could find. Do not make up information not present in the search results.";
 const GENERAL_ASSISTANT_INSTRUCTION: &str = "Assistant behavior: Be helpful, careful, and honest. Answer in the user's language when practical. If information is uncertain, outdated, or unavailable, say so clearly. Do not invent facts, citations, files, command results, or tool output. Ask for clarification when the user's goal is ambiguous and a wrong assumption would be risky.";
 const DEFAULT_CHAT_SYSTEM_PROMPT: &str = "You are a helpful AI assistant. Be careful, honest, and practical. Answer in the user's language when practical. If you are unsure or lack enough information, say so instead of guessing. When using web search, ground the answer in the search results and cite relevant sources.";
+const CHAT_READ_ONLY_TOOLS: &[&str] = &[
+    "get_current_time",
+    "web_search",
+    "read_file",
+    "list_dir",
+    "grep",
+    "glob",
+];
+const CHAT_MODE_INSTRUCTION: &str = "Ordinary chat has a lightweight read-only tool set: current time, web search, and workspace file inspection. Do not modify files, run commands, run Python, or spawn agents in ordinary chat; those actions require Code mode.";
 const ROLE_PRESET_BEGIN_MARKER: &str = "<<<GXAGENT_ACTIVE_ROLE_PRESET_BEGIN>>>";
 const ROLE_PRESET_END_MARKER: &str = "<<<GXAGENT_ACTIVE_ROLE_PRESET_END>>>";
 const USER_REQUEST_BEGIN_MARKER: &str = "<<<GXAGENT_USER_REQUEST_BEGIN>>>";
@@ -131,6 +141,26 @@ fn append_code_mode_instruction(system_prompt: &mut String) {
     system_prompt.push_str(CODE_MODE_INSTRUCTION);
 }
 
+fn append_plan_mode_instruction(system_prompt: &mut String) {
+    system_prompt.push_str(
+        "\n\nPlan mode is active. Work read-only: inspect the workspace, use todo_write to maintain a concrete plan, and explain the intended changes. Do not write files, run commands, run Python, or call external mutation tools until the user turns plan mode off.",
+    );
+}
+
+fn plan_mode_allows_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "get_current_time"
+            | "read_file"
+            | "list_dir"
+            | "web_search"
+            | "grep"
+            | "glob"
+            | "todo_write"
+            | "spawn_agent"
+    )
+}
+
 fn configured_max_agent_loops(config: &AppConfig) -> u32 {
     config.max_agent_loops.clamp(1, MAX_LOOPS)
 }
@@ -166,6 +196,13 @@ static STEERING_QUEUE: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<SteeringQueu
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(SteeringQueue::new())));
 
 const AGENT_CANCELLED_ERROR: &str = "__GX_AGENT_CANCELLED__";
+const AGENT_STEERING_INTERRUPTED_OUTPUT: &str =
+    "Tool interrupted by user steering. Re-evaluate the request before taking another action.";
+
+type SteeringInterruptMap = std::collections::HashMap<String, watch::Sender<bool>>;
+
+static STEERING_INTERRUPTS: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<SteeringInterruptMap>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(SteeringInterruptMap::new())));
 
 type CancellationMap = std::collections::HashMap<String, watch::Sender<bool>>;
 
@@ -178,10 +215,24 @@ static CHECKPOINTED_REQUESTS: once_cell::sync::Lazy<
     Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()))
 });
 
+/// Subagents are deliberately shallow and bounded. They are a focused
+/// read-only helper, not a second unbounded agent tree.
+static SUBAGENT_SLOTS: once_cell::sync::Lazy<Arc<Semaphore>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Semaphore::new(3)));
+
 pub(crate) async fn register_cancellation(request_id: &str) -> watch::Receiver<bool> {
     let (tx, rx) = watch::channel(false);
     let mut cancellations = AGENT_CANCELLATIONS.lock().await;
     cancellations.insert(request_id.to_string(), tx);
+    rx
+}
+
+async fn register_steering_interrupt(request_id: &str) -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    STEERING_INTERRUPTS
+        .lock()
+        .await
+        .insert(request_id.to_string(), tx);
     rx
 }
 
@@ -190,6 +241,7 @@ pub(crate) async fn unregister_cancellation(request_id: &str) {
         let mut cancellations = AGENT_CANCELLATIONS.lock().await;
         cancellations.remove(request_id);
     }
+    STEERING_INTERRUPTS.lock().await.remove(request_id);
     CHECKPOINTED_REQUESTS.lock().await.remove(request_id);
 }
 
@@ -300,24 +352,38 @@ async fn send_model_request_with_retry(
     Err("Model request retry loop ended unexpectedly".to_string())
 }
 
-/// Check if search followup instruction already exists in recent messages
-fn has_search_instruction(messages: &[Value]) -> bool {
-    messages.iter().rev().take(3).any(|msg| {
-        msg["role"] == "system"
-            && msg["content"]
-                .as_str()
-                .unwrap_or("")
-                .contains("MUST base your answer on these search results")
-    })
+fn search_tool_observation(output: &str) -> String {
+    if output.trim_start().starts_with("Error:") {
+        format!(
+            "{}\n\nThe web search failed. Do not invent search results or citations. Continue from reliable existing context and clearly disclose the search failure when it affects the answer.",
+            output
+        )
+    } else {
+        format!("{}\n\n{}", output, SEARCH_FOLLOWUP_INSTRUCTION)
+    }
 }
 
-/// Add search followup instruction if not already present
-fn add_search_instruction(messages: &mut Vec<Value>) {
-    if !has_search_instruction(messages) {
-        messages.push(json!({
-            "role": "system",
-            "content": SEARCH_FOLLOWUP_INSTRUCTION
-        }));
+/// Add generated context to the current user turn without inserting a late
+/// system message. Several OpenAI-compatible relays reject system messages that
+/// appear after user/assistant/tool traffic as a malformed request.
+fn append_to_latest_user_message(messages: &mut [Value], addition: &str) -> bool {
+    let Some(message) = messages.iter_mut().rev().find(|msg| msg["role"] == "user") else {
+        return false;
+    };
+
+    match &mut message["content"] {
+        Value::String(content) => {
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str(addition);
+            true
+        }
+        Value::Array(parts) => {
+            parts.push(json!({ "type": "text", "text": addition }));
+            true
+        }
+        _ => false,
     }
 }
 
@@ -420,7 +486,28 @@ fn apply_reasoning_effort(request_body: &mut Value, config: &AppConfig, is_ollam
 
 pub async fn push_steering_message(request_id: String, msg: String) {
     let mut queue = STEERING_QUEUE.lock().await;
-    queue.entry(request_id).or_default().push(msg);
+    queue.entry(request_id.clone()).or_default().push(msg);
+    drop(queue);
+    if let Some(sender) = STEERING_INTERRUPTS.lock().await.get(&request_id) {
+        let _ = sender.send(true);
+    }
+}
+
+async fn clear_steering_interrupt(request_id: &str) {
+    if let Some(sender) = STEERING_INTERRUPTS.lock().await.get(request_id) {
+        let _ = sender.send(false);
+    }
+}
+
+async fn wait_for_steering_interrupt(receiver: &mut watch::Receiver<bool>) {
+    if *receiver.borrow() {
+        return;
+    }
+    while receiver.changed().await.is_ok() {
+        if *receiver.borrow() {
+            return;
+        }
+    }
 }
 
 async fn drain_steering_messages(request_id: &str) -> Vec<String> {
@@ -691,6 +778,7 @@ pub async fn start_agent_loop(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
     let cancel_rx = register_cancellation(&request_id).await;
+    let steering_rx = register_steering_interrupt(&request_id).await;
 
     let result = if session_mode == "chat" {
         run_chat_mode(
@@ -751,6 +839,7 @@ pub async fn start_agent_loop(
             &mut mcp_manager,
             mcp_tool_defs,
             cancel_rx.clone(),
+            steering_rx.clone(),
         )
         .await;
         mcp_manager.shutdown().await;
@@ -951,6 +1040,44 @@ fn assistant_message_with_tool_calls(content: &str, calls: &[AccumulatedToolCall
     })
 }
 
+/// Repair incomplete provider tool-call fragments before both execution and
+/// history serialization. A malformed arguments string or duplicate/empty id
+/// can otherwise make the follow-up model request invalid even when the local
+/// tool executor was able to return an error observation.
+fn normalize_tool_calls(calls: &mut Vec<AccumulatedToolCall>) {
+    let mut ids = std::collections::HashSet::new();
+    calls.retain(|call| !call.name.trim().is_empty());
+
+    for (index, call) in calls.iter_mut().enumerate() {
+        call.name = call.name.trim().to_string();
+
+        if call.id.trim().is_empty() || ids.contains(call.id.trim()) {
+            let mut suffix = 0usize;
+            loop {
+                let candidate = if suffix == 0 {
+                    format!("call_{}", index)
+                } else {
+                    format!("call_{}_{}", index, suffix)
+                };
+                if !ids.contains(&candidate) {
+                    call.id = candidate;
+                    break;
+                }
+                suffix += 1;
+            }
+        } else {
+            call.id = call.id.trim().to_string();
+        }
+        ids.insert(call.id.clone());
+
+        call.arguments = serde_json::from_str::<Value>(&call.arguments)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}))
+            .to_string();
+    }
+}
+
 /// Fold a normalized tool-call delta into the accumulator. Streaming fragments
 /// arrive by `index`; id/name appear once, `arguments` is appended.
 fn apply_tool_call_delta(
@@ -1084,6 +1211,7 @@ async fn chat_turn(
                 outcome.content = clean;
             }
         }
+        normalize_tool_calls(&mut outcome.tool_calls);
         Ok(outcome)
     } else {
         let body: Value = await_with_cancel(cancel_rx, response.json())
@@ -1100,6 +1228,7 @@ async fn chat_turn(
                 tool_calls = dsml_calls;
             }
         }
+        normalize_tool_calls(&mut tool_calls);
 
         if !reasoning.is_empty() {
             emit_reasoning_chunk(window, request_id, &reasoning);
@@ -1123,12 +1252,12 @@ async fn chat_turn(
     }
 }
 
-/// Execute web-search tool calls produced by a chat turn, emitting search-status
-/// events, and append the assistant + tool-result messages to `messages` so the
-/// next turn can answer from the observations. Returns false only if nothing was
-/// appended for the model to inspect.
+/// Execute the small read-only tool set available in ordinary chat, emitting
+/// the same action events as code mode so calls remain visible in the message
+/// timeline. Search calls additionally emit structured search-status events.
+/// Results are appended to `messages` so the next turn can answer from them.
 #[allow(clippy::too_many_arguments)]
-async fn run_chat_search_tools(
+async fn run_chat_tools(
     window: &Window,
     request_id: &str,
     config: &AppConfig,
@@ -1168,25 +1297,51 @@ async fn run_chat_search_tools(
         }
         *tool_call_count += 1;
 
-        if tc.name != "web_search" {
+        if !CHAT_READ_ONLY_TOOLS.contains(&tc.name.as_str()) {
+            let reason = format!(
+                "Tool '{}' is not available in ordinary chat. Switch to code mode for commands or file changes.",
+                tc.name
+            );
+            emit_request_event(
+                window,
+                "agent-tool-blocked",
+                request_id,
+                json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                    "reason": reason,
+                }),
+            );
             tool_results.push(json!({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": format!("Error: Tool '{}' is not available. Only web_search is supported. Please answer based on the information you already have.", tc.name)
+                "content": format!("Error: {}", reason)
             }));
             continue;
         }
-        ran_search = true;
+        let is_search = tc.name == "web_search";
+        if is_search {
+            ran_search = true;
+        }
         let query_display = serde_json::from_str::<Value>(&tc.arguments)
             .ok()
             .and_then(|a| a["query"].as_str().map(String::from))
             .unwrap_or_else(|| tc.name.clone());
         emit_request_event(
             window,
-            "agent-search-status",
+            "agent-tool-executing",
             request_id,
-            json!({ "type": "searching", "query": query_display }),
+            tool_executing_payload(tc, config).await,
         );
+        if is_search {
+            emit_request_event(
+                window,
+                "agent-search-status",
+                request_id,
+                json!({ "type": "searching", "query": query_display }),
+            );
+        }
         let search_start = std::time::Instant::now();
         let tool_output = execute_tool_with_control(
             &tc.name,
@@ -1202,46 +1357,59 @@ async fn run_chat_search_tools(
         if tool_output == TOOL_CANCELLED_ERROR {
             return Err(AGENT_CANCELLED_ERROR.to_string());
         }
-        let elapsed = search_start.elapsed().as_secs_f64();
-        if tool_output.starts_with("Error:") {
-            emit_request_event(
-                window,
-                "agent-search-status",
-                request_id,
-                json!({
-                    "type": "error",
-                    "query": query_display,
-                    "message": tool_output.clone(),
-                    "duration": elapsed,
-                    "provider": config.search_provider,
-                }),
-            );
-        } else {
-            let result_count = tool_output
-                .lines()
-                .filter(|l| l.starts_with("Title:"))
-                .count();
-            let preview = utf8_prefix(&tool_output, 500);
-            let sources = parse_search_sources(&tool_output);
-            emit_request_event(
-                window,
-                "agent-search-status",
-                request_id,
-                json!({
-                    "type": "results",
-                    "query": query_display,
-                    "results": preview,
-                    "duration": elapsed,
-                    "resultCount": result_count,
-                    "provider": config.search_provider,
-                    "sources": sources,
-                }),
-            );
+        emit_request_event(
+            window,
+            "agent-tool-output",
+            request_id,
+            json!({ "id": tc.id, "name": tc.name, "output": tool_output.clone() }),
+        );
+        if is_search {
+            let elapsed = search_start.elapsed().as_secs_f64();
+            if tool_output.starts_with("Error:") {
+                emit_request_event(
+                    window,
+                    "agent-search-status",
+                    request_id,
+                    json!({
+                        "type": "error",
+                        "query": query_display,
+                        "message": tool_output.clone(),
+                        "duration": elapsed,
+                        "provider": config.search_provider,
+                    }),
+                );
+            } else {
+                let result_count = tool_output
+                    .lines()
+                    .filter(|l| l.starts_with("Title:"))
+                    .count();
+                let preview = utf8_prefix(&tool_output, 500);
+                let sources = parse_search_sources(&tool_output);
+                emit_request_event(
+                    window,
+                    "agent-search-status",
+                    request_id,
+                    json!({
+                        "type": "results",
+                        "query": query_display,
+                        "results": preview,
+                        "duration": elapsed,
+                        "resultCount": result_count,
+                        "provider": config.search_provider,
+                        "sources": sources,
+                    }),
+                );
+            }
         }
+        let observation = if is_search {
+            search_tool_observation(&tool_output)
+        } else {
+            tool_output
+        };
         tool_results.push(json!({
             "role": "tool",
             "tool_call_id": tc.id,
-            "content": tool_output
+            "content": observation
         }));
     }
 
@@ -1253,7 +1421,6 @@ async fn run_chat_search_tools(
     for tr in tool_results {
         messages.push(tr);
     }
-    add_search_instruction(messages);
     Ok(ran_search || has_observations)
 }
 
@@ -1277,6 +1444,8 @@ async fn run_chat_mode(
         prepend_active_role_prompt(&user_prompt, config.role_prompt.as_deref());
     append_general_assistant_instruction(&mut chat_system_prompt);
     append_thinking_instruction(&mut chat_system_prompt, &config.thinking_level);
+    chat_system_prompt.push_str("\n\n");
+    chat_system_prompt.push_str(CHAT_MODE_INSTRUCTION);
     let has_web_search = config.tools_enabled.contains(&"web_search".to_string());
     let wire = provider::Wire::from_config(&config);
     let is_ollama = wire.is_ollama();
@@ -1342,10 +1511,8 @@ async fn run_chat_mode(
                     "provider": config.search_provider,
                 }),
             );
-            messages.push(json!({
-                "role": "system",
-                "content": format!("A forced web search for '{}' failed with this tool observation:\n\n{}\n\nDo not invent search results. Answer using the information already available, and clearly say that the forced search failed if it affects the answer.", search_query, tool_output)
-            }));
+            let context = format!("A forced web search for '{}' failed with this tool observation:\n\n{}\n\nDo not invent search results. Answer using the information already available, and clearly say that the forced search failed if it affects the answer.", search_query, tool_output);
+            append_to_latest_user_message(&mut messages, &context);
         } else {
             let result_count = tool_output
                 .lines()
@@ -1369,31 +1536,30 @@ async fn run_chat_mode(
                 }),
             );
 
-            // Inject search results as context and instruct model to use them
-            messages.push(json!({
-                "role": "system",
-                "content": format!("Web search results for '{}':\n\n{}\n\nIMPORTANT: You MUST base your answer on the search results above. Cite the sources (title and link) when referencing information. If the search results are insufficient to fully answer the question, clearly state what information is missing.", search_query, tool_output)
-            }));
+            // Inject generated context into the current user turn. Keeping the
+            // original leading system message as the only system-role message
+            // is accepted by strict OpenAI-compatible relays.
+            let context = format!(
+                "Web search results for '{}':\n\n{}\n\n{}",
+                search_query, tool_output, SEARCH_FOLLOWUP_INSTRUCTION
+            );
+            append_to_latest_user_message(&mut messages, &context);
         }
     }
 
-    // Build the tool list once. Only web_search is exposed in chat mode, and not
-    // in force mode (the search already ran above) nor for Ollama (no tool calls).
-    let chat_tools: Vec<Value> = if has_web_search && !is_ollama && search_mode != "force" {
-        vec![json!({
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "Search the web for current information. Use this when you need up-to-date information that may not be in your training data.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "The search query" }
-                    },
-                    "required": ["query"]
-                }
-            }
-        })]
+    // Build the ordinary-chat tool list from the global toggles, but keep the
+    // write/execute tools out of this mode even when they are enabled for Code.
+    // Force-search already performed web_search above, so omit that one tool for
+    // follow-up turns while still allowing a clock or read-only workspace call.
+    let chat_tools: Vec<Value> = if !is_ollama {
+        get_enabled_tool_definitions(&config.tools_enabled)
+            .into_iter()
+            .filter(|tool| {
+                let name = tool["function"]["name"].as_str().unwrap_or("");
+                CHAT_READ_ONLY_TOOLS.contains(&name)
+                    && (search_mode != "force" || name != "web_search")
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -1411,7 +1577,7 @@ async fn run_chat_mode(
         ensure_not_cancelled(&cancel_rx)?;
 
         // Only offer tools on turns that may still search; the final turn answers.
-        let tools_for_turn: &[Value] = if turn < max_chat_turns && has_web_search {
+        let tools_for_turn: &[Value] = if turn < max_chat_turns && !chat_tools.is_empty() {
             &chat_tools
         } else {
             &[]
@@ -1432,9 +1598,7 @@ async fn run_chat_mode(
 
         let last_content = outcome.content.clone();
 
-        let runnable = has_web_search
-            && !outcome.tool_calls.is_empty()
-            && outcome.tool_calls.iter().any(|tc| tc.name == "web_search");
+        let runnable = !outcome.tool_calls.is_empty();
 
         if !runnable || turn >= max_chat_turns {
             emit_stream_done(
@@ -1453,7 +1617,7 @@ async fn run_chat_mode(
 
         // Run the requested search(es) and append assistant + tool results, then
         // loop to let the model answer from them on the next turn.
-        let ran = run_chat_search_tools(
+        let ran = run_chat_tools(
             &window,
             &request_id,
             &config,
@@ -1612,6 +1776,7 @@ async fn start_agent_loop_inner(
     mcp_manager: &mut McpManager,
     mcp_tool_defs: Vec<Value>,
     cancel_rx: watch::Receiver<bool>,
+    steering_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     ensure_not_cancelled(&cancel_rx)?;
     let mut system_prompt = config.system_prompt.clone();
@@ -1638,6 +1803,9 @@ async fn start_agent_loop_inner(
 
     append_general_assistant_instruction(&mut system_prompt);
     append_code_mode_instruction(&mut system_prompt);
+    if config.plan_mode {
+        append_plan_mode_instruction(&mut system_prompt);
+    }
     append_shell_guidance(&mut system_prompt);
     append_thinking_instruction(&mut system_prompt, &config.thinking_level);
 
@@ -1665,6 +1833,7 @@ async fn start_agent_loop_inner(
         loop_count += 1;
 
         let steering_msgs = drain_steering_messages(&request_id).await;
+        clear_steering_interrupt(&request_id).await;
         if !steering_msgs.is_empty() {
             let combined = steering_msgs.join("\n");
             let steering_prompt = format!(
@@ -1743,8 +1912,9 @@ async fn start_agent_loop_inner(
 
             let response_time_ms = request_start.elapsed().as_millis() as u64;
 
-            let (content, reasoning_content, accumulated, prompt_tokens, completion_tokens) =
+            let (content, reasoning_content, mut accumulated, prompt_tokens, completion_tokens) =
                 provider::parse_full_response(wire, &body);
+            normalize_tool_calls(&mut accumulated);
             total_prompt_tokens += prompt_tokens;
             total_completion_tokens += completion_tokens;
 
@@ -1789,6 +1959,7 @@ async fn start_agent_loop_inner(
                 mcp_manager,
                 &mut tool_call_count,
                 &cancel_rx,
+                &steering_rx,
             )
             .await?;
             if result {
@@ -1861,8 +2032,7 @@ async fn start_agent_loop_inner(
             return Ok(());
         }
 
-        // Drop any malformed tool calls that never received a name.
-        accumulated_tool_calls.retain(|tc| !tc.name.is_empty());
+        normalize_tool_calls(&mut accumulated_tool_calls);
         if accumulated_tool_calls.is_empty() {
             mcp_manager.shutdown().await;
             emit_agent_complete(&window, &request_id, "success");
@@ -1885,6 +2055,7 @@ async fn start_agent_loop_inner(
             mcp_manager,
             &mut tool_call_count,
             &cancel_rx,
+            &steering_rx,
         )
         .await?;
         if result {
@@ -2047,6 +2218,222 @@ async fn execute_tool_with_mcp(
     }
 }
 
+/// Run a tool with a second, request-scoped stop signal for user steering.
+/// The executor still receives a watch receiver, so process-backed commands
+/// terminate their child tree instead of being dropped mid-future.
+#[allow(clippy::too_many_arguments)]
+async fn execute_tool_with_steering(
+    window: &Window,
+    request_id: &str,
+    tool_call_id: &str,
+    name: &str,
+    args_str: &str,
+    config: &AppConfig,
+    mcp_manager: &mut McpManager,
+    cancel_rx: &watch::Receiver<bool>,
+    steering_rx: &watch::Receiver<bool>,
+) -> Result<String, String> {
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (reason_tx, reason_rx) = oneshot::channel::<bool>();
+    let mut cancel_watch = cancel_rx.clone();
+    let mut steering_watch = steering_rx.clone();
+    let watcher = tokio::spawn(async move {
+        tokio::select! {
+            _ = wait_for_cancellation(&mut cancel_watch) => {
+                let _ = reason_tx.send(false);
+            }
+            _ = wait_for_steering_interrupt(&mut steering_watch) => {
+                let _ = reason_tx.send(true);
+            }
+        }
+        let _ = stop_tx.send(true);
+    });
+
+    let output = execute_tool_with_mcp(
+        window,
+        request_id,
+        tool_call_id,
+        name,
+        args_str,
+        config,
+        mcp_manager,
+        &stop_rx,
+    )
+    .await;
+
+    match output {
+        Err(error) if error == AGENT_CANCELLED_ERROR => {
+            let steered = reason_rx.await.unwrap_or(false);
+            watcher.abort();
+            if steered {
+                Ok(AGENT_STEERING_INTERRUPTED_OUTPUT.to_string())
+            } else {
+                Err(error)
+            }
+        }
+        other => {
+            watcher.abort();
+            other
+        }
+    }
+}
+
+/// Execute a read-only tool while allowing either the stop button or a
+/// steering message to drop the in-flight future immediately. The parallel
+/// read set contains no process-backed tools, so dropping the future is enough
+/// to release the operation without a separate child-process watcher.
+#[allow(clippy::too_many_arguments)]
+async fn execute_parallel_read_with_steering(
+    name: &str,
+    args_str: &str,
+    work_dir: &str,
+    search_provider: &str,
+    search_api_key: &str,
+    timeout_secs: u64,
+    cancel_rx: &watch::Receiver<bool>,
+    steering_rx: &watch::Receiver<bool>,
+) -> Result<String, String> {
+    let mut cancel_watch = cancel_rx.clone();
+    let mut steering_watch = steering_rx.clone();
+    tokio::select! {
+        _ = wait_for_cancellation(&mut cancel_watch) => {
+            Err(AGENT_CANCELLED_ERROR.to_string())
+        }
+        _ = wait_for_steering_interrupt(&mut steering_watch) => {
+            Ok(AGENT_STEERING_INTERRUPTED_OUTPUT.to_string())
+        }
+        output = execute_tool_with_control(
+            name,
+            args_str,
+            work_dir,
+            search_provider,
+            search_api_key,
+            timeout_secs,
+            None,
+            None,
+        ) => {
+            if output == TOOL_CANCELLED_ERROR {
+                Err(AGENT_CANCELLED_ERROR.to_string())
+            } else {
+                Ok(output)
+            }
+        }
+    }
+}
+
+async fn run_spawn_agent(
+    window: &Window,
+    request_id: &str,
+    args_str: &str,
+    config: &AppConfig,
+    cancel_rx: &watch::Receiver<bool>,
+) -> Result<String, String> {
+    let permit = SUBAGENT_SLOTS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "The subagent concurrency limit (3) is already in use. Continue this task directly.".to_string())?;
+    let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
+    let task = args["task"].as_str().unwrap_or("").trim();
+    if task.is_empty() {
+        drop(permit);
+        return Err("spawn_agent requires a non-empty task.".to_string());
+    }
+    let context_hint = args["context_hint"].as_str().unwrap_or("").trim();
+    let child_system = format!(
+        "You are a focused gxAgent subagent. Investigate the bounded task below using only your own reasoning and the supplied context. You have no tools, cannot modify files, and cannot spawn another agent. Return a concise factual report with findings, risks, and a recommended next step.\n\nTask:\n{}{}",
+        task,
+        if context_hint.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nContext hint:\n{}", context_hint)
+        }
+    );
+    let messages = vec![
+        json!({ "role": "system", "content": child_system }),
+        json!({ "role": "user", "content": task }),
+    ];
+    let wire = provider::Wire::from_config(config);
+    let mut child_config = config.clone();
+    child_config.tools_enabled.clear();
+    child_config.streaming = false;
+    let body = provider::build_body(wire, &config.model, &messages, &[], &child_config, false);
+    let url = provider::build_url(wire, &config.base_url, &config.model, false);
+    let child_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let builder = provider::apply_auth(wire, child_client.post(&url), &config.api_key);
+    let response = send_model_request_with_retry(
+        window,
+        request_id,
+        cancel_rx,
+        builder.json(&body),
+    )
+    .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        drop(permit);
+        return Err(format!("Subagent API error ({}): {}", status, text));
+    }
+    let response_body: Value = await_with_cancel(cancel_rx, response.json())
+        .await?
+        .map_err(|error| format!("Failed to parse subagent response: {}", error))?;
+    let (content, _reasoning, _calls, _prompt_tokens, _completion_tokens) =
+        provider::parse_full_response(wire, &response_body);
+    drop(permit);
+    if content.trim().is_empty() {
+        return Err("Subagent returned an empty report.".to_string());
+    }
+    Ok(content)
+}
+
+/// Apply the same request-scoped steering interrupt to the subagent request.
+/// The subagent has no tools of its own, but its network call can still be
+/// expensive and should stop when the user changes direction.
+async fn run_spawn_agent_with_steering(
+    window: &Window,
+    request_id: &str,
+    args_str: &str,
+    config: &AppConfig,
+    cancel_rx: &watch::Receiver<bool>,
+    steering_rx: &watch::Receiver<bool>,
+) -> Result<String, String> {
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (reason_tx, reason_rx) = oneshot::channel::<bool>();
+    let mut cancel_watch = cancel_rx.clone();
+    let mut steering_watch = steering_rx.clone();
+    let watcher = tokio::spawn(async move {
+        tokio::select! {
+            _ = wait_for_cancellation(&mut cancel_watch) => {
+                let _ = reason_tx.send(false);
+            }
+            _ = wait_for_steering_interrupt(&mut steering_watch) => {
+                let _ = reason_tx.send(true);
+            }
+        }
+        let _ = stop_tx.send(true);
+    });
+
+    let output = run_spawn_agent(window, request_id, args_str, config, &stop_rx).await;
+    match output {
+        Err(error) if error == AGENT_CANCELLED_ERROR => {
+            let steered = reason_rx.await.unwrap_or(false);
+            watcher.abort();
+            if steered {
+                Ok(AGENT_STEERING_INTERRUPTED_OUTPUT.to_string())
+            } else {
+                Err(error)
+            }
+        }
+        other => {
+            watcher.abort();
+            other
+        }
+    }
+}
+
 async fn read_mutation_target(
     tool_call: &AccumulatedToolCall,
     config: &AppConfig,
@@ -2104,6 +2491,16 @@ async fn tool_output_payload(
     payload
 }
 
+async fn cancel_approval_request(window: &Window, request_id: &str, approval_request_id: &str) {
+    cancel_registered_approval(approval_request_id).await;
+    emit_request_event(
+        window,
+        "agent-tool-approval-cancelled",
+        request_id,
+        json!({ "approvalRequestId": approval_request_id }),
+    );
+}
+
 /// Process accumulated tool calls with human-in-the-loop approval.
 /// Returns Ok(true) if the agent should stop (no more tool calls needed),
 /// Ok(false) if the loop should continue.
@@ -2117,6 +2514,7 @@ async fn process_tool_calls(
     mcp_manager: &mut McpManager,
     tool_call_count: &mut u32,
     cancel_rx: &watch::Receiver<bool>,
+    steering_rx: &watch::Receiver<bool>,
 ) -> Result<bool, String> {
     ensure_not_cancelled(cancel_rx)?;
 
@@ -2124,6 +2522,7 @@ async fn process_tool_calls(
     let username = whoami::username();
 
     let mut needs_confirmation = Vec::new();
+    let mut pending_tool_ids = Vec::new();
     let mut auto_approved = Vec::new();
 
     let max_tool_calls = configured_max_tool_calls(config);
@@ -2157,13 +2556,17 @@ async fn process_tool_calls(
         }
         *tool_call_count += 1;
 
-        let level = check_approval(
-            &tc.name,
-            &tc.arguments,
-            &config.approval_policy,
-            &config.trusted_patterns,
-            &config.default_work_dir,
-        );
+        let level = if config.plan_mode && !plan_mode_allows_tool(&tc.name) {
+            ApprovalLevel::Blocked
+        } else {
+            check_approval(
+                &tc.name,
+                &tc.arguments,
+                &config.approval_policy,
+                &config.trusted_patterns,
+                &config.default_work_dir,
+            )
+        };
 
         match level {
             ApprovalLevel::AutoApprove => {
@@ -2173,6 +2576,7 @@ async fn process_tool_calls(
                 auto_approved.push(tc.clone());
             }
             ApprovalLevel::NeedsConfirmation => {
+                pending_tool_ids.push(tc.id.clone());
                 needs_confirmation.push(PendingToolCall {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
@@ -2181,7 +2585,12 @@ async fn process_tool_calls(
                 });
             }
             ApprovalLevel::Blocked => {
-                // Emit blocked event and add error as tool response
+                // Emit blocked event and add error as tool response.
+                let reason = if config.plan_mode && !plan_mode_allows_tool(&tc.name) {
+                    "Plan mode is read-only. Turn it off before using this tool."
+                } else {
+                    "This command is blocked by security policy."
+                };
                 emit_request_event(
                     window,
                     "agent-tool-blocked",
@@ -2190,17 +2599,39 @@ async fn process_tool_calls(
                         "id": tc.id,
                         "name": tc.name,
                         "arguments": tc.arguments,
-                        "reason": "This command is blocked by security policy."
+                        "reason": reason
                     }),
                 );
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": "Error: This command was blocked by the security policy. Please try a different approach."
+                    "content": format!("Error: {} Please continue with a read-only plan.", reason)
                 }));
             }
         }
     }
+
+    // Register and show approval before running automatic tools. This lets
+    // read-only calls continue while the user decides about a command/write.
+    let pending_approval = if !needs_confirmation.is_empty() {
+        let approval_request_id = uuid::Uuid::new_v4().to_string();
+        let request = ToolApprovalRequest {
+            request_id: approval_request_id.clone(),
+            tool_calls: needs_confirmation,
+        };
+        let mut approval_payload = serde_json::to_value(&request).map_err(|e| e.to_string())?;
+        if let Some(object) = approval_payload.as_object_mut() {
+            object.insert("requestId".to_string(), json!(request_id));
+        }
+        let approval_rx = register_approval_wait(&approval_request_id).await;
+        if let Err(error) = window.emit("agent-tool-approval-request", approval_payload) {
+            cancel_registered_approval(&approval_request_id).await;
+            return Err(format!("Failed to show approval request: {}", error));
+        }
+        Some((approval_request_id, approval_rx))
+    } else {
+        None
+    };
 
     // Execute auto-approved tools. Pure read-only builtins (no filesystem
     // mutation, no MCP manager needed) run concurrently — this is the common
@@ -2211,7 +2642,7 @@ async fn process_tool_calls(
     let is_parallel_read = |name: &str| {
         matches!(
             name,
-            "read_file" | "list_dir" | "web_search" | "grep" | "glob"
+            "get_current_time" | "read_file" | "list_dir" | "web_search" | "grep" | "glob"
         )
     };
 
@@ -2231,8 +2662,9 @@ async fn process_tool_calls(
     // and stays compatible with Anthropic/Gemini tool-result conversion.
     let mut outputs_by_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut steering_interrupted = *steering_rx.borrow();
 
-    if !parallel_reads.is_empty() {
+    if !parallel_reads.is_empty() && !steering_interrupted {
         for tc in &parallel_reads {
             emit_request_event(
                 window,
@@ -2257,16 +2689,17 @@ async fn process_tool_calls(
             let key = config.search_api_key.clone();
             let timeout = config.command_timeout;
             let cancel_rx = cancel_rx.clone();
+            let steering_rx = steering_rx.clone();
             async move {
-                execute_tool_with_control(
+                execute_parallel_read_with_steering(
                     &name,
                     &args,
                     &work_dir,
                     &provider,
                     &key,
                     timeout,
-                    Some(cancel_rx),
-                    None,
+                    &cancel_rx,
+                    &steering_rx,
                 )
                 .await
             }
@@ -2274,9 +2707,15 @@ async fn process_tool_calls(
         let outputs = futures_util::future::join_all(futures).await;
 
         for (tc, output) in parallel_reads.iter().zip(outputs) {
-            if output == TOOL_CANCELLED_ERROR {
-                return Err(AGENT_CANCELLED_ERROR.to_string());
-            }
+            let output = match output {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some((approval_request_id, _)) = pending_approval.as_ref() {
+                        cancel_approval_request(window, request_id, approval_request_id).await;
+                    }
+                    return Err(error);
+                }
+            };
             emit_request_event(
                 window,
                 "agent-tool-output",
@@ -2289,36 +2728,110 @@ async fn process_tool_calls(
             );
             outputs_by_id.insert(tc.id.clone(), output);
         }
+        steering_interrupted = *steering_rx.borrow();
     }
 
-    for tc in &sequential {
-        emit_request_event(
-            window,
-            "agent-tool-executing",
-            request_id,
-            tool_executing_payload(tc, config).await,
-        );
+    if !steering_interrupted {
+        for tc in &sequential {
+            emit_request_event(
+                window,
+                "agent-tool-executing",
+                request_id,
+                tool_executing_payload(tc, config).await,
+            );
 
-        let output = execute_tool_with_mcp(
-            window,
-            request_id,
-            &tc.id,
-            &tc.name,
-            &tc.arguments,
-            config,
-            &mut *mcp_manager,
-            cancel_rx,
-        )
-        .await?;
+            let output = if tc.name == "spawn_agent" {
+                match run_spawn_agent_with_steering(
+                    window,
+                    request_id,
+                    &tc.arguments,
+                    config,
+                    cancel_rx,
+                    steering_rx,
+                )
+                .await
+                {
+                    Ok(output) => Ok(output),
+                    Err(error) if is_agent_cancelled_error(&error) => Err(error),
+                    Err(error) => Ok(format!("Error: {}", error)),
+                }
+            } else {
+                execute_tool_with_steering(
+                    window,
+                    request_id,
+                    &tc.id,
+                    &tc.name,
+                    &tc.arguments,
+                    config,
+                    &mut *mcp_manager,
+                    cancel_rx,
+                    steering_rx,
+                )
+                .await
+            };
+            let output = match output {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some((approval_request_id, _)) = pending_approval.as_ref() {
+                        cancel_approval_request(window, request_id, approval_request_id).await;
+                    }
+                    return Err(error);
+                }
+            };
 
-        emit_request_event(
-            window,
-            "agent-tool-output",
-            request_id,
-            tool_output_payload(tc, config, &output).await,
-        );
+            emit_request_event(
+                window,
+                "agent-tool-output",
+                request_id,
+                tool_output_payload(tc, config, &output).await,
+            );
 
-        outputs_by_id.insert(tc.id.clone(), output);
+            outputs_by_id.insert(tc.id.clone(), output);
+            if outputs_by_id.get(&tc.id).map(String::as_str)
+                == Some(AGENT_STEERING_INTERRUPTED_OUTPUT)
+            {
+                steering_interrupted = true;
+                break;
+            }
+        }
+    }
+
+    if steering_interrupted {
+        for tc in &auto_approved {
+            if outputs_by_id.contains_key(&tc.id) {
+                continue;
+            }
+            let output = AGENT_STEERING_INTERRUPTED_OUTPUT.to_string();
+            emit_request_event(
+                window,
+                "agent-tool-output",
+                request_id,
+                json!({ "id": tc.id, "name": tc.name, "output": output }),
+            );
+            outputs_by_id.insert(tc.id.clone(), output);
+        }
+        for tc_id in &pending_tool_ids {
+            let output = AGENT_STEERING_INTERRUPTED_OUTPUT.to_string();
+            let name = tool_calls
+                .iter()
+                .find(|tool_call| &tool_call.id == tc_id)
+                .map(|tool_call| tool_call.name.as_str())
+                .unwrap_or("tool");
+            emit_request_event(
+                window,
+                "agent-tool-output",
+                request_id,
+                json!({ "id": tc_id, "name": name, "output": output }),
+            );
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": output
+            }));
+        }
+        if let Some((approval_request_id, _)) = pending_approval.as_ref() {
+            cancel_approval_request(window, request_id, approval_request_id).await;
+        }
     }
 
     // Append all tool results in the model's ORIGINAL tool_call order (not the
@@ -2334,26 +2847,85 @@ async fn process_tool_calls(
         }
     }
 
-    // If there are tools needing confirmation, emit approval request and wait
-    if !needs_confirmation.is_empty() {
-        let approval_request_id = uuid::Uuid::new_v4().to_string();
-        let request = ToolApprovalRequest {
-            request_id: approval_request_id.clone(),
-            tool_calls: needs_confirmation,
+    if steering_interrupted {
+        audit.shutdown().await;
+        return Ok(false);
+    }
+
+    // Wait for the approval response after automatic tools have finished.
+    if let Some((approval_request_id, approval_rx)) = pending_approval {
+        let mut approval_wait = Box::pin(wait_for_registered_approval(
+            &approval_request_id,
+            approval_rx,
+            cancel_rx,
+        ));
+        let mut steering_watch = steering_rx.clone();
+        let approval_result = tokio::select! {
+            result = &mut approval_wait => result,
+            _ = wait_for_steering_interrupt(&mut steering_watch) => {
+                cancel_approval_request(window, request_id, &approval_request_id).await;
+                for tc_id in &pending_tool_ids {
+                    let output = AGENT_STEERING_INTERRUPTED_OUTPUT.to_string();
+                    let name = tool_calls
+                        .iter()
+                        .find(|tool_call| &tool_call.id == tc_id)
+                        .map(|tool_call| tool_call.name.as_str())
+                        .unwrap_or("tool");
+                    emit_request_event(
+                        window,
+                        "agent-tool-output",
+                        request_id,
+                        json!({ "id": tc_id, "name": name, "output": output }),
+                    );
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": output
+                    }));
+                }
+                audit.shutdown().await;
+                return Ok(false);
+            }
+        };
+        let approval_result = match approval_result {
+            Ok(result) => result,
+            Err(error) => {
+                cancel_approval_request(window, request_id, &approval_request_id).await;
+                return Err(error);
+            }
         };
 
-        let mut approval_payload = serde_json::to_value(&request).map_err(|e| e.to_string())?;
-        if let Some(object) = approval_payload.as_object_mut() {
-            object.insert("requestId".to_string(), json!(request_id));
-        }
-        let _ = window.emit("agent-tool-approval-request", approval_payload);
-
-        // Wait for user response via Tauri state
-        // The frontend will invoke "resolve_tool_approval" command
-        let approval_result = wait_for_approval(window, &approval_request_id, cancel_rx).await?;
-
+        let mut approval_steering_interrupted = false;
         for (tc_id, approved) in approval_result {
             ensure_not_cancelled(cancel_rx)?;
+            if approval_steering_interrupted {
+                if approved {
+                    let output = AGENT_STEERING_INTERRUPTED_OUTPUT.to_string();
+                    let name = tool_calls
+                        .iter()
+                        .find(|tool_call| tool_call.id == tc_id)
+                        .map(|tool_call| tool_call.name.as_str())
+                        .unwrap_or("tool");
+                    emit_request_event(
+                        window,
+                        "agent-tool-output",
+                        request_id,
+                        json!({ "id": tc_id, "name": name, "output": output }),
+                    );
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": output
+                    }));
+                } else {
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": "User rejected this tool call. Please try a different approach or ask the user for clarification."
+                    }));
+                }
+                continue;
+            }
             if approved {
                 // Find the tool call
                 if let Some(tc) = tool_calls.iter().find(|t| t.id == tc_id) {
@@ -2368,18 +2940,38 @@ async fn process_tool_calls(
                         tool_executing_payload(tc, config).await,
                     );
 
-                    let output = execute_tool_with_mcp(
-                        window,
-                        request_id,
-                        &tc.id,
-                        &tc.name,
-                        &tc.arguments,
-                        config,
-                        &mut *mcp_manager,
-                        cancel_rx,
-                    )
-                    .await?;
+                    let output = if tc.name == "spawn_agent" {
+                        match run_spawn_agent_with_steering(
+                            window,
+                            request_id,
+                            &tc.arguments,
+                            config,
+                            cancel_rx,
+                            steering_rx,
+                        )
+                        .await
+                        {
+                            Ok(output) => Ok(output),
+                            Err(error) if is_agent_cancelled_error(&error) => return Err(error),
+                            Err(error) => Ok(format!("Error: {}", error)),
+                        }
+                    } else {
+                        execute_tool_with_steering(
+                            window,
+                            request_id,
+                            &tc.id,
+                            &tc.name,
+                            &tc.arguments,
+                            config,
+                            &mut *mcp_manager,
+                            cancel_rx,
+                            steering_rx,
+                        )
+                        .await
+                    }?;
 
+                    let was_steering_interrupted =
+                        output == AGENT_STEERING_INTERRUPTED_OUTPUT;
                     emit_request_event(
                         window,
                         "agent-tool-output",
@@ -2392,6 +2984,9 @@ async fn process_tool_calls(
                         "tool_call_id": tc.id,
                         "content": output
                     }));
+                    if was_steering_interrupted {
+                        approval_steering_interrupted = true;
+                    }
                 }
             } else {
                 // User rejected
@@ -2407,13 +3002,15 @@ async fn process_tool_calls(
                 }
             }
         }
+        if approval_steering_interrupted {
+            audit.shutdown().await;
+            return Ok(false);
+        }
     }
 
     audit.shutdown().await;
     Ok(false)
 }
-
-use tokio::sync::watch;
 
 /// Global pending approvals store: request_id -> watch::Sender channel
 type ApprovalMap = std::collections::HashMap<String, watch::Sender<Option<Vec<(String, bool)>>>>;
@@ -2421,28 +3018,30 @@ type ApprovalMap = std::collections::HashMap<String, watch::Sender<Option<Vec<(S
 static PENDING_APPROVALS: once_cell::sync::Lazy<Arc<tokio::sync::Mutex<ApprovalMap>>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Mutex::new(ApprovalMap::new())));
 
+async fn register_approval_wait(request_id: &str) -> watch::Receiver<Option<Vec<(String, bool)>>> {
+    let mut pending = PENDING_APPROVALS.lock().await;
+    let (tx, rx) = watch::channel(None::<Vec<(String, bool)>>);
+    pending.insert(request_id.to_string(), tx);
+    rx
+}
+
+async fn cancel_registered_approval(request_id: &str) {
+    PENDING_APPROVALS.lock().await.remove(request_id);
+}
+
 /// Wait for frontend to resolve a tool approval request.
 /// The timeout is a leak backstop, not a UX pace-setter: killing a whole run
 /// because the user stepped away for ten minutes is far worse than a stale
 /// approval card, so it is deliberately generous. Cancellation (stop button,
 /// closing the session) still tears the wait down immediately.
-async fn wait_for_approval(
-    _window: &Window,
+async fn wait_for_registered_approval(
     request_id: &str,
+    mut rx: watch::Receiver<Option<Vec<(String, bool)>>>,
     cancel_rx: &watch::Receiver<bool>,
 ) -> Result<Vec<(String, bool)>, String> {
     const APPROVAL_TIMEOUT_SECS: u64 = 3600; // 1 hour
 
-    let rx = {
-        let mut pending = PENDING_APPROVALS.lock().await;
-        // Create a watch channel; the sender will be stored, receiver returned
-        let (tx, rx) = watch::channel(None::<Vec<(String, bool)>>);
-        pending.insert(request_id.to_string(), tx);
-        rx
-    };
-
     // Wait for the value to change from None to Some, with timeout
-    let mut rx = rx;
     let timeout = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS));
     tokio::pin!(timeout);
     let mut cancel_rx = cancel_rx.clone();
@@ -2752,6 +3351,97 @@ mod role_prompt_tests {
 
         assert_eq!(twice, once);
         assert_eq!(twice.matches(ROLE_PRESET_BEGIN_MARKER).count(), 1);
+    }
+
+    #[test]
+    fn generated_search_context_is_appended_to_the_latest_user_turn() {
+        let mut messages = vec![
+            json!({ "role": "system", "content": "system" }),
+            json!({ "role": "user", "content": "question" }),
+        ];
+        assert!(append_to_latest_user_message(
+            &mut messages,
+            "search context"
+        ));
+        assert_eq!(messages[1]["content"], "question\n\nsearch context");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "system")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn generated_search_context_preserves_multimodal_user_parts() {
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "question" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AA==" } }
+            ]
+        })];
+        assert!(append_to_latest_user_message(
+            &mut messages,
+            "search context"
+        ));
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[2]["text"], "search context");
+    }
+
+    #[test]
+    fn search_tool_observation_carries_grounding_instruction_in_tool_content() {
+        let observation = search_tool_observation("Title: Source\nLink: https://example.com");
+        assert!(observation.contains("Title: Source"));
+        assert!(observation.contains(SEARCH_FOLLOWUP_INSTRUCTION));
+    }
+
+    #[test]
+    fn failed_search_observation_forbids_invented_results() {
+        let observation = search_tool_observation("Error: Tavily API error (503)");
+        assert!(observation.contains("search failed"));
+        assert!(observation.contains("Do not invent search results"));
+        assert!(!observation.contains("MUST base your answer on these search results"));
+    }
+
+    #[test]
+    fn malformed_tool_calls_are_safe_for_execution_and_followup_serialization() {
+        let mut calls = vec![
+            AccumulatedToolCall {
+                id: "duplicate".into(),
+                name: " web_search ".into(),
+                arguments: "{\"query\":".into(),
+            },
+            AccumulatedToolCall {
+                id: "duplicate".into(),
+                name: "get_current_time".into(),
+                arguments: "null".into(),
+            },
+            AccumulatedToolCall {
+                id: "ignored".into(),
+                name: "  ".into(),
+                arguments: "{}".into(),
+            },
+        ];
+
+        normalize_tool_calls(&mut calls);
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "web_search");
+        assert_eq!(calls[0].arguments, "{}");
+        assert_eq!(calls[0].id, "duplicate");
+        assert_ne!(calls[1].id, "duplicate");
+        assert_eq!(calls[1].arguments, "{}");
+
+        let history = assistant_message_with_tool_calls("", &calls);
+        for call in history["tool_calls"].as_array().unwrap() {
+            let arguments = call["function"]["arguments"].as_str().unwrap();
+            assert!(serde_json::from_str::<Value>(arguments)
+                .unwrap()
+                .is_object());
+        }
     }
 }
 

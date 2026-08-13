@@ -66,6 +66,8 @@ pub struct AppConfig {
     pub max_tool_calls_per_request: u32,
     #[serde(default = "default_preview_sandbox")]
     pub preview_sandbox: bool,
+    #[serde(default = "default_plan_mode")]
+    pub plan_mode: bool,
     /// One-time migration marker for tools_enabled. When a release adds new
     /// built-in tools we bump TOOLS_MIGRATION_VERSION and, on load, append the
     /// newly-added tools exactly once for configs below that version. This
@@ -114,12 +116,16 @@ fn default_preview_sandbox() -> bool {
     true
 }
 
+fn default_plan_mode() -> bool {
+    false
+}
+
 /// Bump this when new built-in tools are added so existing saved configs get
 /// the new tools appended exactly once. Old configs deserialize with version 0
 /// (the `#[serde(default)]` on the field) and are migrated on load; after
 /// migration the version is stored, so a tool the user later disables stays
 /// disabled instead of being re-enabled on every launch.
-pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 3;
+pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 5;
 
 /// Pre-v2 defaults for the agent limits, used by the one-time migration in
 /// load_config to tell "user never touched this" (exact old default) apart
@@ -307,9 +313,11 @@ impl Default for AppConfig {
                 "list_dir".into(),
                 "run_python".into(),
                 "web_search".into(),
+                "get_current_time".into(),
                 "grep".into(),
                 "glob".into(),
                 "todo_write".into(),
+                "spawn_agent".into(),
             ],
             approval_policy: "standard".into(),
             trusted_patterns: default_trusted_patterns(),
@@ -331,6 +339,7 @@ impl Default for AppConfig {
             max_agent_loops: 30,
             max_tool_calls_per_request: 120,
             preview_sandbox: true,
+            plan_mode: false,
             tools_migration_version: CURRENT_TOOLS_MIGRATION_VERSION,
         }
     }

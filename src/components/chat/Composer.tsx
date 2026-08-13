@@ -36,6 +36,7 @@ import { THINKING_LEVELS, isSendableAttachment, newMessageId } from "../../appDe
 import { ApprovalCard, messageHasPendingApproval } from "./ApprovalCard";
 import { useAppStore } from "../../store/appStore";
 import { addLog, notify } from "../../services/agentEvents";
+import { sortModels, sortProfileEntries } from "../../utils/modelSorting";
 
 export interface ComposerProps {
   lang: string;
@@ -136,6 +137,12 @@ export function Composer({
   const currentThinkingLevel = resolvedCurrentConfig.thinking_level;
   const pendingApprovalHasInlineAction = currentSession.messages.some(
     (message) => messageHasPendingApproval(message, pendingApprovals),
+  );
+  const profileEntries = sortProfileEntries(Object.entries(config.profiles), lang);
+  const configuredModelIds = new Set(profileEntries.map(([, profile]) => profile.default_model));
+  const otherModels = sortModels(
+    modelsForCurrentConfig.filter((model) => !configuredModelIds.has(model.id)),
+    lang,
   );
 
   const [dragOver, setDragOver] = useState(false);
@@ -504,7 +511,7 @@ export function Composer({
             </button>
             {modelPickerOpen && (
               <div className="model-picker-dropdown">
-                {Object.entries(config.profiles).map(([profileId, p]) => (
+                {profileEntries.map(([profileId, p]) => (
                   <button
                     key={profileId}
                     className={`model-picker-item ${currentSession.sessionConfig.profileId === profileId && currentSession.sessionConfig.model === null ? "active" : ""}`}
@@ -518,10 +525,10 @@ export function Composer({
                     <span className="model-picker-tag">{p.default_model}</span>
                   </button>
                 ))}
-                {modelsForCurrentConfig.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).length > 0 && (
+                {otherModels.length > 0 && (
                   <>
                     <div className="model-picker-divider">{t("ui.other-models", lang)}</div>
-                    {modelsForCurrentConfig.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).map((m) => (
+                    {otherModels.map((m) => (
                       <button
                         key={m.id}
                         className={`model-picker-item ${currentSession.sessionConfig.model === m.id ? "active" : ""}`}

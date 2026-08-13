@@ -4,35 +4,55 @@
    ======================================================== */
 
 /* ========================================================
-   Modal — Floating card with soft shadow
+   Radix Dialog surfaces
+   --------------------------------------------------------
+   Overlay and panel are SIBLINGS under the portal, so the panel cannot be
+   centered by flex on the overlay. Each is positioned independently against
+   the viewport instead.
    ======================================================== */
 
-.modal-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
   background: var(--bg-overlay);
   backdrop-filter: blur(6px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
   z-index: 100;
+  animation: dialogOverlayIn var(--transition-fast);
 }
 
-.modal-content {
-  width: 560px;
-  max-width: calc(100vw - 24px);
-  max-height: 88vh;
-  border-radius: var(--radius-2xl);
-  box-shadow: var(--shadow-elevated);
-  border: 1px solid var(--border-default);
-  background: var(--bg-main);
-  overflow: hidden;
-  animation: modalIn var(--transition-normal);
+.dialog-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 101;
   display: flex;
   flex-direction: column;
+  max-width: calc(100vw - 24px);
+  max-height: 88vh;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  background: var(--bg-main);
+  box-shadow: var(--shadow-elevated);
+  overflow: hidden;
+  animation: dialogPanelIn var(--transition-normal);
+}
+
+@keyframes dialogOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dialogPanelIn {
+  from { opacity: 0; transform: translate(-50%, -48%) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog-overlay,
+  .dialog-panel {
+    animation: none;
+  }
 }
 
 .confirm-overlay {
@@ -43,6 +63,9 @@
   width: min(420px, calc(100vw - 24px));
   padding: 18px;
   gap: 14px;
+  /* Sits above .confirm-overlay, which itself is raised to 400 so
+     confirmations can appear over the settings modal. */
+  z-index: 401;
 }
 
 .confirm-dialog-header {
@@ -52,9 +75,10 @@
   gap: 10px;
 }
 
-.confirm-dialog-header h3 {
+.confirm-dialog-title {
   min-width: 0;
   font-size: var(--font-title);
+  font-weight: 600;
   line-height: 1.35;
 }
 
@@ -1356,7 +1380,6 @@
 }
 
 .context-menu {
-  position: fixed;
   z-index: 9999;
   background: var(--bg-card);
   border: 1px solid var(--border-default);
@@ -1364,13 +1387,19 @@
   box-shadow: var(--shadow-elevated);
   padding: 5px;
   min-width: 168px;
+  max-width: min(280px, calc(100vw - 16px));
+  max-height: min(420px, calc(100vh - 16px));
+  max-height: min(420px, calc(100dvh - 16px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   animation: context-menu-in var(--transition-fast);
-  transform-origin: top left;
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin, top left);
 }
 
 @keyframes context-menu-in {
-  from { opacity: 0; transform: scale(0.96) translateY(-4px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .context-menu-item {

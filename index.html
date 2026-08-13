@@ -16,7 +16,9 @@
           document.documentElement.setAttribute("data-theme", theme);
           document.documentElement.setAttribute("data-mode", mode);
           if (mode === "dark") {
-            document.documentElement.style.backgroundColor = "#1f1f1f";
+            // Keep in sync with --bg-main of the dark themes in styles/themes.css.
+            var preloadBg = { ember: "#111210", grape: "#160e20", amber: "#18120e" };
+            document.documentElement.style.backgroundColor = preloadBg[theme] || "#16181d";
           }
         } catch (e) { /* first run: defaults are fine */ }
       })();

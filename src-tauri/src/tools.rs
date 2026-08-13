@@ -1,5 +1,6 @@
 use crate::text::{utf8_prefix, IncrementalUtf8Decoder};
 use crate::workspace;
+use chrono::{Local, Utc};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -135,6 +136,19 @@ pub fn get_all_tool_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "get_current_time",
+                "description": "Get the current local time and UTC time. Use this for questions about the current date or time instead of guessing. The optional timezone accepts only 'local' or 'utc'.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "timezone": { "type": "string", "enum": ["local", "utc"], "description": "Which clock to put first. Defaults to local." }
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "edit_file",
                 "description": "Make a precise, in-place edit to an existing file by replacing an exact string. STRONGLY PREFER this over write_file for modifying existing files — it avoids rewriting the whole file and is safer for large files. The old_string must match EXACTLY (including whitespace and indentation) and must be UNIQUE in the file, otherwise the edit is rejected. Include enough surrounding context to make it unique. To insert new code, include an anchor line in both old_string and new_string.",
                 "parameters": {
@@ -203,6 +217,21 @@ pub fn get_all_tool_definitions() -> Vec<Value> {
                         }
                     },
                     "required": ["todos"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "spawn_agent",
+                "description": "Ask a focused read-only subagent to investigate a bounded task and return a concise report. Subagents have no tools and cannot create nested agents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string", "description": "The focused task for the subagent." },
+                        "context_hint": { "type": "string", "description": "Optional context or files that may help the subagent." }
+                    },
+                    "required": ["task"]
                 }
             }
         }),
@@ -344,6 +373,7 @@ pub async fn execute_tool_with_control(
                 }
             }
         }
+        "get_current_time" => run_current_time(&args),
         "edit_file" => {
             let path = args["path"].as_str().unwrap_or("");
             let old_string = args["old_string"].as_str().unwrap_or("");
@@ -374,6 +404,32 @@ pub async fn execute_tool_with_control(
         }
         "todo_write" => run_todo_write(&args),
         _ => format!("Unknown tool: {}", name),
+    }
+}
+
+fn run_current_time(args: &Value) -> String {
+    let timezone = args["timezone"]
+        .as_str()
+        .unwrap_or("local")
+        .trim()
+        .to_ascii_lowercase();
+    let local = Local::now();
+    let utc = Utc::now();
+    match timezone.as_str() {
+        "local" | "" => format!(
+            "Current local time: {}\nUTC: {}",
+            local.format("%Y-%m-%d %H:%M:%S %:z"),
+            utc.format("%Y-%m-%d %H:%M:%S %:z")
+        ),
+        "utc" => format!(
+            "Current UTC time: {}\nLocal time: {}",
+            utc.format("%Y-%m-%d %H:%M:%S %:z"),
+            local.format("%Y-%m-%d %H:%M:%S %:z")
+        ),
+        other => format!(
+            "Error: Unsupported timezone '{}'. Use 'local' or 'utc'.",
+            other
+        ),
     }
 }
 
@@ -805,6 +861,260 @@ async fn run_write_file(path: &str, content: &str, work_dir: &str) -> Result<(),
         .map_err(|e| format!("Failed to write file: {}", e))
 }
 
+/// How an `edit_file` needle was located in the haystack.
+///
+/// Exact matching is tried first and is the only strategy that needs no
+/// reconstruction. The fallbacks exist because models routinely reproduce code
+/// with slightly different trailing whitespace, or re-indent a snippet when
+/// quoting it out of context — both are cases where the intent is unambiguous
+/// but a byte-exact `find` fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditMatchKind {
+    Exact,
+    /// Matched after normalizing trailing whitespace on every line.
+    TrailingWhitespace,
+    /// Matched after removing the common leading indentation from the needle;
+    /// the replacement is re-indented to the depth found in the file.
+    Reindented,
+}
+
+impl EditMatchKind {
+    /// Suffix appended to the success message so the model learns its needle
+    /// was not byte-exact and can quote more carefully next time.
+    fn note(self) -> &'static str {
+        match self {
+            EditMatchKind::Exact => "",
+            EditMatchKind::TrailingWhitespace => " (matched ignoring trailing whitespace)",
+            EditMatchKind::Reindented => " (matched ignoring indentation; replacement re-indented)",
+        }
+    }
+}
+
+/// A located edit: the byte ranges in the original text that must be replaced,
+/// paired with the exact replacement string for each range.
+struct EditMatches {
+    kind: EditMatchKind,
+    /// `(start, end, replacement)` triples, in ascending, non-overlapping order.
+    spans: Vec<(usize, usize, String)>,
+}
+
+/// Width of the whitespace prefix shared by every non-blank line.
+fn common_indent(text: &str) -> usize {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start_matches([' ', '\t']).len())
+        .min()
+        .unwrap_or(0)
+}
+
+/// Remove `width` leading whitespace characters from each line, tolerating
+/// lines that are shorter (blank lines).
+fn dedent_by(text: &str, width: usize) -> String {
+    text.lines()
+        .map(|line| {
+            let strippable = line.len() - line.trim_start_matches([' ', '\t']).len();
+            &line[strippable.min(width)..]
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Prefix every non-blank line with `indent`.
+///
+/// The first line is indented too: matched spans begin at the start of the
+/// line (before its existing indentation), so the replacement must supply that
+/// indentation itself.
+fn reindent(text: &str, indent: &str) -> String {
+    let mut out = String::with_capacity(text.len() + indent.len() * 4);
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if !line.trim().is_empty() {
+            out.push_str(indent);
+        }
+        out.push_str(line);
+    }
+    // `lines()` drops a trailing newline; restore it so block edits keep shape.
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Byte offsets of every occurrence of `needle` in `haystack`.
+fn find_all(haystack: &str, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let at = from + rel;
+        hits.push(at);
+        from = at + needle.len();
+    }
+    hits
+}
+
+/// Map a line index in `text` to its starting byte offset.
+fn line_start_offsets(text: &str) -> Vec<usize> {
+    let mut offsets = vec![0];
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            offsets.push(i + 1);
+        }
+    }
+    offsets
+}
+
+/// Locate `old_string` in `original`, escalating through the fallback
+/// strategies. Returns `None` when no strategy finds anything.
+///
+/// Each strategy resolves matches back to byte ranges in the ORIGINAL text so
+/// the untouched remainder of the file is preserved byte-for-byte — the
+/// normalization is only ever used for *locating*, never for rewriting.
+fn locate_edit(original: &str, old_string: &str, new_string: &str) -> Option<EditMatches> {
+    // 1. Exact.
+    let exact = find_all(original, old_string);
+    if !exact.is_empty() {
+        return Some(EditMatches {
+            kind: EditMatchKind::Exact,
+            spans: exact
+                .into_iter()
+                .map(|at| (at, at + old_string.len(), new_string.to_string()))
+                .collect(),
+        });
+    }
+
+    // 2. Trailing-whitespace-insensitive, matched line-wise so offsets stay
+    //    anchored to the original text.
+    let needle_lines: Vec<String> = old_string
+        .lines()
+        .map(|l| l.trim_end_matches([' ', '\t']).to_string())
+        .collect();
+    if !needle_lines.is_empty() {
+        let hay_lines: Vec<&str> = original.lines().collect();
+        let starts = line_start_offsets(original);
+        let mut spans = Vec::new();
+        let mut i = 0;
+        while i + needle_lines.len() <= hay_lines.len() {
+            let window = &hay_lines[i..i + needle_lines.len()];
+            let same = window
+                .iter()
+                .zip(&needle_lines)
+                .all(|(h, n)| h.trim_end_matches([' ', '\t']) == n);
+            if same {
+                let start = starts[i];
+                let last = i + needle_lines.len() - 1;
+                let end = starts[last] + hay_lines[last].len();
+                spans.push((start, end, new_string.to_string()));
+                i += needle_lines.len();
+            } else {
+                i += 1;
+            }
+        }
+        if !spans.is_empty() {
+            return Some(EditMatches {
+                kind: EditMatchKind::TrailingWhitespace,
+                spans,
+            });
+        }
+    }
+
+    // 3. Indentation-insensitive: dedent the needle, match line-wise ignoring
+    //    each line's leading whitespace, then re-indent the replacement to the
+    //    indentation actually present at the match site.
+    let dedented = dedent_by(old_string, common_indent(old_string));
+    let needle_lines: Vec<&str> = dedented.lines().collect();
+    if needle_lines.is_empty() {
+        return None;
+    }
+    let hay_lines: Vec<&str> = original.lines().collect();
+    let starts = line_start_offsets(original);
+    let new_dedent = common_indent(new_string);
+    let new_body = dedent_by(new_string, new_dedent);
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i + needle_lines.len() <= hay_lines.len() {
+        let window = &hay_lines[i..i + needle_lines.len()];
+        let same = window.iter().zip(&needle_lines).all(|(h, n)| {
+            h.trim_start_matches([' ', '\t'])
+                .trim_end_matches([' ', '\t'])
+                == n.trim_start_matches([' ', '\t'])
+                    .trim_end_matches([' ', '\t'])
+        });
+        if same {
+            let first = window[0];
+            let indent = &first[..first.len() - first.trim_start_matches([' ', '\t']).len()];
+            let start = starts[i];
+            let last = i + needle_lines.len() - 1;
+            let end = starts[last] + hay_lines[last].len();
+            spans.push((start, end, reindent(&new_body, indent)));
+            i += needle_lines.len();
+        } else {
+            i += 1;
+        }
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    Some(EditMatches {
+        kind: EditMatchKind::Reindented,
+        spans,
+    })
+}
+
+/// Build a diagnostic hint pointing at the closest thing to `old_string` in the
+/// file, so a failed edit gives the model something actionable instead of a
+/// flat "not found".
+///
+/// Similarity is measured on the first line of the needle against every line of
+/// the file, using a cheap token-overlap score. This is deliberately not a full
+/// edit-distance search: the goal is a useful pointer, not a perfect one.
+fn nearest_match_hint(original: &str, old_string: &str) -> String {
+    let needle = match old_string.lines().find(|l| !l.trim().is_empty()) {
+        Some(l) => l.trim(),
+        None => return String::new(),
+    };
+    let needle_tokens: Vec<&str> = needle.split_whitespace().collect();
+    if needle_tokens.is_empty() {
+        return String::new();
+    }
+
+    let mut best: Option<(f32, usize, &str)> = None;
+    for (idx, line) in original.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let hits = needle_tokens
+            .iter()
+            .filter(|t| trimmed.contains(*t))
+            .count();
+        if hits == 0 {
+            continue;
+        }
+        let score = hits as f32 / needle_tokens.len() as f32;
+        if best.is_none_or(|(b, _, _)| score > b) {
+            best = Some((score, idx + 1, trimmed));
+        }
+    }
+
+    match best {
+        // Below half the tokens the "closest line" is usually noise; staying
+        // silent beats sending the model chasing an unrelated line.
+        Some((score, line_no, text)) if score >= 0.5 => {
+            let preview: String = text.chars().take(160).collect();
+            format!(
+                " The closest line in the file is line {}: `{}`. Read the file again and copy the exact text.",
+                line_no, preview
+            )
+        }
+        _ => String::new(),
+    }
+}
+
 /// Precise in-place edit: replace an exact `old_string` with `new_string`.
 /// Requires the match to be unique unless `replace_all` is set. This is the
 /// safe alternative to rewriting a whole file with `write_file`.
@@ -827,34 +1137,47 @@ async fn run_edit_file(
         .await
         .map_err(|e| format!("Failed to read file for editing: {}", e))?;
 
-    let occurrences = original.matches(old_string).count();
-    if occurrences == 0 {
-        return Err(
-            "old_string not found in the file. It must match exactly, including whitespace and indentation. Read the file again to copy the exact text.".into(),
-        );
+    let located = locate_edit(&original, old_string, new_string).ok_or_else(|| {
+        format!(
+            "old_string not found in the file, even allowing for differing trailing whitespace and indentation.{}",
+            nearest_match_hint(&original, old_string)
+        )
+    })?;
+
+    let occurrences = located.spans.len();
+    if !replace_all && occurrences > 1 {
+        return Err(format!(
+            "old_string is not unique — it matches {} places. Add more surrounding context to make it unique, or set replace_all: true.",
+            occurrences
+        ));
     }
 
-    let (updated, replaced) = if replace_all {
-        (original.replace(old_string, new_string), occurrences)
+    // Apply back-to-front so earlier byte offsets stay valid.
+    let spans = if replace_all {
+        located.spans.as_slice()
     } else {
-        if occurrences > 1 {
-            return Err(format!(
-                "old_string is not unique — it matches {} places. Add more surrounding context to make it unique, or set replace_all: true.",
-                occurrences
-            ));
-        }
-        (original.replacen(old_string, new_string, 1), 1)
+        &located.spans[..1]
     };
+    let mut updated = original.clone();
+    for (start, end, replacement) in spans.iter().rev() {
+        updated.replace_range(*start..*end, replacement);
+    }
+
+    if updated == original {
+        return Err("The edit would leave the file unchanged — old_string and new_string resolve to the same text.".into());
+    }
 
     tokio::fs::write(&full_path, &updated)
         .await
         .map_err(|e| format!("Failed to write edited file: {}", e))?;
 
+    let replaced = spans.len();
     Ok(format!(
-        "Edited {} ({} replacement{}).",
+        "Edited {} ({} replacement{}).{}",
         path,
         replaced,
-        if replaced == 1 { "" } else { "s" }
+        if replaced == 1 { "" } else { "s" },
+        located.kind.note()
     ))
 }
 
@@ -1218,6 +1541,10 @@ async fn run_python(
 }
 
 async fn run_web_search(query: &str, provider: &str, api_key: &str) -> Result<String, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("Search query is missing or empty.".to_string());
+    }
     match provider {
         "tavily" => {
             if api_key.is_empty() {
@@ -1317,7 +1644,11 @@ async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String>
         .map_err(|e| format!("HTTP client error: {}", e))?;
     let response = client
         .post("https://api.tavily.com/search")
+        .bearer_auth(api_key)
         .json(&json!({
+            // Tavily deployments exist with both the legacy body-key and the
+            // newer Bearer authentication convention. Sending both keeps the
+            // client compatible across those endpoints.
             "api_key": api_key,
             "query": query,
             "search_depth": "basic",
@@ -1327,21 +1658,28 @@ async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String>
         .await
         .map_err(|e| format!("Tavily request failed: {}", e))?;
 
-    let val: Value = response
-        .json()
+    let status = response.status();
+    let response_text = response
+        .text()
         .await
+        .map_err(|e| format!("Tavily response read error: {}", e))?;
+
+    if !status.is_success() {
+        let detail = tavily_error_detail(&response_text);
+        return Err(format!("Tavily API error ({}): {}", status, detail));
+    }
+
+    let val: Value = serde_json::from_str(&response_text)
         .map_err(|e| format!("Tavily response parse error: {}", e))?;
 
     // Reset failure counter on successful Tavily response
     CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
 
-    if let Some(answer) = val["answer"].as_str() {
-        if !answer.is_empty() {
-            return Ok(answer.to_string());
-        }
-    }
+    Ok(format_tavily_response(&val))
+}
 
-    // Fallback to results array
+fn format_tavily_response(val: &Value) -> String {
+    let answer = val["answer"].as_str().unwrap_or("").trim();
     if let Some(results) = val["results"].as_array() {
         let items: Vec<String> = results
             .iter()
@@ -1364,13 +1702,40 @@ async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String>
                 }
             })
             .collect();
-        if items.is_empty() {
-            return Ok("No results found.".to_string());
+        if !items.is_empty() {
+            let sources = items.join("\n---\n");
+            return if answer.is_empty() {
+                sources
+            } else {
+                format!("Answer: {}\n---\n{}", answer, sources)
+            };
         }
-        return Ok(items.join("\n---\n"));
     }
 
-    Ok("No results found.".to_string())
+    if answer.is_empty() {
+        "No results found.".to_string()
+    } else {
+        format!("Answer: {}", answer)
+    }
+}
+
+fn tavily_error_detail(body: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let detail = parsed
+        .as_ref()
+        .and_then(|value| {
+            value["detail"]
+                .as_str()
+                .or_else(|| value["message"].as_str())
+                .or_else(|| value["error"].as_str())
+        })
+        .unwrap_or(body)
+        .trim();
+    if detail.is_empty() {
+        "No error details returned.".to_string()
+    } else {
+        utf8_prefix(detail, 500).to_string()
+    }
 }
 
 async fn run_searxng_search(query: &str) -> Result<String, String> {
@@ -1632,12 +1997,126 @@ pub async fn check_python_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_process_output, clone_captured_output, finish_process_reader, glob_to_regex,
-        is_safe_url, spawn_process_reader, ProcessOutputBudget, PROCESS_OUTPUT_TRUNCATION_NOTICE,
+        capture_process_output, clone_captured_output, common_indent, finish_process_reader,
+        format_tavily_response, get_all_tool_definitions, glob_to_regex, is_safe_url, locate_edit,
+        nearest_match_hint, run_current_time, run_web_search, spawn_process_reader,
+        tavily_error_detail, EditMatchKind, ProcessOutputBudget, PROCESS_OUTPUT_TRUNCATION_NOTICE,
     };
+    use serde_json::json;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
+
+    /// Apply a located edit the same way `run_edit_file` does, so the tests
+    /// exercise the real offset arithmetic rather than a reimplementation.
+    fn apply_edit(
+        original: &str,
+        old: &str,
+        new: &str,
+        replace_all: bool,
+    ) -> Option<(String, EditMatchKind)> {
+        let located = locate_edit(original, old, new)?;
+        let spans = if replace_all {
+            located.spans.as_slice()
+        } else {
+            &located.spans[..1]
+        };
+        let mut updated = original.to_string();
+        for (start, end, replacement) in spans.iter().rev() {
+            updated.replace_range(*start..*end, replacement);
+        }
+        Some((updated, located.kind))
+    }
+
+    #[test]
+    fn edit_prefers_exact_match_and_preserves_rest_of_file() {
+        let src = "fn a() {\n    let x = 1;\n}\n";
+        let (out, kind) = apply_edit(src, "let x = 1;", "let x = 2;", false).expect("match");
+        assert_eq!(kind, EditMatchKind::Exact);
+        assert_eq!(out, "fn a() {\n    let x = 2;\n}\n");
+    }
+
+    #[test]
+    fn edit_matches_despite_trailing_whitespace_difference() {
+        // Trailing spaces sit mid-needle, so no exact substring exists: the
+        // model reproduced a two-line block without the file's stray padding.
+        let src = "fn a() {\n    let x = 1;   \n    let y = 2;\n}\n";
+        let (out, kind) = apply_edit(
+            src,
+            "    let x = 1;\n    let y = 2;",
+            "    let x = 9;\n    let y = 8;",
+            false,
+        )
+        .expect("match");
+        assert_eq!(kind, EditMatchKind::TrailingWhitespace);
+        assert_eq!(out, "fn a() {\n    let x = 9;\n    let y = 8;\n}\n");
+    }
+
+    #[test]
+    fn edit_keeps_exact_match_when_needle_is_a_substring_of_a_padded_line() {
+        // The needle omits the file's trailing spaces but is still an exact
+        // substring, so the padding must survive untouched.
+        let src = "fn a() {\n    let x = 1;   \n}\n";
+        let (out, kind) =
+            apply_edit(src, "    let x = 1;", "    let x = 2;", false).expect("match");
+        assert_eq!(kind, EditMatchKind::Exact);
+        assert_eq!(out, "fn a() {\n    let x = 2;   \n}\n");
+    }
+
+    #[test]
+    fn edit_matches_dedented_needle_and_reindents_replacement() {
+        // Model quoted the block without its surrounding indentation.
+        let src = "impl T {\n    fn a() {\n        step();\n    }\n}\n";
+        let (out, kind) = apply_edit(
+            src,
+            "fn a() {\n    step();\n}",
+            "fn a() {\n    step();\n    more();\n}",
+            false,
+        )
+        .expect("match");
+        assert_eq!(kind, EditMatchKind::Reindented);
+        // The replacement must land at the file's original depth (4 spaces),
+        // with the inner lines one level deeper.
+        assert_eq!(
+            out,
+            "impl T {\n    fn a() {\n        step();\n        more();\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn edit_reports_all_occurrences_for_replace_all() {
+        let src = "a();\nb();\na();\n";
+        let located = locate_edit(src, "a();", "z();").expect("match");
+        assert_eq!(located.spans.len(), 2);
+        let (out, _) = apply_edit(src, "a();", "z();", true).expect("match");
+        assert_eq!(out, "z();\nb();\nz();\n");
+    }
+
+    #[test]
+    fn edit_returns_none_when_nothing_resembles_the_needle() {
+        let src = "fn a() {\n    let x = 1;\n}\n";
+        assert!(locate_edit(src, "let completely = different;", "x").is_none());
+    }
+
+    #[test]
+    fn nearest_match_hint_points_at_the_closest_line() {
+        let src = "fn alpha() {\n    let value = compute(1);\n}\n";
+        let hint = nearest_match_hint(src, "let value = compute(2);");
+        assert!(hint.contains("line 2"), "unexpected hint: {hint}");
+        assert!(hint.contains("compute(1)"), "unexpected hint: {hint}");
+    }
+
+    #[test]
+    fn nearest_match_hint_stays_silent_on_weak_similarity() {
+        let src = "fn alpha() {\n    let value = 1;\n}\n";
+        assert_eq!(nearest_match_hint(src, "totally unrelated tokens here"), "");
+    }
+
+    #[test]
+    fn common_indent_ignores_blank_lines() {
+        assert_eq!(common_indent("    a\n\n    b\n"), 4);
+        assert_eq!(common_indent("a\n    b\n"), 0);
+    }
 
     #[test]
     fn safe_url_allows_public_http_urls() {
@@ -1665,6 +2144,56 @@ mod tests {
         assert!(!is_safe_url("http://169.254.1.1"));
         assert!(!is_safe_url("http://[::1]"));
         assert!(!is_safe_url("http://[fd00::1]"));
+    }
+
+    #[test]
+    fn current_time_tool_is_exposed_and_returns_both_clocks() {
+        let names: Vec<String> = get_all_tool_definitions()
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(String::from))
+            .collect();
+        assert!(names.iter().any(|name| name == "get_current_time"));
+
+        let local = run_current_time(&json!({"timezone": "local"}));
+        assert!(local.starts_with("Current local time:"));
+        assert!(local.contains("UTC:"));
+
+        let utc = run_current_time(&json!({"timezone": "utc"}));
+        assert!(utc.starts_with("Current UTC time:"));
+        assert!(utc.contains("Local time:"));
+    }
+
+    #[tokio::test]
+    async fn web_search_rejects_empty_queries_before_contacting_a_provider() {
+        let error = run_web_search("  \n ", "tavily", "secret")
+            .await
+            .expect_err("empty query must be rejected");
+        assert!(error.contains("missing or empty"));
+    }
+
+    #[test]
+    fn tavily_output_keeps_sources_when_an_answer_is_present() {
+        let output = format_tavily_response(&json!({
+            "answer": "A synthesized answer",
+            "results": [{
+                "title": "Example source",
+                "url": "https://example.com/article",
+                "content": "Supporting evidence"
+            }]
+        }));
+        assert!(output.contains("Answer: A synthesized answer"));
+        assert!(output.contains("Title: Example source"));
+        assert!(output.contains("Link: https://example.com/article"));
+    }
+
+    #[test]
+    fn tavily_error_detail_extracts_json_and_limits_raw_bodies() {
+        assert_eq!(
+            tavily_error_detail(r#"{"detail":"invalid api key"}"#),
+            "invalid api key"
+        );
+        assert_eq!(tavily_error_detail(""), "No error details returned.");
+        assert_eq!(tavily_error_detail(&"x".repeat(800)).len(), 500);
     }
 
     #[test]

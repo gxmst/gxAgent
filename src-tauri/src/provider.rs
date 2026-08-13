@@ -147,6 +147,7 @@ fn build_openai_body(
     config: &AppConfig,
     streaming: bool,
 ) -> Value {
+    let messages = normalize_system_messages(messages);
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -174,6 +175,7 @@ fn build_ollama_body(
     config: &AppConfig,
     streaming: bool,
 ) -> Value {
+    let messages = normalize_system_messages(messages);
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -192,6 +194,39 @@ fn build_ollama_body(
         body["tools"] = json!(tools);
     }
     body
+}
+
+/// Keep system instructions at the beginning of OpenAI-shaped histories.
+/// Native Anthropic/Gemini adapters already lift system text into their
+/// top-level fields, but OpenAI-compatible relays vary: strict ones reject a
+/// system role that appears after conversation or tool messages.
+fn normalize_system_messages(messages: &[Value]) -> Vec<Value> {
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut conversation: Vec<Value> = Vec::with_capacity(messages.len());
+
+    for message in messages {
+        if message["role"] == "system" {
+            if let Some(content) = message["content"].as_str() {
+                if !content.trim().is_empty() {
+                    system_parts.push(content.to_string());
+                }
+            }
+        } else {
+            conversation.push(message.clone());
+        }
+    }
+
+    if system_parts.is_empty() {
+        return conversation;
+    }
+
+    let mut normalized = Vec::with_capacity(conversation.len() + 1);
+    normalized.push(json!({
+        "role": "system",
+        "content": system_parts.join("\n\n"),
+    }));
+    normalized.extend(conversation);
+    normalized
 }
 
 /// Split canonical messages into an Anthropic-style (system_text, messages[]).
@@ -1112,6 +1147,29 @@ mod tests {
     }
 
     #[test]
+    fn openai_body_moves_late_system_messages_to_the_front() {
+        let messages = vec![
+            json!({ "role": "system", "content": "base" }),
+            json!({ "role": "user", "content": "question" }),
+            json!({ "role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": { "name": "web_search", "arguments": "{\"query\":\"x\"}" }
+            }] }),
+            json!({ "role": "tool", "tool_call_id": "call_1", "content": "result" }),
+            json!({ "role": "system", "content": "late instruction" }),
+        ];
+        let body = build_body(Wire::OpenAI, "m", &messages, &tools(), &cfg(), false);
+        let normalized = body["messages"].as_array().unwrap();
+        assert_eq!(normalized[0]["role"], "system");
+        assert_eq!(normalized[0]["content"], "base\n\nlate instruction");
+        assert!(normalized
+            .iter()
+            .skip(1)
+            .all(|message| message["role"] != "system"));
+        assert_eq!(normalized[3]["role"], "tool");
+    }
+
+    #[test]
     fn ollama_body_passes_tools_through_and_maps_max_tokens() {
         let body = build_body(Wire::Ollama, "m", &msgs(), &tools(), &cfg(), true);
         assert_eq!(body["tools"].as_array().unwrap().len(), 1);
@@ -1174,13 +1232,36 @@ mod tests {
     fn parse_anthropic_sse_assigns_stable_tool_indices() {
         let mut state = StreamState::default();
         // text block at index 0, tool_use blocks at indexes 1 and 2
-        parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#, &mut state);
-        parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"a1","name":"grep"}}"#, &mut state);
-        let frag = parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}"#, &mut state);
+        parse_stream_line(
+            Wire::Anthropic,
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#,
+            &mut state,
+        );
+        parse_stream_line(
+            Wire::Anthropic,
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"a1","name":"grep"}}"#,
+            &mut state,
+        );
+        let frag = parse_stream_line(
+            Wire::Anthropic,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}"#,
+            &mut state,
+        );
         assert_eq!(frag[0].tool_calls[0].index, 0);
-        assert_eq!(frag[0].tool_calls[0].arguments.as_deref(), Some("{\"x\":1}"));
-        parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"a2","name":"glob"}}"#, &mut state);
-        let frag2 = parse_stream_line(Wire::Anthropic, r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#, &mut state);
+        assert_eq!(
+            frag[0].tool_calls[0].arguments.as_deref(),
+            Some("{\"x\":1}")
+        );
+        parse_stream_line(
+            Wire::Anthropic,
+            r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"a2","name":"glob"}}"#,
+            &mut state,
+        );
+        let frag2 = parse_stream_line(
+            Wire::Anthropic,
+            r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            &mut state,
+        );
         // second tool block gets the next tool index, not a restart at 0
         assert_eq!(frag2[0].tool_calls[0].index, 1);
     }
@@ -1200,10 +1281,21 @@ mod tests {
     #[test]
     fn parse_gemini_sse_counts_tool_calls_across_chunks() {
         let mut state = StreamState::default();
-        let one = parse_stream_line(Wire::Gemini, r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"grep","args":{"p":1}}}]}}]}"#, &mut state);
-        let two = parse_stream_line(Wire::Gemini, r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"glob","args":{}}}]}}]}"#, &mut state);
+        let one = parse_stream_line(
+            Wire::Gemini,
+            r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"grep","args":{"p":1}}}]}}]}"#,
+            &mut state,
+        );
+        let two = parse_stream_line(
+            Wire::Gemini,
+            r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"glob","args":{}}}]}}]}"#,
+            &mut state,
+        );
         assert_eq!(one[0].tool_calls[0].index, 0);
-        assert_eq!(two[0].tool_calls[0].index, 1, "tool indices must not restart per chunk");
+        assert_eq!(
+            two[0].tool_calls[0].index, 1,
+            "tool indices must not restart per chunk"
+        );
     }
 
     #[test]

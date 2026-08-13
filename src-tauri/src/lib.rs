@@ -257,6 +257,18 @@ fn load_config() -> Result<AppConfig, String> {
                 config.max_tool_calls_per_request = AppConfig::default().max_tool_calls_per_request;
             }
         }
+        if config.tools_migration_version < 4
+            && !config.tools_enabled.iter().any(|tool| tool == "spawn_agent")
+        {
+            config.tools_enabled.push("spawn_agent".to_string());
+        }
+        if config.tools_migration_version < 5
+            && !config.tools_enabled.iter().any(|tool| tool == "get_current_time")
+        {
+            // v5: make the read-only clock available in both ordinary chat and
+            // code mode without changing any existing tool choices.
+            config.tools_enabled.push("get_current_time".to_string());
+        }
         config.tools_migration_version = config::CURRENT_TOOLS_MIGRATION_VERSION;
         config_changed = true;
     }

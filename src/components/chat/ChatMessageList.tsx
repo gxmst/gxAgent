@@ -18,6 +18,7 @@ import {
   ChevronRight,
   Copy,
   FileText,
+  GitBranch,
   Loader2,
   Pencil,
   Quote,
@@ -39,6 +40,7 @@ import {
 } from "../../appDefaults";
 import { MarkdownContent } from "../markdown/MarkdownContent";
 import { TaskProgress } from "../shared/TaskProgress";
+import { ToolResult } from "./ToolResult";
 import { ApprovalCard, messageHasPendingApproval } from "./ApprovalCard";
 import { quoteExcerpt, splitLeadingQuote } from "../../utils/quote";
 import { useAppStore } from "../../store/appStore";
@@ -61,6 +63,7 @@ export interface ChatMessageListProps {
   getModelDisplayName: (modelId: string) => string;
   handleRetry: (msgIdx: number) => Promise<void>;
   handleEditBranch: (msgIdx: number) => Promise<void>;
+  handleBranchFromMessage: (msgIdx: number) => void;
   attachments: Attachment[];
   resolvedCurrentConfig: AppConfig;
   models: ModelInfo[];
@@ -86,6 +89,7 @@ export function ChatMessageList({
   getModelDisplayName,
   handleRetry,
   handleEditBranch,
+  handleBranchFromMessage,
   attachments,
   resolvedCurrentConfig,
   models,
@@ -100,6 +104,14 @@ export function ChatMessageList({
   const currentRuntime = useAppStore((s) => s.runtimeBySession[s.currentSessionId] || null);
   const pendingApprovals = useAppStore((s) => s.pendingApprovalsBySession[s.currentSessionId] || null);
   const isStreaming = activeRunSessionId === currentSessionId;
+  const activeAssistantMessageId = isStreaming && runtime.activeRequestSessionId === currentSessionId
+    ? runtime.assistantMessageIdByRequest[runtime.activeRequestId]
+    : undefined;
+  const isStreamingMessage = (message: Message, index: number) => (
+    isStreaming
+    && message.role === "assistant"
+    && (activeAssistantMessageId ? message.id === activeAssistantMessageId : index === currentSession.messages.length - 1)
+  );
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
@@ -242,8 +254,8 @@ export function ChatMessageList({
     ) : (
     <div
       key={msg.id ?? mIdx}
-      className={`chat-bubble-container ${msg.role} ${isStreaming && mIdx === currentSession.messages.length - 1 && msg.role === "assistant" ? "is-streaming" : ""}`}
-      aria-busy={isStreaming && mIdx === currentSession.messages.length - 1 && msg.role === "assistant" ? true : undefined}
+       className={`chat-bubble-container ${msg.role} ${isStreamingMessage(msg, mIdx) ? "is-streaming" : ""}`}
+       aria-busy={isStreamingMessage(msg, mIdx) ? true : undefined}
     >
       {editingMessageIdx === mIdx ? (
         <div className="edit-message-container">
@@ -319,7 +331,7 @@ export function ChatMessageList({
               <summary className="reasoning-chain-summary">
                 <span className="reasoning-chain-icon">CoT</span>
                 {t("reasoning.label", lang)}
-                {isStreaming && mIdx === currentSession.messages.length - 1 && !msg.content && (
+                {isStreamingMessage(msg, mIdx) && !msg.content && (
                   <span className="reasoning-chain-typing">...</span>
                 )}
               </summary>
@@ -385,9 +397,7 @@ export function ChatMessageList({
                             <div style={{ fontSize: "var(--font-caption)", color: "var(--success)", fontWeight: 700, marginTop: 6, marginBottom: 3 }}>
                               {t("action.output", lang)}:
                             </div>
-                            <pre className="tool-output">
-                              <code>{act.output}</code>
-                            </pre>
+                            <ToolResult action={act} />
                           </>
                         )}
                       </div>
@@ -472,7 +482,7 @@ export function ChatMessageList({
                 {/* Markdown content — rendered AFTER tool actions */}
                 <div className="md-content">
                   <MarkdownContent content={msg.content} lang={lang} />
-                  {isStreaming && mIdx === currentSession.messages.length - 1 && msg.role === "assistant" && (
+                  {isStreamingMessage(msg, mIdx) && (
                     <span className="typing-cursor" />
                   )}
                 </div>
@@ -521,7 +531,7 @@ export function ChatMessageList({
               </>
             )}
           </div>
-          {isStreaming && mIdx === currentSession.messages.length - 1 && msg.role === "assistant" ? (
+          {isStreamingMessage(msg, mIdx) ? (
             <div
               className={`message-footer streaming-answer-status ${messageHasPendingApproval(msg, pendingApprovals) ? "awaiting-approval" : currentRuntime?.status === "stopping" ? "stopping" : ""}`}
               role="status"
@@ -600,6 +610,14 @@ export function ChatMessageList({
                 onClick={(event) => handleQuote(msg, event)}
               >
                 <Quote size={12} />
+              </button>
+              <button
+                className="bubble-action-btn"
+                title={t("ui.branch-from-message", lang)}
+                disabled={sessionMutationLocked}
+                onClick={() => handleBranchFromMessage(mIdx)}
+              >
+                <GitBranch size={12} />
               </button>
               <button
                 className="bubble-action-btn"

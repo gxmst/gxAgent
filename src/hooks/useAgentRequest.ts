@@ -258,6 +258,7 @@ export function useAgentRequest({
     label = "send",
     onAccepted,
     sessionSnapshot,
+    assistantMessageId,
   }: {
     targetSessionId: string;
     sessionConfig: SessionConfig;
@@ -267,6 +268,8 @@ export function useAgentRequest({
     label?: string;
     onAccepted?: () => void;
     sessionSnapshot?: ChatSession;
+    /** Existing assistant row to receive this run (used by retry variants). */
+    assistantMessageId?: string;
   }): Promise<boolean> => {
     if (!sessionStorageReady || runtime.isStreaming || requestStartingRef.current) return false;
     const { requestConfig, searchMode: requestSearchMode } = resolveSessionRequest(sessionConfig);
@@ -447,6 +450,9 @@ export function useAgentRequest({
 
     runtime.activeRequestId = requestId;
     runtime.activeRequestSessionId = targetSessionId;
+    if (assistantMessageId) {
+      runtime.assistantMessageIdByRequest[requestId] = assistantMessageId;
+    }
     runtime.activeRequestModel = requestConfig.model;
     runtime.activeRequestWorkDir = requestConfig.default_work_dir;
     runtime.activeRequestContextTokens = estimatedRequestTokens;
@@ -485,14 +491,35 @@ export function useAgentRequest({
     } catch (error) {
       if (runtime.activeRequestId === requestId) finishStreamingLocally(requestId);
       addLog(`Agent error: ${error}`, "error", true, targetSessionId);
-      setSessions((previous) => previous.map((session) => session.id === targetSessionId ? {
-        ...session,
-        messages: [
-          ...session.messages,
-          { id: newMessageId(), role: "assistant", content: `Error: ${error}`, actions: [], timestamp: Date.now() },
-        ],
-        updatedAt: Date.now(),
-      } : session));
+      const errorContent = `Error: ${error}`;
+      setSessions((previous) => previous.map((session) => {
+        if (session.id !== targetSessionId) return session;
+        const assistantIndex = assistantMessageId
+          ? session.messages.findIndex((message) => message.id === assistantMessageId && message.role === "assistant")
+          : -1;
+        if (assistantIndex < 0) {
+          return {
+            ...session,
+            messages: [
+              ...session.messages,
+              { id: newMessageId(), role: "assistant", content: errorContent, actions: [], timestamp: Date.now() },
+            ],
+            updatedAt: Date.now(),
+          };
+        }
+        const messages = [...session.messages];
+        const assistant = { ...messages[assistantIndex] };
+        const variants = assistant.variants && assistant.variants.length > 0
+          ? [...assistant.variants]
+          : [assistant.content];
+        const variantIndex = Math.max(0, Math.min(variants.length - 1, assistant.currentVariantIndex || 0));
+        variants[variantIndex] = errorContent;
+        assistant.variants = variants;
+        assistant.currentVariantIndex = variantIndex;
+        assistant.content = errorContent;
+        messages[assistantIndex] = assistant;
+        return { ...session, messages, updatedAt: Date.now() };
+      }));
       return false;
     }
   };
@@ -675,21 +702,51 @@ export function useAgentRequest({
     const userText = userMessage.content;
     if (!userText && userAttachments.length === 0) return;
 
-    const branchMessages = msgs.slice(0, userIndex + 1).map((message) => ({ ...message }));
-    const branch = createBranchSession(currentSession, branchMessages);
+    const assistantMessage = msgs[msgIdx];
+    if (!assistantMessage || assistantMessage.role !== "assistant") return;
+    const assistantMessageId = assistantMessage.id || newMessageId();
+    const existingVariants = assistantMessage.variants && assistantMessage.variants.length > 0
+      ? [...assistantMessage.variants]
+      : [assistantMessage.content];
+    const activeVariantIndex = Math.max(
+      0,
+      Math.min(existingVariants.length - 1, assistantMessage.currentVariantIndex || 0),
+    );
+    // `content` is the active variant in the persisted shape. Repair a stale
+    // legacy value before adding the fresh slot so the visible answer is not
+    // duplicated or lost when the user clicks retry.
+    existingVariants[activeVariantIndex] = assistantMessage.content;
+    const nextVariantIndex = existingVariants.length;
 
     await startAgentRequest({
-      targetSessionId: branch.id,
-      sessionConfig: branch.sessionConfig,
+      targetSessionId: currentSession.id,
+      sessionConfig: currentSession.sessionConfig,
       history: msgs.slice(0, userIndex),
-      sessionSnapshot: branch,
       userMessage: userText,
       requestAttachments: userAttachments,
-      label: "retry-branch",
+      label: "retry",
+      assistantMessageId,
       onAccepted: () => {
-        setSessions((previous) => [...previous, branch]);
-        setCurrentSessionId(branch.id);
-        setSidebarNav(branch.sessionConfig.mode);
+        setSessions((previous) => previous.map((session) => {
+          if (session.id !== currentSession.id) return session;
+          const messages = session.messages.map((message) => {
+            if (message.id !== assistantMessageId || message.role !== "assistant") return message;
+            return {
+              ...message,
+              id: assistantMessageId,
+              content: "",
+              variants: [...existingVariants, ""],
+              currentVariantIndex: nextVariantIndex,
+              actions: [],
+              reasoningContent: undefined,
+              usage: undefined,
+              contextTokens: undefined,
+              searchStatus: undefined,
+              timestamp: Date.now(),
+            };
+          });
+          return { ...session, messages, updatedAt: Date.now() };
+        }));
       },
     });
   };
@@ -741,6 +798,16 @@ export function useAgentRequest({
     });
   };
 
+  const handleBranchFromMessage = (msgIdx: number) => {
+    if (!sessionStorageReady || runtime.isStreaming || requestStartingRef.current) return;
+    const sourceMessage = currentSession.messages[msgIdx];
+    if (!sourceMessage || sourceMessage.role === "context_divider") return;
+    const branch = createBranchSession(currentSession, currentSession.messages.slice(0, msgIdx + 1).map((message) => ({ ...message })));
+    setSessions((previous) => [...previous, branch]);
+    setCurrentSessionId(branch.id);
+    setSidebarNav(branch.sessionConfig.mode);
+  };
+
   return {
     formatTokenCount,
     undoCompact,
@@ -749,5 +816,6 @@ export function useAgentRequest({
     handleSteeringMessage,
     handleRetry,
     handleEditBranch,
+    handleBranchFromMessage,
   };
 }

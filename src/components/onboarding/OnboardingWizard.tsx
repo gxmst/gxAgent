@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Dialog } from "radix-ui";
 import {
   Check,
   ChevronLeft,
@@ -137,17 +138,28 @@ export function OnboardingWizard({
   };
 
   return (
-    <div className="onboarding-overlay">
-      <section
-        className="onboarding-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="onboarding-title"
+    <Dialog.Root open onOpenChange={(next) => {
+      if (!next) onClose?.();
+    }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay onboarding-overlay" />
+        <Dialog.Content
+          className="dialog-panel onboarding-dialog"
+          aria-modal="true"
+          aria-describedby={undefined}
+          onEscapeKeyDown={(event) => {
+            if (!onClose) event.preventDefault();
+          }}
+          onPointerDownOutside={(event) => {
+            if (!onClose) event.preventDefault();
+          }}
       >
         <header className="onboarding-header">
           <div>
             <span className="onboarding-product">gxAgent</span>
-            <h1 id="onboarding-title">{zh ? "完成首次设置" : "Complete setup"}</h1>
+            <Dialog.Title asChild>
+              <h1>{zh ? "完成首次设置" : "Complete setup"}</h1>
+            </Dialog.Title>
           </div>
           {onClose && (
             <button className="btn btn-secondary" onClick={onClose}>
@@ -319,7 +331,8 @@ export function OnboardingWizard({
             </button>
           )}
         </footer>
-      </section>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

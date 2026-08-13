@@ -8,6 +8,7 @@
  */
 import type { KeyboardEvent, RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Dialog } from "radix-ui";
 import {
   Download,
   Globe,
@@ -45,6 +46,7 @@ import { SecretInput } from "../shared/SecretInput";
 import { McpAddForm } from "../mcp/McpAddForm";
 import { McpServerManager, type McpServerView } from "../mcp/McpServerManager";
 import type { ConfirmationOptions } from "../shared/ConfirmDialog";
+import { sortModels, sortProfileEntries } from "../../utils/modelSorting";
 
 type SettingsTab = "model" | "chat" | "agent" | "search" | "data";
 
@@ -100,38 +102,48 @@ export function SettingsModal(props: SettingsModalProps) {
     deleteMcpServer, presets, applyPreset, sessionMutationLocked,
     hasAttachmentLoading, replaceAllSessions, requestConfirmation,
   } = props;
+  const profileEntries = sortProfileEntries(Object.entries(config.profiles), lang);
+  const configuredModelIds = new Set(profileEntries.map(([, profile]) => profile.default_model));
+  const otherModels = sortModels(
+    models.filter((model) => !configuredModelIds.has(model.id)),
+    lang,
+  );
 
   return (
-    <div className="modal-overlay" onMouseDown={(e) => {
-      // Only close if clicking directly on overlay, not if mousedown started inside modal
-      if (e.target === e.currentTarget) {
-        setSettingsOpen(false);
-      }
+    <Dialog.Root open onOpenChange={(next) => {
+      if (!next) setSettingsOpen(false);
     }}>
-      <div
-        className="modal-content settings-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-dialog-title"
-        onClick={(e) => e.stopPropagation()}
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-panel settings-modal"
+          aria-modal="true"
+          aria-describedby={undefined}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            document.getElementById(`settings-tab-${settingsTab}`)?.focus();
+          }}
       >
         <div className="modal-header settings-modal-header">
           <div className="settings-modal-title">
             <span className="settings-modal-title-icon"><Settings2 size={17} /></span>
             <div>
-              <h3 id="settings-dialog-title">{t("settings.title", lang)}</h3>
+              <Dialog.Title asChild>
+                <h3>{t("settings.title", lang)}</h3>
+              </Dialog.Title>
               <span>{currentSettingsTabLabel}</span>
             </div>
           </div>
-          <button
-            type="button"
-            className="settings-close-button"
-            onClick={() => setSettingsOpen(false)}
-            title={t("settings.close", lang)}
-            aria-label={t("settings.close", lang)}
-          >
-            <X size={16} />
-          </button>
+          <Dialog.Close asChild>
+            <button
+              type="button"
+              className="settings-close-button"
+              title={t("settings.close", lang)}
+              aria-label={t("settings.close", lang)}
+            >
+              <X size={16} />
+            </button>
+          </Dialog.Close>
         </div>
 
         <div className="settings-tabs" role="tablist" aria-label={t("settings.title", lang)}>
@@ -174,7 +186,7 @@ export function SettingsModal(props: SettingsModalProps) {
           <div className="form-group settings-wide">
             <label className="form-label">{t("profile.title", lang)}</label>
             <div className="profile-list">
-              {Object.values(config.profiles).map((p) => (
+              {profileEntries.map(([, p]) => (
                 <div key={p.name} className={`profile-item ${config.active_profile === p.name ? "active" : ""}`}>
                   <div className="profile-info">
                     <span className="profile-name">{p.name}</span>
@@ -285,12 +297,12 @@ export function SettingsModal(props: SettingsModalProps) {
                 value={config.model}
                 onChange={(e) => setConfig((prev) => ({ ...prev, model: e.target.value }))}
               >
-                {Object.values(config.profiles).map((p) => (
+                {profileEntries.map(([, p]) => (
                   <option key={p.name} value={p.default_model}>{p.name} ({p.default_model})</option>
                 ))}
                 {models.length > 0 && (
                   <optgroup label={t("ui.available-models-2", lang)}>
-                    {models.filter(m => !Object.values(config.profiles).some(p => p.default_model === m.id)).map((m) => (
+                    {otherModels.map((m) => (
                       <option key={m.id} value={m.id}>{m.id}</option>
                     ))}
                   </optgroup>
@@ -484,6 +496,23 @@ export function SettingsModal(props: SettingsModalProps) {
               <option value="strict">{t("settings.approval.strict", lang)}</option>
               <option value="relaxed">{t("settings.approval.relaxed", lang)}</option>
             </select>
+          </div>
+
+          <div className="form-group settings-wide">
+            <label className="form-label">{t("settings.planMode", lang)}</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button
+                type="button"
+                className={`tool-toggle ${config.plan_mode ? "active" : ""}`}
+                aria-pressed={config.plan_mode}
+                onClick={() => setConfig((prev) => ({ ...prev, plan_mode: !prev.plan_mode }))}
+              >
+                {config.plan_mode ? t("settings.planModeOn", lang) : t("settings.planModeOff", lang)}
+              </button>
+              <span style={{ fontSize: "var(--font-caption)", opacity: 0.6 }}>
+                {t("settings.planModeDesc", lang)}
+              </span>
+            </div>
           </div>
 
           <div className="form-group settings-wide">
@@ -811,7 +840,8 @@ export function SettingsModal(props: SettingsModalProps) {
             {t("settings.save", lang)}
           </button>
         </div>
-      </div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

@@ -258,7 +258,14 @@ pub fn check_approval(
     // 2. Read-only tools auto-approve
     let read_only = matches!(
         tool_name,
-        "read_file" | "list_dir" | "web_search" | "grep" | "glob" | "todo_write"
+        "get_current_time"
+            | "read_file"
+            | "list_dir"
+            | "web_search"
+            | "grep"
+            | "glob"
+            | "todo_write"
+            | "spawn_agent"
     );
     if read_only {
         return ApprovalLevel::AutoApprove;

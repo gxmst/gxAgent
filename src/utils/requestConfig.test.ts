@@ -44,7 +44,8 @@ const globalConfig: AppConfig = {
   max_agent_loops: 10,
   max_tool_calls_per_request: 30,
   preview_sandbox: true,
-  tools_migration_version: 3,
+  plan_mode: false,
+  tools_migration_version: 4,
 };
 
 const sessionConfig: SessionConfig = {

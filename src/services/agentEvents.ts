@@ -123,31 +123,27 @@ export const flushStreamBufferNow = () => {
     prev.map((s) => {
       if (s.id !== buffered.sessionId) return s;
       const messages = [...s.messages];
-      if (
-        messages.length === 0 ||
-        messages[messages.length - 1].role !== "assistant"
-      ) {
-        messages.push({
-          id: newMessageId(),
-          role: "assistant",
-          content: buffered.text,
-          actions: [],
-          variants: [buffered.text],
-          currentVariantIndex: 0,
-          timestamp: Date.now(),
-          model: buffered.model,
-          contextTokens: buffered.contextTokens,
-        });
-      } else {
-        const last = { ...messages[messages.length - 1] };
-        last.content += buffered.text;
-        if (last.variants) {
-          last.variants[last.currentVariantIndex || 0] = last.content;
-        } else {
-          last.variants = [last.content];
-          last.currentVariantIndex = 0;
-        }
-        messages[messages.length - 1] = last;
+      const existingIndex = findRequestAssistantIndex(messages, buffered.requestId);
+      const assistantIndex = existingIndex >= 0
+        ? existingIndex
+        : ensureRequestAssistant(messages, buffered.requestId, {
+            content: buffered.text,
+            variants: [buffered.text],
+            currentVariantIndex: 0,
+            model: buffered.model,
+            contextTokens: buffered.contextTokens,
+          });
+      if (existingIndex >= 0) {
+        const assistant = { ...messages[assistantIndex] };
+        const variantIndex = assistant.currentVariantIndex || 0;
+        const currentContent = assistant.variants?.[variantIndex] ?? assistant.content;
+        assistant.content = currentContent + buffered.text;
+        assistant.variants = assistant.variants
+          ? [...assistant.variants]
+          : [currentContent];
+        assistant.variants[variantIndex] = assistant.content;
+        assistant.currentVariantIndex = variantIndex;
+        messages[assistantIndex] = assistant;
       }
       return { ...s, messages };
     })
@@ -167,11 +163,60 @@ export const discardStreamBuffer = () => {
 // Shared run helpers
 // ==========================================
 
+const findRequestAssistantIndex = (messages: Message[], requestId: string) => {
+  const messageId = requestId ? runtime.assistantMessageIdByRequest[requestId] : "";
+  if (!messageId) return -1;
+  return messages.findIndex((message) => message.id === messageId && message.role === "assistant");
+};
+
+const ensureRequestAssistant = (
+  messages: Message[],
+  requestId: string,
+  initial: Partial<Message> = {},
+) => {
+  const existingIndex = findRequestAssistantIndex(messages, requestId);
+  if (existingIndex >= 0) return existingIndex;
+  if (!requestId && messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+    return messages.length - 1;
+  }
+
+  const message: Message = {
+    id: newMessageId(),
+    role: "assistant",
+    content: "",
+    actions: [],
+    timestamp: Date.now(),
+    model: runtime.activeRequestModel,
+    contextTokens: runtime.activeRequestContextTokens,
+    ...initial,
+  };
+  messages.push(message);
+  runtime.assistantMessageIdByRequest[requestId] = message.id!;
+  return messages.length - 1;
+};
+
+const updateRequestAssistantAction = (
+  messages: Message[],
+  requestId: string,
+  actionId: string,
+  update: (action: ToolAction) => ToolAction,
+) => {
+  const assistantIndex = findRequestAssistantIndex(messages, requestId);
+  if (assistantIndex < 0) return;
+  const assistant = { ...messages[assistantIndex] };
+  if (!assistant.actions) return;
+  assistant.actions = assistant.actions.map((action) => action.id === actionId ? update(action) : action);
+  messages[assistantIndex] = assistant;
+};
+
 export const finishStreamingLocally = (expectedRequestId = runtime.activeRequestId) => {
   if (expectedRequestId && runtime.activeRequestId && expectedRequestId !== runtime.activeRequestId) return;
   flushStreamBufferNow();
   const sessionId = runtime.activeRequestSessionId;
-  if (expectedRequestId) delete runtime.requestSessionById[expectedRequestId];
+  if (expectedRequestId) {
+    delete runtime.requestSessionById[expectedRequestId];
+    delete runtime.assistantMessageIdByRequest[expectedRequestId];
+  }
   runtime.isStreaming = false;
   runtime.activeRequestId = "";
   runtime.activeRequestSessionId = "";
@@ -184,23 +229,15 @@ export const finishStreamingLocally = (expectedRequestId = runtime.activeRequest
   setTimeout(() => uiCallbacks.focusComposer(), 100);
 };
 
-export const upsertToolActions = (messages: Message[], incoming: ToolAction[]) => {
+export const upsertToolActions = (
+  messages: Message[],
+  incoming: ToolAction[],
+  requestId = runtime.activeRequestId,
+) => {
   const next = [...messages];
-  if (next.length === 0 || next[next.length - 1].role !== "assistant") {
-    next.push({
-      id: newMessageId(),
-      role: "assistant",
-      content: "",
-      actions: incoming,
-      timestamp: Date.now(),
-      model: runtime.activeRequestModel,
-      contextTokens: runtime.activeRequestContextTokens,
-    });
-    return next;
-  }
-
-  const last = { ...next[next.length - 1] };
-  const actions = last.actions ? [...last.actions] : [];
+  const assistantIndex = ensureRequestAssistant(next, requestId);
+  const assistant = { ...next[assistantIndex] };
+  const actions = assistant.actions ? [...assistant.actions] : [];
   for (const action of incoming) {
     const idx = actions.findIndex((a) => a.id === action.id);
     if (idx >= 0) {
@@ -213,8 +250,8 @@ export const upsertToolActions = (messages: Message[], incoming: ToolAction[]) =
       actions.push(action);
     }
   }
-  last.actions = actions;
-  next[next.length - 1] = last;
+  assistant.actions = actions;
+  next[assistantIndex] = assistant;
   return next;
 };
 
@@ -390,45 +427,38 @@ export async function initAgentEventListeners(): Promise<() => void> {
         if (!isCurrentRequestPayload(event.payload)) return;
         const status = event.payload;
         const sessionId = agentEventSessionId(event.payload);
+        const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
         store().setSessions((prev) =>
           prev.map((s) => {
             if (s.id !== sessionId) return s;
             const messages = [...s.messages];
-            if (messages.length === 0) return s;
-            const last = { ...messages[messages.length - 1] };
-            // If last message is not assistant (e.g. user msg during force search),
-            // only create assistant message when we have results, not for "searching" status
-            if (last.role !== "assistant") {
-              if (status.type === "searching") {
-                // Don't create empty assistant message yet, wait for results or stream start
-                return s;
-              }
-              // Create assistant message now that we have results or error
-              const assistantMsg: Message = {
-                id: newMessageId(),
-                role: "assistant",
-                content: "",
-                searchStatus: [status],
-                actions: [],
-              };
-              messages.push(assistantMsg);
-              return { ...s, messages };
+            const existingIndex = findRequestAssistantIndex(messages, requestId);
+            if (existingIndex < 0 && status.type === "searching") {
+              // Do not create an empty assistant message until a result or
+              // another request event gives this run visible output.
+              return s;
             }
-            const existing = last.searchStatus || [];
+            const assistantIndex = existingIndex >= 0
+              ? existingIndex
+              : ensureRequestAssistant(messages, requestId, { searchStatus: [status] });
+            if (existingIndex < 0) return { ...s, messages };
+            const assistant = { ...messages[assistantIndex] };
+            if (assistant.role !== "assistant") return s;
+            const existing = assistant.searchStatus || [];
             if (status.type === "searching") {
-              last.searchStatus = [...existing, status];
+              assistant.searchStatus = [...existing, status];
             } else if (status.type === "results" || status.type === "error") {
               const lastSearchIdx = [...existing].reverse().findIndex((s) => s.type === "searching" && s.query === status.query);
               if (lastSearchIdx !== -1) {
                 const realIdx = existing.length - 1 - lastSearchIdx;
                 const updated = [...existing];
                 updated[realIdx] = { ...updated[realIdx], ...status };
-                last.searchStatus = updated;
+                assistant.searchStatus = updated;
               } else {
-                last.searchStatus = [...existing, status];
+                assistant.searchStatus = [...existing, status];
               }
             }
-            messages[messages.length - 1] = last;
+            messages[assistantIndex] = assistant;
             return { ...s, messages };
           })
         );
@@ -441,28 +471,19 @@ export async function initAgentEventListeners(): Promise<() => void> {
         const payload = payloadContent(event.payload);
         if (!payload) return;
         const sessionId = agentEventSessionId(event.payload);
+        const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
         store().setSessions((prev) =>
           prev.map((s) => {
             if (s.id !== sessionId) return s;
             const messages = [...s.messages];
-            if (
-              messages.length === 0 ||
-              messages[messages.length - 1].role !== "assistant"
-            ) {
-              messages.push({
-                id: newMessageId(),
-                role: "assistant",
-                content: "",
-                actions: [],
-                reasoningContent: payload,
-                timestamp: Date.now(),
-                model: runtime.activeRequestModel,
-                contextTokens: runtime.activeRequestContextTokens,
-              });
-            } else {
-              const last = { ...messages[messages.length - 1] };
-              last.reasoningContent = (last.reasoningContent || "") + payload;
-              messages[messages.length - 1] = last;
+            const existingIndex = findRequestAssistantIndex(messages, requestId);
+            const assistantIndex = existingIndex >= 0
+              ? existingIndex
+              : ensureRequestAssistant(messages, requestId, { reasoningContent: payload });
+            if (existingIndex >= 0) {
+              const assistant = { ...messages[assistantIndex] };
+              assistant.reasoningContent = (assistant.reasoningContent || "") + payload;
+              messages[assistantIndex] = assistant;
             }
             return { ...s, messages };
           })
@@ -518,23 +539,14 @@ export async function initAgentEventListeners(): Promise<() => void> {
           if (!isCurrentRequestPayload(event.payload)) return;
           const { index, id: toolId, name, arguments: args } = event.payload;
           const sessionId = agentEventSessionId(event.payload);
+          const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
           store().setSessions((prev) =>
             prev.map((s) => {
               if (s.id !== sessionId) return s;
               const messages = [...s.messages];
-              if (messages.length === 0 || messages[messages.length - 1].role !== "assistant") {
-                messages.push({
-                  id: newMessageId(),
-                  role: "assistant",
-                  content: "",
-                  actions: [],
-                  timestamp: Date.now(),
-                  model: runtime.activeRequestModel,
-                  contextTokens: runtime.activeRequestContextTokens,
-                });
-              }
-              const last = { ...messages[messages.length - 1] };
-              const actions = last.actions ? [...last.actions] : [];
+              const assistantIndex = ensureRequestAssistant(messages, requestId);
+              const assistant = { ...messages[assistantIndex] };
+              const actions = assistant.actions ? [...assistant.actions] : [];
               if (index >= actions.length || !actions[index]) {
                 actions[index] = {
                   id: toolId || `tc-${index}-${Date.now()}`,
@@ -548,8 +560,8 @@ export async function initAgentEventListeners(): Promise<() => void> {
                   actions[index].id = toolId;
                 }
               }
-              last.actions = actions;
-              messages[messages.length - 1] = last;
+              assistant.actions = actions;
+              messages[assistantIndex] = assistant;
               return { ...s, messages };
             })
           );
@@ -571,6 +583,7 @@ export async function initAgentEventListeners(): Promise<() => void> {
           if (!isCurrentRequestPayload(event.payload)) return;
           const { id, name, arguments: args } = event.payload;
           const sessionId = agentEventSessionId(event.payload);
+          const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
           addLog(`[Exec] ${name}: ${args.substring(0, 200)}`, "cmd", false, sessionId);
           if (name === "write_file" || name === "edit_file") {
             try {
@@ -600,14 +613,11 @@ export async function initAgentEventListeners(): Promise<() => void> {
                 name,
                 arguments: args,
                 status: "executing" as const,
-              }]);
-              if (messages.length === 0) return s;
-              const last = { ...messages[messages.length - 1] };
-              if (last.role !== "assistant" || !last.actions) return s;
-              last.actions = last.actions.map((a) =>
-                a.id === id ? { ...a, status: "executing" as const } : a
-              );
-              messages[messages.length - 1] = last;
+              }], requestId);
+              updateRequestAssistantAction(messages, requestId, id, (action) => ({
+                ...action,
+                status: "executing" as const,
+              }));
               return { ...s, messages };
             })
           );
@@ -677,7 +687,7 @@ export async function initAgentEventListeners(): Promise<() => void> {
           if (!isCurrentRequestPayload(event.payload)) return;
           const { id, name, output } = event.payload;
           const sessionId = agentEventSessionId(event.payload);
-          const requestId = event.payload.requestId || runtime.activeRequestId;
+          const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
           const outputKey = `${requestId}:${id}`;
           const isErrorOutput = output.trimStart().startsWith("Error:");
           if (!runtime.streamedToolOutputKeys.has(outputKey)) {
@@ -736,14 +746,12 @@ export async function initAgentEventListeners(): Promise<() => void> {
                 arguments: "",
                 status: isErrorOutput ? "error" as const : "done" as const,
                 output,
-              }]);
-              if (messages.length === 0) return s;
-              const last = { ...messages[messages.length - 1] };
-              if (last.role !== "assistant" || !last.actions) return s;
-              last.actions = last.actions.map((a) =>
-                a.id === id ? { ...a, status: isErrorOutput ? "error" as const : "done" as const, output } : a
-              );
-              messages[messages.length - 1] = last;
+              }], requestId);
+              updateRequestAssistantAction(messages, requestId, id, (action) => ({
+                ...action,
+                status: isErrorOutput ? "error" as const : "done" as const,
+                output,
+              }));
               return { ...s, messages };
             })
           );
@@ -758,6 +766,7 @@ export async function initAgentEventListeners(): Promise<() => void> {
           if (!isCurrentRequestPayload(event.payload)) return;
           const { id, name, reason } = event.payload;
           const sessionId = agentEventSessionId(event.payload);
+          const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
           addLog(`[Blocked] ${name}: ${reason}`, "error", false, sessionId);
           store().setSessions((prev) =>
             prev.map((s) => {
@@ -768,14 +777,12 @@ export async function initAgentEventListeners(): Promise<() => void> {
                 arguments: "",
                 status: "blocked" as const,
                 output: reason,
-              }]);
-              if (messages.length === 0) return s;
-              const last = { ...messages[messages.length - 1] };
-              if (last.role !== "assistant" || !last.actions) return s;
-              last.actions = last.actions.map((a) =>
-                a.id === id ? { ...a, status: "blocked" as const, output: reason } : a
-              );
-              messages[messages.length - 1] = last;
+              }], requestId);
+              updateRequestAssistantAction(messages, requestId, id, (action) => ({
+                ...action,
+                status: "blocked" as const,
+                output: reason,
+              }));
               return { ...s, messages };
             })
           );
@@ -787,6 +794,7 @@ export async function initAgentEventListeners(): Promise<() => void> {
       await listen<PendingApproval>("agent-tool-approval-request", (event) => {
         if (!isCurrentRequestPayload(event.payload)) return;
         const sessionId = agentEventSessionId(event.payload);
+        const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
         store().setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: event.payload }));
         const pendingActions: ToolAction[] = event.payload.tool_calls.map((tc) => ({
           id: tc.id,
@@ -797,9 +805,31 @@ export async function initAgentEventListeners(): Promise<() => void> {
         store().setSessions((prev) =>
           prev.map((s) => {
             if (s.id !== sessionId) return s;
-            return { ...s, messages: upsertToolActions(s.messages, pendingActions) };
+            return { ...s, messages: upsertToolActions(s.messages, pendingActions, requestId) };
           })
         );
+      })
+    );
+
+    unlisteners.push(
+      await listen<{ requestId?: string; approvalRequestId?: string }>("agent-tool-approval-cancelled", (event) => {
+        if (!isCurrentRequestPayload(event.payload)) return;
+        const sessionId = agentEventSessionId(event.payload);
+        const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
+        store().setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: null }));
+        store().setSessions((prev) => prev.map((session) => {
+          if (session.id !== sessionId) return session;
+          const messages = [...session.messages];
+          const assistantIndex = findRequestAssistantIndex(messages, requestId);
+          if (assistantIndex < 0) return session;
+          const assistant = { ...messages[assistantIndex] };
+          if (assistant.role !== "assistant" || !assistant.actions) return session;
+          assistant.actions = assistant.actions.map((action) => action.status === "pending_approval"
+            ? { ...action, status: "blocked" as const, output: "Approval cancelled by user steering." }
+            : action);
+          messages[assistantIndex] = assistant;
+          return { ...session, messages };
+        }));
       })
     );
 
@@ -815,32 +845,34 @@ export async function initAgentEventListeners(): Promise<() => void> {
         flushStreamBufferNow();
         const done = event.payload || {};
         const sessionId = agentEventSessionId(event.payload);
+        const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
         store().setSessions((prev) =>
           prev.map((s) => {
             if (s.id !== sessionId) return s;
             const messages = [...s.messages];
-            if (messages.length === 0) return s;
-            const last = { ...messages[messages.length - 1] };
-            if (last.role !== "assistant") return s;
-            const usage = last.usage || {
-              promptTokens: last.contextTokens || runtime.activeRequestContextTokens || 0,
-              completionTokens: estimateTextTokens(last.content),
-              totalPromptTokens: last.contextTokens || runtime.activeRequestContextTokens || 0,
-              totalCompletionTokens: estimateTextTokens(last.content),
+            const assistantIndex = findRequestAssistantIndex(messages, requestId);
+            if (assistantIndex < 0) return s;
+            const assistant = { ...messages[assistantIndex] };
+            if (assistant.role !== "assistant") return s;
+            const usage = assistant.usage || {
+              promptTokens: assistant.contextTokens || runtime.activeRequestContextTokens || 0,
+              completionTokens: estimateTextTokens(assistant.content),
+              totalPromptTokens: assistant.contextTokens || runtime.activeRequestContextTokens || 0,
+              totalCompletionTokens: estimateTextTokens(assistant.content),
               ttftMs: done.ttftMs || 0,
               responseTimeMs: done.responseTimeMs || 0,
               loopCount: done.loopCount || 1,
             };
-            last.model = last.model || runtime.activeRequestModel;
-            last.contextTokens = last.contextTokens || runtime.activeRequestContextTokens;
-            last.usage = {
+            assistant.model = assistant.model || runtime.activeRequestModel;
+            assistant.contextTokens = assistant.contextTokens || runtime.activeRequestContextTokens;
+            assistant.usage = {
               ...usage,
-              completionTokens: usage.completionTokens || estimateTextTokens(last.content),
+              completionTokens: usage.completionTokens || estimateTextTokens(assistant.content),
               ttftMs: done.ttftMs ?? usage.ttftMs,
               responseTimeMs: done.responseTimeMs ?? usage.responseTimeMs,
               loopCount: done.loopCount ?? usage.loopCount,
             };
-            messages[messages.length - 1] = last;
+            messages[assistantIndex] = assistant;
             return { ...s, messages };
           })
         );
@@ -876,7 +908,7 @@ export async function initAgentEventListeners(): Promise<() => void> {
         finishStreamingLocally(requestId);
         const eventLang = runtime.lang;
         addLog(status === "cancelled" ? (eventLang === "zh" ? "已停止当前输出。" : "Current output stopped.") : t("log.complete", eventLang), "info", false, sessionId);
-        if (status !== "cancelled" && runtime.pendingTitleBySession[sessionId]) {
+        if (status !== "cancelled" && status !== "error" && runtime.pendingTitleBySession[sessionId]) {
           requestAnimationFrame(() => { void requestGeneratedSessionTitle(sessionId); });
         }
       })
@@ -895,6 +927,7 @@ export async function initAgentEventListeners(): Promise<() => void> {
       }>("agent-usage", (event) => {
         if (!isCurrentRequestPayload(event.payload)) return;
         const sessionId = agentEventSessionId(event.payload);
+        const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
         const usage = {
           promptTokens: event.payload.prompt_tokens,
           completionTokens: event.payload.completion_tokens,
@@ -910,12 +943,14 @@ export async function initAgentEventListeners(): Promise<() => void> {
             if (s.id !== sessionId) return s;
             const messages = [...s.messages];
             if (messages.length === 0) return s;
-            const last = { ...messages[messages.length - 1] };
-            if (last.role !== "assistant") return s;
-            last.model = last.model || runtime.activeRequestModel;
-            last.contextTokens = usage.promptTokens || last.contextTokens || runtime.activeRequestContextTokens;
-            last.usage = usage;
-            messages[messages.length - 1] = last;
+            const assistantIndex = findRequestAssistantIndex(messages, requestId);
+            const targetIndex = assistantIndex >= 0 ? assistantIndex : messages.length - 1;
+            const assistant = { ...messages[targetIndex] };
+            if (assistant.role !== "assistant") return s;
+            assistant.model = assistant.model || runtime.activeRequestModel;
+            assistant.contextTokens = usage.promptTokens || assistant.contextTokens || runtime.activeRequestContextTokens;
+            assistant.usage = usage;
+            messages[targetIndex] = assistant;
             return { ...s, messages };
           })
         );

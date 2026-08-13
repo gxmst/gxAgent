@@ -212,6 +212,15 @@
 }
 
 /* Command Suggestions */
+.command-suggestions-anchor {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
 .command-suggestions {
   position: absolute;
   bottom: 100%;

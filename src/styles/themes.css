@@ -3,12 +3,14 @@
    ======================================================== */
 
 /* ========================================================
-   gxAgent v2.0 — Hybrid UI Design System
-   App shell structure + Antigravity warm sandy beige palette
+   gxAgent v2.1 — Design System
+   Neutral cool-grey palette. Elevation is expressed with 1px hairline
+   borders rather than Material-style drop shadows; the accent appears
+   only on primary actions, focus rings and active indicators.
    ======================================================== */
 
 /* ========================================================
-   Light Theme — Warm Sandy Beige (Default)
+   Light Theme — Neutral Cool Grey (Default)
    ======================================================== */
 
 :root,
@@ -18,16 +20,16 @@
   line-height: 1.6;
   font-weight: 400;
 
-  /* Modern Card Style - Light (warm white, matches the sandy palette) */
-  --bg-main: #f8f7f4;
-  --bg-sidebar: #f1efea;
+  /* Surfaces — cool neutral greys, card sits above the app background. */
+  --bg-main: #f7f8f9;
+  --bg-sidebar: #f1f3f5;
   --bg-card: #ffffff;
-  --bg-card-hover: #f4f2ee;
+  --bg-card-hover: #f4f5f7;
   --bg-input: #ffffff;
-  --bg-code: #f5f3ef;
+  --bg-code: #f4f5f7;
   --bg-primary: var(--bg-card);
-  --bg-overlay: rgba(0, 0, 0, 0.4);
-  --bg-user-bubble: #f1efea;
+  --bg-overlay: rgba(15, 18, 23, 0.45);
+  --bg-user-bubble: #f1f3f5;
   --bg-assistant-bubble: transparent;
 
   /* B-system aliases so component styles that use --bg-surface / --border-medium
@@ -36,7 +38,7 @@
   --bg-surface: var(--bg-card);
   --bg-surface-hover: var(--bg-card-hover);
   --bg-elevated: var(--bg-card);
-  --border-light: #ededee;
+  --border-light: #eceef1;
   --border-medium: var(--border-default);
   --border-strong: var(--border-focus);
   --accent-light: var(--accent-subtle);
@@ -44,38 +46,40 @@
   --warning-light: var(--warning-subtle);
   --error-light: var(--error-subtle);
 
-  --border-default: #e2ded6;
-  --border-focus: #ccc6ba;
+  --border-default: #e1e4e8;
+  --border-focus: #c3c8d0;
 
-  --text-primary: #0d0d0d;
-  --text-secondary: #565656;
-  --text-tertiary: #6e6e6e;
+  --text-primary: #14181f;
+  --text-secondary: #565e6b;
+  --text-tertiary: #7c8494;
   --text-inverse: #ffffff;
-  --text-code: #24292e;
+  --text-code: #1f2430;
 
-  --accent: #2f9e6f; /* warm green — matches the sandy palette */
-  --accent-hover: #268560;
-  --accent-subtle: rgba(47, 158, 111, 0.1);
-  --accent-border: rgba(47, 158, 111, 0.2);
+  --accent: #3b6ef0; /* neutral blue — the single accent hue */
+  --accent-hover: #2f5cd6;
+  --accent-subtle: rgba(59, 110, 240, 0.09);
+  --accent-border: rgba(59, 110, 240, 0.22);
 
-  --success: #2f9e6f;
-  --success-subtle: rgba(47, 158, 111, 0.1);
-  --success-border: rgba(47, 158, 111, 0.2);
+  --success: #178055;
+  --success-subtle: rgba(23, 128, 85, 0.1);
+  --success-border: rgba(23, 128, 85, 0.22);
 
-  --warning: #f59e0b;
-  --warning-subtle: rgba(245, 158, 11, 0.1);
-  --warning-border: rgba(245, 158, 11, 0.2);
+  --warning: #b57314;
+  --warning-subtle: rgba(181, 115, 20, 0.1);
+  --warning-border: rgba(181, 115, 20, 0.22);
 
-  --error: #ef4444;
-  --error-subtle: rgba(239, 68, 68, 0.1);
-  --error-border: rgba(239, 68, 68, 0.2);
+  --error: #d3383d;
+  --error-subtle: rgba(211, 56, 61, 0.09);
+  --error-border: rgba(211, 56, 61, 0.22);
 
-  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
-  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
-  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  /* Elevation: hairline-first. Shadows stay barely perceptible so depth
+     reads from the border, not from a grey halo. */
+  --shadow-soft: 0 1px 2px rgba(15, 18, 23, 0.04);
+  --shadow-card: 0 1px 2px rgba(15, 18, 23, 0.05);
+  --shadow-elevated: 0 8px 24px -6px rgba(15, 18, 23, 0.12), 0 2px 6px -2px rgba(15, 18, 23, 0.06);
 
-  --scrollbar-thumb: rgba(0, 0, 0, 0.2);
-  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.3);
+  --scrollbar-thumb: rgba(20, 24, 31, 0.18);
+  --scrollbar-thumb-hover: rgba(20, 24, 31, 0.3);
 
   color: var(--text-primary);
   background-color: var(--bg-main);
@@ -86,27 +90,29 @@
 }
 
 /* ========================================================
-   Dark Theme — Low-contrast warm dark
+   Dark Theme — Neutral cool dark (primary surface)
+   Slightly blue-shifted greys read as deliberate rather than washed out;
+   the card surface is only a few steps above the app background so the
+   hairline border carries the separation.
    ======================================================== */
 
 [data-theme="dark"] {
-  /* Modern Card Style - Dark */
-  --bg-main: #212121;
-  --bg-sidebar: #171717;
-  --bg-card: #2a2a2a;
-  --bg-card-hover: #343434;
-  --bg-input: #2a2a2a;
-  --bg-code: #000000;
-  --bg-overlay: rgba(0, 0, 0, 0.7);
-  --bg-user-bubble: #2f2f2f;
+  --bg-main: #16181d;
+  --bg-sidebar: #101216;
+  --bg-card: #1c1f25;
+  --bg-card-hover: #24282f;
+  --bg-input: #1c1f25;
+  --bg-code: #0e1014;
+  --bg-overlay: rgba(6, 8, 11, 0.72);
+  --bg-user-bubble: #22262d;
   --bg-assistant-bubble: transparent;
 
   /* B-system aliases → single source of truth with the chat surface. */
   --bg-app: var(--bg-main);
   --bg-surface: var(--bg-card);
   --bg-surface-hover: var(--bg-card-hover);
-  --bg-elevated: #343434;
-  --border-light: #333333;
+  --bg-elevated: #24282f;
+  --border-light: #23272e;
   --border-medium: var(--border-default);
   --border-strong: var(--border-focus);
   --accent-light: var(--accent-subtle);
@@ -114,38 +120,38 @@
   --warning-light: var(--warning-subtle);
   --error-light: var(--error-subtle);
 
-  --border-default: #424242;
-  --border-focus: #5a5a5a;
+  --border-default: #2c313a;
+  --border-focus: #414854;
 
-  --text-primary: #ececec;
-  --text-secondary: #b4b4b4;
-  --text-tertiary: #9a9a9a;
-  --text-inverse: #ffffff;
-  --text-code: #ececec;
+  --text-primary: #e8eaed;
+  --text-secondary: #a2aab8;
+  --text-tertiary: #77808f;
+  --text-inverse: #16181d;
+  --text-code: #e8eaed;
 
-  --accent: #45b385;
-  --accent-hover: #5ac298;
-  --accent-subtle: rgba(69, 179, 133, 0.15);
-  --accent-border: rgba(69, 179, 133, 0.3);
+  --accent: #6c93f7;
+  --accent-hover: #86a8fb;
+  --accent-subtle: rgba(108, 147, 247, 0.14);
+  --accent-border: rgba(108, 147, 247, 0.3);
 
-  --success: #45b385;
-  --success-subtle: rgba(69, 179, 133, 0.15);
-  --success-border: rgba(69, 179, 133, 0.3);
+  --success: #46b586;
+  --success-subtle: rgba(70, 181, 134, 0.14);
+  --success-border: rgba(70, 181, 134, 0.3);
 
-  --warning: #f59e0b;
-  --warning-subtle: rgba(245, 158, 11, 0.15);
-  --warning-border: rgba(245, 158, 11, 0.3);
+  --warning: #e0a944;
+  --warning-subtle: rgba(224, 169, 68, 0.14);
+  --warning-border: rgba(224, 169, 68, 0.3);
 
-  --error: #ef4444;
-  --error-subtle: rgba(239, 68, 68, 0.15);
-  --error-border: rgba(239, 68, 68, 0.3);
+  --error: #ef6a70;
+  --error-subtle: rgba(239, 106, 112, 0.14);
+  --error-border: rgba(239, 106, 112, 0.3);
 
-  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
-  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.4), 0 1px 2px 0 rgba(0, 0, 0, 0.2);
-  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-elevated: 0 12px 32px -8px rgba(0, 0, 0, 0.62), 0 2px 8px -2px rgba(0, 0, 0, 0.4);
 
-  --scrollbar-thumb: rgba(255, 255, 255, 0.2);
-  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
+  --scrollbar-thumb: rgba(232, 234, 237, 0.16);
+  --scrollbar-thumb-hover: rgba(232, 234, 237, 0.28);
 
   color: var(--text-primary);
   background-color: var(--bg-main);
@@ -204,9 +210,9 @@
   --error-light: rgba(192, 73, 47, 0.12);
   --error-border: rgba(192, 73, 47, 0.28);
 
-  --shadow-soft: 0 4px 6px -1px rgba(82, 58, 35, 0.08), 0 2px 4px -1px rgba(82, 58, 35, 0.05);
-  --shadow-card: 0 1px 3px 0 rgba(82, 58, 35, 0.12), 0 1px 2px 0 rgba(82, 58, 35, 0.08);
-  --shadow-elevated: 0 10px 15px -3px rgba(82, 58, 35, 0.15), 0 4px 6px -2px rgba(82, 58, 35, 0.1);
+  --shadow-soft: 0 1px 2px rgba(82, 58, 35, 0.06);
+  --shadow-card: 0 1px 2px rgba(82, 58, 35, 0.08);
+  --shadow-elevated: 0 8px 24px -6px rgba(82, 58, 35, 0.18), 0 2px 6px -2px rgba(82, 58, 35, 0.1);
 
   --scrollbar-thumb: rgba(82, 58, 35, 0.2);
   --scrollbar-thumb-hover: rgba(82, 58, 35, 0.32);
@@ -268,9 +274,9 @@
   --error-light: rgba(229, 113, 88, 0.16);
   --error-border: rgba(229, 113, 88, 0.32);
 
-  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
-  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
-  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.26);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-elevated: 0 12px 32px -8px rgba(0, 0, 0, 0.64), 0 2px 8px -2px rgba(0, 0, 0, 0.42);
 
   --scrollbar-thumb: rgba(236, 246, 223, 0.18);
   --scrollbar-thumb-hover: rgba(236, 246, 223, 0.3);
@@ -332,9 +338,9 @@
   --error-light: rgba(240, 106, 138, 0.16);
   --error-border: rgba(240, 106, 138, 0.32);
 
-  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
-  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
-  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.26);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-elevated: 0 12px 32px -8px rgba(0, 0, 0, 0.64), 0 2px 8px -2px rgba(0, 0, 0, 0.42);
 
   --scrollbar-thumb: rgba(250, 238, 255, 0.18);
   --scrollbar-thumb-hover: rgba(250, 238, 255, 0.3);
@@ -396,9 +402,9 @@
   --error-light: rgba(232, 116, 90, 0.16);
   --error-border: rgba(232, 116, 90, 0.32);
 
-  --shadow-soft: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
-  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px 0 rgba(0, 0, 0, 0.25);
-  --shadow-elevated: 0 10px 15px -3px rgba(0, 0, 0, 0.6), 0 4px 6px -2px rgba(0, 0, 0, 0.35);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.26);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-elevated: 0 12px 32px -8px rgba(0, 0, 0, 0.64), 0 2px 8px -2px rgba(0, 0, 0, 0.42);
 
   --scrollbar-thumb: rgba(255, 244, 230, 0.18);
   --scrollbar-thumb-hover: rgba(255, 244, 230, 0.3);

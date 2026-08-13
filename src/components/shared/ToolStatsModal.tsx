@@ -6,6 +6,7 @@
  * the sidebar and the global context menu both set it.
  */
 import { BarChart3 } from "lucide-react";
+import { Dialog } from "radix-ui";
 import { t } from "../../i18n";
 import type { ToolStatsDialog } from "../../appDefaults";
 
@@ -21,19 +22,23 @@ export function ToolStatsModal({ lang, toolStatsDialog, setToolStatsDialog }: To
   const toolStatsMax = toolStatsEntries[0]?.[1] || 0;
 
   return (
-    <div className="modal-overlay" onMouseDown={(e) => {
-      if (e.target === e.currentTarget) {
-        setToolStatsDialog(null);
-      }
+    <Dialog.Root open onOpenChange={(next) => {
+      if (!next) setToolStatsDialog(null);
     }}>
-      <div className="modal-content stats-modal" onClick={(e) => e.stopPropagation()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-panel stats-modal" aria-modal="true" aria-describedby={undefined}>
         <div className="modal-header">
-          <h3 className="stats-modal-title">
-            <BarChart3 size={15} /> {t("stats.title", lang)}
-          </h3>
-          <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={() => setToolStatsDialog(null)}>
-            {t("settings.close", lang)}
-          </button>
+          <Dialog.Title asChild>
+            <h3 className="stats-modal-title">
+              <BarChart3 size={15} /> {t("stats.title", lang)}
+            </h3>
+          </Dialog.Title>
+          <Dialog.Close asChild>
+            <button type="button" className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }}>
+              {t("settings.close", lang)}
+            </button>
+          </Dialog.Close>
         </div>
         <div className="modal-body stats-modal-body">
           <div className="stats-summary">
@@ -58,7 +63,8 @@ export function ToolStatsModal({ lang, toolStatsDialog, setToolStatsDialog }: To
             <div className="stats-empty">{t("stats.empty", lang)}</div>
           )}
         </div>
-      </div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

@@ -4,6 +4,7 @@
  */
 import {
   CheckCircle2,
+  Clock,
   FileText,
   FolderOpen,
   Globe,
@@ -233,9 +234,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     "list_dir",
     "run_python",
     "web_search",
+    "get_current_time",
     "grep",
     "glob",
     "todo_write",
+    "spawn_agent",
   ],
   approval_policy: "standard",
   trusted_patterns: [],
@@ -255,7 +258,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   max_agent_loops: 30,
   max_tool_calls_per_request: 120,
   preview_sandbox: true,
-  tools_migration_version: 3,
+  plan_mode: false,
+  tools_migration_version: 5,
 };
 
 export function createDefaultSession(): ChatSession {
@@ -510,9 +514,11 @@ export const TOOL_NAMES: { key: string; label: string; shortLabel: string; descr
   { key: "list_dir", label: "List Folder", shortLabel: "Files", description: "Browse folders in the workspace.", risk: "low" },
   { key: "run_python", label: "Python", shortLabel: "Py", description: "Run short Python scripts for analysis.", risk: "medium" },
   { key: "web_search", label: "Web Search", shortLabel: "Web", description: "Search the web for current information.", risk: "low" },
+  { key: "get_current_time", label: "Current Time", shortLabel: "Time", description: "Read the current local or UTC time.", risk: "low" },
   { key: "grep", label: "Grep", shortLabel: "Grep", description: "Search file contents by regex across the workspace.", risk: "low" },
   { key: "glob", label: "Find Files", shortLabel: "Glob", description: "Find files by name pattern.", risk: "low" },
   { key: "todo_write", label: "Task List", shortLabel: "Todo", description: "Track multi-step tasks as a checklist.", risk: "low" },
+  { key: "spawn_agent", label: "Subagent", shortLabel: "Agent", description: "Ask a focused read-only helper for a bounded investigation.", risk: "medium" },
 ];
 
 export const toolIcon = (key: string, size = 11) => {
@@ -529,6 +535,8 @@ export const toolIcon = (key: string, size = 11) => {
       return <Zap size={size} />;
     case "web_search":
       return <Globe size={size} />;
+    case "get_current_time":
+      return <Clock size={size} />;
     case "edit_file":
       return <Pencil size={size} />;
     case "grep":
@@ -537,6 +545,8 @@ export const toolIcon = (key: string, size = 11) => {
       return <FolderOpen size={size} />;
     case "todo_write":
       return <CheckCircle2 size={size} />;
+    case "spawn_agent":
+      return <Zap size={size} />;
     default:
       return <Settings2 size={size} />;
   }
@@ -577,8 +587,8 @@ export const THEME_OPTIONS: {
   label: string;
   swatch: { bg: string; border: string; accent: string };
 }[] = [
-  { value: "light", mode: "light", labelZh: "浅色", label: "Light", swatch: { bg: "#ffffff", border: "#e5e5e5", accent: "#2f9e6f" } },
-  { value: "dark", mode: "dark", labelZh: "深色", label: "Dark", swatch: { bg: "#2f2f2f", border: "#424242", accent: "#45b385" } },
+  { value: "light", mode: "light", labelZh: "浅色", label: "Light", swatch: { bg: "#ffffff", border: "#e1e4e8", accent: "#3b6ef0" } },
+  { value: "dark", mode: "dark", labelZh: "深色", label: "Dark", swatch: { bg: "#1c1f25", border: "#2c313a", accent: "#6c93f7" } },
   { value: "yuzu", mode: "light", labelZh: "柚木书房", label: "Yuzu Study", swatch: { bg: "#f3e8d6", border: "#d8c4a0", accent: "#a9743f" } },
   { value: "ember", mode: "dark", labelZh: "炭火终端", label: "Ember Terminal", swatch: { bg: "#1b1d19", border: "#3a3f33", accent: "#9bcf5f" } },
   { value: "grape", mode: "dark", labelZh: "午夜葡萄", label: "Midnight Grape", swatch: { bg: "#221631", border: "#3e2a52", accent: "#c084fc" } },

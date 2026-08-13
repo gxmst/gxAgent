@@ -1,12 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
 
   build: {
     rollupOptions: {
@@ -33,7 +34,11 @@ export default defineConfig(async () => ({
             return "markdown-vendor";
           }
           if (id.includes("react-virtuoso")) return "virtual-list-vendor";
-          if (id.includes("react") || id.includes("scheduler")) return "react-vendor";
+          // Keep React-adjacent packages in the general vendor chunk. A broad
+          // `id.includes("react")` bucket also catches @radix-ui/react-*
+          // packages, whose dependencies live in `vendor`; that creates a
+          // vendor -> react-vendor -> vendor cycle and leaves React exports
+          // uninitialised in the production WebView.
           return "vendor";
         },
       },

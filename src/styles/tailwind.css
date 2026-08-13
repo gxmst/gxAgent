@@ -1,0 +1,107 @@
+/* ========================================================
+   Tailwind v4 layer — coexists with the hand-written CSS.
+   ========================================================
+
+   Deliberately imports Tailwind WITHOUT preflight. The legacy stylesheets
+   (~155KB across 8 files) were written against browser defaults; preflight
+   would unstyle every button/input/heading at once. `theme` + `utilities`
+   give us the token bridge and the utility classes with no global reset.
+
+   Newly written or migrated components use these utilities; untouched
+   components keep their existing class names. Both read the SAME palette
+   because @theme below aliases the CSS variables from themes.css rather
+   than declaring a second set of colors.
+
+   Utility precedence note: these utilities sit below the component and
+   responsive styles, so current rules keep winning during migration.
+   ======================================================== */
+
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  /* ---- Clear Tailwind's built-in radius scale --------------------------
+     Tailwind ships --radius-xs..3xl in its default theme and emits them on
+     :root, which lands AFTER tokens.css and silently redefined the legacy
+     values (--radius-sm 6px -> .25rem, --radius-md 8px -> .375rem) for
+     every existing var(--radius-*) call site. Nothing else in Tailwind's
+     default theme collides: the color/spacing/text namespaces are
+     tree-shaken away when unused. Verified against the built CSS. */
+  --radius-*: initial;
+
+  /* ---- Palette bridge -------------------------------------------------
+     Every color resolves through the existing variables, so theme
+     switching (data-theme) keeps working with zero extra wiring and
+     there is exactly one source of truth for each hue. */
+  --color-app: var(--bg-main);
+  --color-sidebar: var(--bg-sidebar);
+  --color-surface: var(--bg-card);
+  --color-surface-hover: var(--bg-card-hover);
+  --color-elevated: var(--bg-elevated);
+  --color-input: var(--bg-input);
+  --color-code: var(--bg-code);
+  --color-overlay: var(--bg-overlay);
+
+  --color-fg: var(--text-primary);
+  --color-fg-muted: var(--text-secondary);
+  --color-fg-subtle: var(--text-tertiary);
+  --color-fg-inverse: var(--text-inverse);
+
+  --color-line: var(--border-default);
+  --color-line-soft: var(--border-light);
+  --color-line-strong: var(--border-focus);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-accent-line: var(--accent-border);
+
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-danger: var(--error);
+  --color-danger-subtle: var(--error-subtle);
+
+  /* ---- Type scale: exactly six steps ---------------------------------
+     Mirrors tokens.css. Adding a seventh step requires editing this
+     block, which is the point — it makes "just one more size" a visible
+     decision instead of an inline px value. */
+  --text-caption: var(--font-caption);
+  --text-small: var(--font-small);
+  --text-ui: var(--font-ui);
+  --text-body: var(--font-body);
+  --text-title: var(--font-title);
+  --text-heading: var(--font-heading);
+
+  /* ---- Radius: three steps ------------------------------------------
+     NOTE the `ui-` prefix. Tailwind emits @theme keys as :root custom
+     properties, so naming these --radius-sm/md would redefine the legacy
+     tokens.css values (6px/8px) for every existing `var(--radius-sm)`
+     call site. Prefixing keeps the two systems from colliding; migrated
+     components write rounded-ui-sm / rounded-ui-md. */
+  --radius-ui-xs: 4px;
+  --radius-ui-sm: 8px;
+  --radius-ui-md: 12px;
+
+  /* ---- Fonts --------------------------------------------------------- */
+  --font-sans: var(--app-font-family);
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Consolas', 'SF Mono', monospace;
+
+  /* ---- Elevation ------------------------------------------------------
+     Prefixed for the same reason, and because `--shadow-soft:
+     var(--shadow-soft)` would be a circular self-reference that resolves
+     to nothing. */
+  --shadow-ui-soft: var(--shadow-soft);
+  --shadow-ui-card: var(--shadow-card);
+  --shadow-ui-elevated: var(--shadow-elevated);
+}
+
+/* Radix sets data-state on its primitives; expose them as variants so
+   migrated components can style open/closed without extra JS. */
+@custom-variant open (&[data-state="open"]);
+@custom-variant closed (&[data-state="closed"]);
+@custom-variant checked (&[data-state="checked"]);
+@custom-variant active-item (&[data-highlighted]);

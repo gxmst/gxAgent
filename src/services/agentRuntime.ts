@@ -25,6 +25,8 @@ export const runtime = {
   activeRequestWorkDir: "",
   /** Mirrors hasActiveRequest; also flipped synchronously around request start/stop. */
   isStreaming: false,
+  /** Assistant message currently owned by each in-flight request. */
+  assistantMessageIdByRequest: {} as Record<string, string>,
   /** Mirror of the current session's effective working directory. */
   effectiveWorkDir: "",
   /** Mirror of config.language for use inside event handlers. */

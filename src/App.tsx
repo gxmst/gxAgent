@@ -1,15 +1,21 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-// Order matters: tokens first, a11y last (it clamps/overrides earlier rules).
+// Order matters: tokens first, responsive overrides last.
+// tailwind.css sits right after tokens so its @theme can alias those vars,
+// and so its utilities stay below the legacy rules in the cascade.
 import "./styles/tokens.css";
-import "./styles/components.css";
+import "./styles/tailwind.css";
 import "./styles/layout.css";
 import "./styles/enhancements.css";
 import "./styles/themes.css";
 import "./styles/shell.css";
 import "./styles/chat.css";
 import "./styles/overlays.css";
-import "./styles/a11y.css";
+import "./styles/responsive.css";
+import "./styles/feedback.css";
+import "./styles/onboarding.css";
+import "./styles/workspace.css";
+import "./styles/integrations.css";
 import { ROLE_PRESETS, RolePreset } from "./rolePresets";
 import { useGlobalHotkeys } from "./components/shared/CommandSuggestions";
 import { exportAllSessions, importSessions, getToolStats } from "./utils/sessionHelpers";
@@ -18,6 +24,7 @@ import { useSessionStorage } from "./hooks/useSessionStorage";
 import { resolveRequestConfig } from "./utils/requestConfig";
 import { compareSidebarSessions, moveSessionInSidebar } from "./utils/sessionOrder";
 import { searchSessions, type SearchSnippet } from "./utils/sessionSearch";
+import { sortModels, sortProfileEntries } from "./utils/modelSorting";
 import { SettingsModal } from "./components/settings/SettingsModal";
 import { SessionSettingsPanel } from "./components/settings/SessionSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
@@ -251,6 +258,19 @@ function App() {
   const [draggingSidebar, setDraggingSidebar] = useState(false);
   const [draggingRight, setDraggingRight] = useState(false);
 
+  const minChatWidthForViewport = () => window.innerWidth <= 980 ? 240 : 320;
+  const maxSidebarWidthForViewport = () => {
+    const rightReservation = rightPanelOpen && window.innerWidth > 980 ? rightPanelWidth + 4 : 0;
+    return Math.min(
+      400,
+      Math.max(180, window.innerWidth - rightReservation - 4 - minChatWidthForViewport()),
+    );
+  };
+  const maxRightPanelWidthForViewport = () => Math.min(
+    600,
+    Math.max(200, window.innerWidth - sidebarWidth - 8 - minChatWidthForViewport()),
+  );
+
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
   const historyListRef = useRef<HTMLDivElement>(null);
   const settingsBodyRef = useRef<HTMLDivElement>(null);
@@ -295,52 +315,6 @@ function App() {
       settingsBodyRef.current.scrollTop = 0;
     }
   }, [settingsOpen, settingsTab]);
-
-  useEffect(() => {
-    if (!sessionSettingsOpen) return;
-    const panel = sessionSettingsPanelRef.current;
-    if (!panel) return;
-    panel.focus();
-
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (panel.contains(target) || sessionSettingsToggleRef.current?.contains(target)) return;
-      closeSessionSettings(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSessionSettings(true);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-      ));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        panel.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    panel.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-      panel.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [closeSessionSettings, sessionSettingsOpen]);
 
   const currentSession = useMemo(
     () => sessions.find((s) => s.id === currentSessionId) || sessions[0] || createDefaultSession(),
@@ -552,7 +526,7 @@ function App() {
 
     const onMouseMove = (ev: MouseEvent) => {
       const delta = ev.clientX - startX;
-      const newWidth = Math.max(180, Math.min(400, startWidth + delta));
+      const newWidth = Math.max(180, Math.min(maxSidebarWidthForViewport(), startWidth + delta));
       latestWidth = newWidth;
       setSidebarWidth(newWidth);
     };
@@ -564,7 +538,7 @@ function App() {
     };
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-  }, [sidebarWidth]);
+  }, [rightPanelOpen, rightPanelWidth, sidebarWidth]);
 
   const handleRightDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -575,7 +549,7 @@ function App() {
 
     const onMouseMove = (ev: MouseEvent) => {
       const delta = startX - ev.clientX;
-      const newWidth = Math.max(200, Math.min(600, startWidth + delta));
+      const newWidth = Math.max(200, Math.min(maxRightPanelWidthForViewport(), startWidth + delta));
       latestWidth = newWidth;
       setRightPanelWidth(newWidth);
     };
@@ -587,7 +561,31 @@ function App() {
     };
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-  }, [rightPanelWidth]);
+  }, [rightPanelWidth, sidebarWidth]);
+
+  // Keep persisted panel widths from squeezing the conversation into an
+  // unusable sliver after a window resize or a monitor change.
+  useEffect(() => {
+    const clampLayoutWidths = () => {
+      setSidebarWidth((previous) => {
+        const next = Math.max(180, Math.min(maxSidebarWidthForViewport(), previous));
+        if (next !== previous) {
+          try { localStorage.setItem("gx_sidebar_width", String(next)); } catch { /* ignore */ }
+        }
+        return next;
+      });
+      setRightPanelWidth((previous) => {
+        const next = Math.max(200, Math.min(maxRightPanelWidthForViewport(), previous));
+        if (next !== previous) {
+          try { localStorage.setItem("gx_right_panel_width", String(next)); } catch { /* ignore */ }
+        }
+        return next;
+      });
+    };
+    clampLayoutWidths();
+    window.addEventListener("resize", clampLayoutWidths);
+    return () => window.removeEventListener("resize", clampLayoutWidths);
+  }, [rightPanelOpen, rightPanelWidth, sidebarWidth]);
 
   // ==========================================
   // Init: Load config & presets
@@ -788,12 +786,6 @@ function App() {
     return () => clearTimeout(timer);
   }, [sessionSearch]);
 
-  useEffect(() => {
-    const handleClick = () => setContextMenu(null);
-    document.addEventListener("click", handleClick);
-    return () => document.removeEventListener("click", handleClick);
-  }, []);
-
   const ALL_PRESETS = useMemo(() => [...ROLE_PRESETS, ...customPresets], [customPresets]);
   const activeRolePresetFingerprint = useMemo(
     () => sessions
@@ -917,6 +909,7 @@ function App() {
     handleSteeringMessage,
     handleRetry,
     handleEditBranch,
+    handleBranchFromMessage,
   } = useAgentRequest({
     lang,
     config,
@@ -1013,10 +1006,10 @@ function App() {
     patchSessionConfig,
     setSidebarNav,
   });
-  const modelsForOnboarding = modelCatalogForConfig(models, modelCatalogSourceKey, {
+  const modelsForOnboarding = sortModels(modelCatalogForConfig(models, modelCatalogSourceKey, {
     wire_format: onboardingValues.wireFormat,
     base_url: onboardingValues.baseUrl,
-  });
+  }), lang);
 
   const statusLabel = (status: ToolAction["status"]) => {
     switch (status) {
@@ -1185,7 +1178,7 @@ function App() {
         onKeyDown={(event) => {
           if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
           event.preventDefault();
-          const nextWidth = Math.max(180, Math.min(400, sidebarWidth + (event.key === "ArrowRight" ? 12 : -12)));
+          const nextWidth = Math.max(180, Math.min(maxSidebarWidthForViewport(), sidebarWidth + (event.key === "ArrowRight" ? 12 : -12)));
           setSidebarWidth(nextWidth);
           try { localStorage.setItem("gx_sidebar_width", String(nextWidth)); } catch { /* ignore */ }
         }}
@@ -1248,6 +1241,7 @@ function App() {
             getModelDisplayName={getModelDisplayName}
             handleRetry={handleRetry}
             handleEditBranch={handleEditBranch}
+            handleBranchFromMessage={handleBranchFromMessage}
             attachments={attachments}
             resolvedCurrentConfig={resolvedCurrentConfig}
             models={models}
@@ -1308,7 +1302,7 @@ function App() {
             onKeyDown={(event) => {
               if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
               event.preventDefault();
-              const nextWidth = Math.max(200, Math.min(600, rightPanelWidth + (event.key === "ArrowLeft" ? 12 : -12)));
+              const nextWidth = Math.max(200, Math.min(maxRightPanelWidthForViewport(), rightPanelWidth + (event.key === "ArrowLeft" ? 12 : -12)));
               setRightPanelWidth(nextWidth);
               try { localStorage.setItem("gx_right_panel_width", String(nextWidth)); } catch { /* ignore */ }
             }}
@@ -1424,7 +1418,7 @@ function App() {
         open={onboardingOpen}
         lang={lang}
         values={onboardingValues}
-        profiles={Object.entries(config.profiles).map(([id, profile]) => ({ ...profile, id }))}
+        profiles={sortProfileEntries(Object.entries(config.profiles), lang).map(([id, profile]) => ({ ...profile, id }))}
         models={modelsForOnboarding}
         connection={onboardingConnection}
         onChange={updateOnboardingValues}
