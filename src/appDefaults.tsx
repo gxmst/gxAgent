@@ -15,6 +15,7 @@ import {
   Zap,
 } from "lucide-react";
 import { t } from "./i18n";
+import { normalizeLearningContext, normalizeSnapshots } from "./utils/learning";
 import {
   AppConfig,
   ModelInfo,
@@ -213,6 +214,9 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
 export const THINKING_LEVELS: NonNullable<SessionConfig["thinkingLevel"]>[] = ["low", "medium", "high"];
 
 export const DEFAULT_CONFIG: AppConfig = {
+  code_engine: "native",
+  codex_executable: "codex",
+  codex_model: "",
   provider: "openai",
   wire_format: "openai",
   base_url: "https://api.deepseek.com/v1",
@@ -298,7 +302,11 @@ export function normalizeSessionConfig(raw: unknown): SessionConfig {
     : null;
   return {
     schemaVersion: 2,
+    knowledgeEnabled: typeof input.knowledgeEnabled === "boolean" ? input.knowledgeEnabled : undefined,
+    skillIds: Array.isArray(input.skillIds) ? input.skillIds.filter((id): id is string => typeof id === "string") : undefined,
     mode: input.mode === "code" ? "code" : "chat",
+    engine: input.engine === "codex" || input.engine === "native" ? input.engine : undefined,
+    codexModel: nullableText(input.codexModel),
     profileId: nullableText(input.profileId),
     workDir: nullableText(input.workDir),
     systemPrompt: typeof input.systemPrompt === "string" && input.systemPrompt.length > 0 ? input.systemPrompt : null,
@@ -334,6 +342,24 @@ export const TOOL_ACTION_STATUSES = new Set<ToolAction["status"]>([
   "drafting", "executing", "done", "error", "blocked", "pending_approval",
 ]);
 
+function normalizeToolActions(raw: unknown): ToolAction[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((rawAction) => {
+    if (!rawAction || typeof rawAction !== "object") return [];
+    const action = rawAction as Partial<ToolAction>;
+    if (typeof action.id !== "string" || typeof action.name !== "string") return [];
+    const status = action.status && TOOL_ACTION_STATUSES.has(action.status) ? action.status : "done";
+    return [{
+      id: action.id,
+      name: action.name,
+      arguments: typeof action.arguments === "string" ? action.arguments : "",
+      status,
+      ...(typeof action.output === "string" ? { output: action.output } : {}),
+      ...(typeof action.approval_level === "string" ? { approval_level: action.approval_level } : {}),
+    } satisfies ToolAction];
+  });
+}
+
 export function normalizeMessage(raw: unknown): Message | null {
   if (!raw || typeof raw !== "object") return null;
   const input = raw as Partial<Message>;
@@ -360,22 +386,13 @@ export function normalizeMessage(raw: unknown): Message | null {
       })
     : undefined;
 
-  const actions = Array.isArray(input.actions)
-    ? input.actions.flatMap((rawAction) => {
-        if (!rawAction || typeof rawAction !== "object") return [];
-        const action = rawAction as Partial<ToolAction>;
-        if (typeof action.id !== "string" || typeof action.name !== "string") return [];
-        const status = action.status && TOOL_ACTION_STATUSES.has(action.status) ? action.status : "done";
-        return [{
-          id: action.id,
-          name: action.name,
-          arguments: typeof action.arguments === "string" ? action.arguments : "",
-          status,
-          ...(typeof action.output === "string" ? { output: action.output } : {}),
-          ...(typeof action.approval_level === "string" ? { approval_level: action.approval_level } : {}),
-        } satisfies ToolAction];
-      })
-    : undefined;
+  let actions = normalizeToolActions(input.actions);
+  if (input.run?.status === "running" || input.run?.status === "interrupted") {
+    actions = actions.map(action => ["executing", "drafting", "pending_approval"].includes(action.status)
+      ? { ...action, status: action.status === "pending_approval" ? "blocked" as const : "error" as const,
+          output: action.output || "Execution was interrupted. Verify the current state before repeating this operation." }
+      : action);
+  }
 
   const variants = Array.isArray(input.variants)
     ? input.variants.filter((value): value is string => typeof value === "string")
@@ -383,6 +400,13 @@ export function normalizeMessage(raw: unknown): Message | null {
   const currentVariantIndex = variants && variants.length > 0 && typeof input.currentVariantIndex === "number"
     ? Math.max(0, Math.min(variants.length - 1, Math.floor(input.currentVariantIndex)))
     : undefined;
+  let actionVariants = Array.isArray(input.actionVariants) && variants?.length
+    ? variants.map((_, index) => normalizeToolActions(input.actionVariants?.[index]))
+    : undefined;
+  if (!actionVariants && variants && variants.length > 1) {
+    actionVariants = variants.map((_, index) => index === variants.length - 1 ? actions : []);
+    actions = actionVariants[currentVariantIndex || 0];
+  }
   const searchStatus = Array.isArray(input.searchStatus)
     ? input.searchStatus.flatMap((rawStatus) => {
         if (!rawStatus || typeof rawStatus !== "object") return [];
@@ -419,6 +443,7 @@ export function normalizeMessage(raw: unknown): Message | null {
     content: input.role === "context_divider" ? "" : typeof input.content === "string" ? input.content : "",
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
     ...(actions && actions.length > 0 ? { actions } : {}),
+    ...(actionVariants ? { actionVariants } : {}),
     ...(typeof input.model === "string" ? { model: input.model } : {}),
     ...(typeof input.contextTokens === "number" && Number.isFinite(input.contextTokens) ? { contextTokens: input.contextTokens } : {}),
     ...(typeof input.reasoningContent === "string" ? { reasoningContent: input.reasoningContent } : {}),
@@ -426,6 +451,21 @@ export function normalizeMessage(raw: unknown): Message | null {
     ...(typeof input.timestamp === "number" && Number.isFinite(input.timestamp) ? { timestamp: input.timestamp } : {}),
     ...(searchStatus && searchStatus.length > 0 ? { searchStatus } : {}),
     ...(input.usage && typeof input.usage === "object" ? { usage: input.usage } : {}),
+    contextSnapshots: normalizeSnapshots(input.contextSnapshots),
+    learningContext: normalizeLearningContext(input.learningContext),
+    contextVariants: Array.isArray(input.contextVariants) ? input.contextVariants.map(value => ({
+      contextSnapshots: normalizeSnapshots(value?.contextSnapshots),
+      learningContext: normalizeLearningContext(value?.learningContext),
+      run: value?.run && typeof value.run.requestId === "string" ? { ...value.run, status: value.run.status === "running" ? "interrupted" as const : value.run.status } : undefined,
+    })) : undefined,
+    ...(input.run && typeof input.run.requestId === "string"
+      && ["running", "completed", "stopped", "error", "interrupted"].includes(input.run.status)
+      && Number.isFinite(input.run.startedAt) ? { run: {
+        requestId: input.run.requestId,
+        status: input.run.status === "running" ? "interrupted" as const : input.run.status,
+        startedAt: input.run.startedAt,
+        ...(Number.isFinite(input.run.finishedAt) ? { finishedAt: input.run.finishedAt } : {}),
+      } } : {}),
   };
 }
 
@@ -486,6 +526,12 @@ export function normalizeSessions(raw: unknown): ChatSession[] {
         archived: item.archived === true ? true : undefined,
         messages,
         sessionConfig: normalizeSessionConfig(item.sessionConfig),
+        codexThread: item.codexThread
+          && typeof item.codexThread.id === "string" && item.codexThread.id.trim()
+          && typeof item.codexThread.workDir === "string" && item.codexThread.workDir.trim()
+          && typeof item.codexThread.historyKey === "string" && /^(?:[a-f0-9]{64})?$/.test(item.codexThread.historyKey)
+          ? { id: item.codexThread.id.trim(), workDir: item.codexThread.workDir, historyKey: item.codexThread.historyKey }
+          : undefined,
         sidebarOrder,
         createdAt,
         updatedAt,

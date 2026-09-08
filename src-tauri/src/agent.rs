@@ -3,7 +3,7 @@ use crate::config::AppConfig;
 use crate::mcp::McpManager;
 use crate::policy::{check_approval, ApprovalLevel};
 use crate::provider;
-use crate::text::{utf8_prefix, utf8_suffix, IncrementalUtf8Decoder};
+use crate::text::{utf8_prefix, utf8_suffix};
 use crate::tools::{
     execute_tool_with_control, get_enabled_tool_definitions, ExecutionChunk, TOOL_CANCELLED_ERROR,
 };
@@ -312,7 +312,9 @@ async fn send_model_request_with_retry(
             .try_clone()
             .ok_or_else(|| "Model request could not be cloned for retry".to_string())?;
         match await_with_cancel(cancel_rx, builder.send()).await? {
-            Ok(response) if !retryable_status(response.status()) || attempt == MODEL_REQUEST_ATTEMPTS => {
+            Ok(response)
+                if !retryable_status(response.status()) || attempt == MODEL_REQUEST_ATTEMPTS =>
+            {
                 return Ok(response);
             }
             Ok(response) => {
@@ -329,7 +331,11 @@ async fn send_model_request_with_retry(
                         "reason": format!("HTTP {}", status),
                     }),
                 );
-                await_with_cancel(cancel_rx, tokio::time::sleep(Duration::from_secs(delay_secs))).await?;
+                await_with_cancel(
+                    cancel_rx,
+                    tokio::time::sleep(Duration::from_secs(delay_secs)),
+                )
+                .await?;
             }
             Err(error) if attempt < MODEL_REQUEST_ATTEMPTS => {
                 let delay_secs = 1u64 << (attempt - 1).min(3);
@@ -344,9 +350,18 @@ async fn send_model_request_with_retry(
                         "reason": error.to_string(),
                     }),
                 );
-                await_with_cancel(cancel_rx, tokio::time::sleep(Duration::from_secs(delay_secs))).await?;
+                await_with_cancel(
+                    cancel_rx,
+                    tokio::time::sleep(Duration::from_secs(delay_secs)),
+                )
+                .await?;
             }
-            Err(error) => return Err(format!("Request failed after {} attempts: {}", MODEL_REQUEST_ATTEMPTS, error)),
+            Err(error) => {
+                return Err(format!(
+                    "Request failed after {} attempts: {}",
+                    MODEL_REQUEST_ATTEMPTS, error
+                ))
+            }
         }
     }
     Err("Model request retry loop ended unexpectedly".to_string())
@@ -546,26 +561,63 @@ fn load_workspace_rules(work_dir: &str) -> Option<(String, String)> {
 }
 
 fn estimate_message_tokens(msg: &Value) -> u64 {
-    let content = msg["content"].as_str().unwrap_or("");
-    (content.len() as u64).div_ceil(4).max(1) + 6
+    let text_tokens = |text: &str| (text.len() as u64).div_ceil(4);
+    let content_tokens = match &msg["content"] {
+        Value::String(content) => text_tokens(content),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| {
+                if part["type"] == "image_url" {
+                    1100
+                } else {
+                    text_tokens(part["text"].as_str().unwrap_or(""))
+                }
+            })
+            .sum(),
+        _ => 0,
+    };
+    let tool_tokens = msg
+        .get("tool_calls")
+        .map(|calls| text_tokens(&calls.to_string()))
+        .unwrap_or(0);
+    let image_tokens = msg["attachments"]
+        .as_array()
+        .map(|images| {
+            images
+                .iter()
+                .filter(|image| {
+                    image["type"] == "image"
+                        && image["data"].as_str().is_some_and(|data| !data.is_empty())
+                })
+                .count() as u64
+                * 1100
+        })
+        .unwrap_or(0);
+    (content_tokens + tool_tokens + image_tokens).max(1) + 6
 }
 
 fn limit_messages_by_tokens(messages: Vec<Value>, budget: u64) -> Vec<Value> {
     if messages.is_empty() || budget == 0 {
         return messages;
     }
-    let mut kept = Vec::new();
+    let mut start = messages.len();
     let mut used = 0u64;
-    for message in messages.into_iter().rev() {
-        let cost = estimate_message_tokens(&message);
-        if !kept.is_empty() && used.saturating_add(cost) > budget {
+    while start > 0 {
+        let mut group_start = start - 1;
+        while group_start > 0 && messages[group_start]["role"] == "tool" {
+            group_start -= 1;
+        }
+        let cost: u64 = messages[group_start..start]
+            .iter()
+            .map(estimate_message_tokens)
+            .sum();
+        if start < messages.len() && used.saturating_add(cost) > budget {
             break;
         }
         used = used.saturating_add(cost);
-        kept.push(message);
+        start = group_start;
     }
-    kept.reverse();
-    kept
+    messages.into_iter().skip(start).collect()
 }
 
 fn compact_messages(messages: &mut [Value], context_limit: usize) {
@@ -761,12 +813,13 @@ fn normalize_session_messages(messages: Vec<Value>, is_ollama: bool) -> Vec<Valu
 pub async fn start_agent_loop(
     window: Window,
     request_id: String,
-    user_prompt: String,
-    config: AppConfig,
+    mut user_prompt: String,
+    mut config: AppConfig,
     session_messages: Vec<Value>,
     session_mode: String,
     search_mode: String,
     image_attachments: Vec<ImageAttachment>,
+    retrieval_query: String,
 ) -> Result<(), String> {
     // No total-request timeout: reqwest's `timeout` covers the entire body,
     // which would cut off long streaming (SSE) responses mid-flight. Instead,
@@ -780,71 +833,87 @@ pub async fn start_agent_loop(
     let cancel_rx = register_cancellation(&request_id).await;
     let steering_rx = register_steering_interrupt(&request_id).await;
 
-    let result = if session_mode == "chat" {
-        run_chat_mode(
-            window.clone(),
-            request_id.clone(),
-            client,
-            user_prompt,
-            config,
-            session_messages,
-            search_mode,
-            image_attachments,
-            cancel_rx.clone(),
-        )
-        .await
-    } else {
-        let mut mcp_manager = McpManager::new();
-        let mcp_tool_defs = if !config.mcp_servers.is_empty() {
-            let report = mcp_manager.start_all(&config.mcp_servers).await;
-            let started = report
-                .servers
-                .iter()
-                .filter(|server| server.status == "started")
-                .count();
-            let failed = report.servers.len().saturating_sub(started);
-            let status = if failed == 0 {
-                "started"
-            } else if started == 0 {
-                "error"
-            } else {
-                "partial"
-            };
-            emit_request_event(
+    let result = async {
+        await_with_cancel(
+            &cancel_rx,
+            crate::context::enrich(
                 &window,
-                "agent-mcp-status",
                 &request_id,
-                json!({
-                    "status": status,
-                    "servers": report.servers.len(),
-                    "serverStatuses": report.servers,
-                    "started": started,
-                    "failed": failed,
-                    "tools": report.tool_definitions.len(),
-                }),
-            );
-            report.tool_definitions
-        } else {
-            Vec::new()
-        };
-
-        let result = start_agent_loop_inner(
-            window.clone(),
-            request_id.clone(),
-            client,
-            user_prompt,
-            config,
-            session_messages,
-            image_attachments,
-            &mut mcp_manager,
-            mcp_tool_defs,
-            cancel_rx.clone(),
-            steering_rx.clone(),
+                &retrieval_query,
+                &mut user_prompt,
+                &mut config,
+            ),
         )
-        .await;
-        mcp_manager.shutdown().await;
-        result
-    };
+        .await??;
+        if session_mode == "chat" {
+            run_chat_mode(
+                window.clone(),
+                request_id.clone(),
+                client,
+                user_prompt,
+                config,
+                session_messages,
+                search_mode,
+                image_attachments,
+                cancel_rx.clone(),
+            )
+            .await
+        } else {
+            let mut mcp_manager = McpManager::new();
+            let mcp_tool_defs = if !config.mcp_servers.is_empty() {
+                let report =
+                    await_with_cancel(&cancel_rx, mcp_manager.start_all(&config.mcp_servers))
+                        .await?;
+                let started = report
+                    .servers
+                    .iter()
+                    .filter(|server| server.status == "started")
+                    .count();
+                let failed = report.servers.len().saturating_sub(started);
+                let status = if failed == 0 {
+                    "started"
+                } else if started == 0 {
+                    "error"
+                } else {
+                    "partial"
+                };
+                emit_request_event(
+                    &window,
+                    "agent-mcp-status",
+                    &request_id,
+                    json!({
+                        "status": status,
+                        "servers": report.servers.len(),
+                        "serverStatuses": report.servers,
+                        "started": started,
+                        "failed": failed,
+                        "tools": report.tool_definitions.len(),
+                    }),
+                );
+                report.tool_definitions
+            } else {
+                Vec::new()
+            };
+
+            let result = start_agent_loop_inner(
+                window.clone(),
+                request_id.clone(),
+                client,
+                user_prompt,
+                config,
+                session_messages,
+                image_attachments,
+                &mut mcp_manager,
+                mcp_tool_defs,
+                cancel_rx.clone(),
+                steering_rx.clone(),
+            )
+            .await;
+            mcp_manager.shutdown().await;
+            result
+        }
+    }
+    .await;
 
     unregister_cancellation(&request_id).await;
     clear_steering_messages(&request_id).await;
@@ -907,9 +976,7 @@ async fn consume_stream(
     dsml_aware: bool,
 ) -> Result<StreamOutcome, String> {
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut utf8_decoder = IncrementalUtf8Decoder::default();
-    let mut state = provider::StreamState::default();
+    let mut decoder = provider::StreamDecoder::default();
 
     let mut content = String::new();
     let mut reasoning = String::new();
@@ -918,7 +985,6 @@ async fn consume_stream(
     let mut completion_tokens: u64 = 0;
     let mut ttft_ms: Option<u64> = None;
     let mut first_content = false;
-    let mut done = false;
     let mut dsml_buffering = false;
     let mut dsml_buffer = String::new();
 
@@ -936,71 +1002,53 @@ async fn consume_stream(
             }
         };
 
-    while !done {
+    let mut apply_delta = |delta: provider::StreamDelta| {
+        if let Some(text) = delta.content {
+            if !first_content {
+                first_content = true;
+                ttft_ms = Some(request_start.elapsed().as_millis() as u64);
+            }
+            emit_content(&text, &mut content, &mut dsml_buffering, &mut dsml_buffer);
+        }
+        if let Some(think) = delta.reasoning {
+            reasoning.push_str(&think);
+            emit_reasoning_chunk(window, request_id, &think);
+        }
+        for tc in delta.tool_calls {
+            let idx = tc.index;
+            apply_tool_call_delta(&mut tool_calls, tc);
+            if emit_drafting {
+                let _ = window.emit(
+                    "agent-tool-drafting",
+                    json!({
+                        "requestId": request_id,
+                        "index": idx,
+                        "id": tool_calls[idx].id,
+                        "name": tool_calls[idx].name,
+                        "arguments": tool_calls[idx].arguments,
+                    }),
+                );
+            }
+        }
+        if let Some(pt) = delta.prompt_tokens {
+            prompt_tokens = pt;
+        }
+        if let Some(ct) = delta.completion_tokens {
+            completion_tokens = ct;
+        }
+    };
+
+    while !decoder.done {
         let chunk = match await_with_cancel(cancel_rx, stream.next()).await? {
             Some(c) => c.map_err(|e| format!("Stream error: {}", e))?,
             None => break,
         };
-        buffer.push_str(&utf8_decoder.push(&chunk));
-
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim().to_string();
-            buffer = buffer[pos + 1..].to_string();
-            if line.is_empty() {
-                continue;
-            }
-
-            for delta in provider::parse_stream_line(wire, &line, &mut state) {
-                if let Some(text) = delta.content {
-                    if !first_content {
-                        first_content = true;
-                        ttft_ms = Some(request_start.elapsed().as_millis() as u64);
-                    }
-                    emit_content(&text, &mut content, &mut dsml_buffering, &mut dsml_buffer);
-                }
-                if let Some(think) = delta.reasoning {
-                    reasoning.push_str(&think);
-                    emit_reasoning_chunk(window, request_id, &think);
-                }
-                for tc in delta.tool_calls {
-                    apply_tool_call_delta(&mut tool_calls, tc, window, request_id, emit_drafting);
-                }
-                if let Some(pt) = delta.prompt_tokens {
-                    prompt_tokens = pt;
-                }
-                if let Some(ct) = delta.completion_tokens {
-                    completion_tokens = ct;
-                }
-                if delta.done {
-                    done = true;
-                }
-            }
+        for delta in decoder.push(wire, &chunk)? {
+            apply_delta(delta);
         }
     }
-
-    buffer.push_str(&utf8_decoder.finish());
-
-    // Flush any trailing buffered line (some servers omit a final newline).
-    let tail = buffer.trim();
-    if !tail.is_empty() {
-        for delta in provider::parse_stream_line(wire, tail, &mut state) {
-            if let Some(text) = delta.content {
-                emit_content(&text, &mut content, &mut dsml_buffering, &mut dsml_buffer);
-            }
-            if let Some(think) = delta.reasoning {
-                reasoning.push_str(&think);
-                emit_reasoning_chunk(window, request_id, &think);
-            }
-            for tc in delta.tool_calls {
-                apply_tool_call_delta(&mut tool_calls, tc, window, request_id, emit_drafting);
-            }
-            if let Some(pt) = delta.prompt_tokens {
-                prompt_tokens = pt;
-            }
-            if let Some(ct) = delta.completion_tokens {
-                completion_tokens = ct;
-            }
-        }
+    for delta in decoder.finish(wire)? {
+        apply_delta(delta);
     }
 
     Ok(StreamOutcome {
@@ -1080,26 +1128,17 @@ fn normalize_tool_calls(calls: &mut Vec<AccumulatedToolCall>) {
 
 /// Fold a normalized tool-call delta into the accumulator. Streaming fragments
 /// arrive by `index`; id/name appear once, `arguments` is appended.
-fn apply_tool_call_delta(
-    acc: &mut Vec<AccumulatedToolCall>,
-    delta: provider::ToolCallDelta,
-    window: &Window,
-    request_id: &str,
-    emit_drafting: bool,
-) {
+fn apply_tool_call_delta(acc: &mut Vec<AccumulatedToolCall>, delta: provider::ToolCallDelta) {
     let idx = delta.index;
     while acc.len() <= idx {
         acc.push(AccumulatedToolCall {
-            id: String::new(),
+            id: new_tool_call_id(),
             name: String::new(),
             arguments: String::new(),
         });
     }
-    if let Some(id) = delta.id {
-        if !id.is_empty() {
-            acc[idx].id = id;
-        }
-    }
+    // Provider ids may arrive late or restart every turn. The local id stays
+    // stable from the first draft through execution and canonical history.
     if let Some(name) = delta.name {
         if !name.is_empty() {
             acc[idx].name = name;
@@ -1108,21 +1147,10 @@ fn apply_tool_call_delta(
     if let Some(args) = delta.arguments {
         acc[idx].arguments.push_str(&args);
     }
-    if acc[idx].id.is_empty() {
-        acc[idx].id = format!("call_{}", idx);
-    }
-    if emit_drafting {
-        let _ = window.emit(
-            "agent-tool-drafting",
-            json!({
-                "requestId": request_id,
-                "index": idx,
-                "id": acc[idx].id,
-                "name": acc[idx].name,
-                "arguments": acc[idx].arguments,
-            }),
-        );
-    }
+}
+
+pub(crate) fn new_tool_call_id() -> String {
+    format!("call_{}", uuid::Uuid::new_v4().simple())
 }
 
 /// Run one model turn for chat mode: build the request via the provider adapter,
@@ -1154,13 +1182,8 @@ async fn chat_turn(
     builder = provider::apply_auth(wire, builder, &config.api_key);
 
     ensure_not_cancelled(cancel_rx)?;
-    let response = send_model_request_with_retry(
-        window,
-        request_id,
-        cancel_rx,
-        builder.json(&body),
-    )
-    .await?;
+    let response =
+        send_model_request_with_retry(window, request_id, cancel_rx, builder.json(&body)).await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1583,6 +1606,14 @@ async fn run_chat_mode(
             &[]
         };
 
+        crate::context::emit_snapshot(
+            &window,
+            &request_id,
+            "native",
+            turn,
+            &messages,
+            tools_for_turn,
+        );
         let outcome = chat_turn(
             &window,
             &request_id,
@@ -1874,6 +1905,14 @@ async fn start_agent_loop_inner(
         // Build the enabled tool set (OpenAI-shaped; provider layer converts).
         let mut enabled_tools = get_enabled_tool_definitions(&config.tools_enabled);
         enabled_tools.extend(mcp_tool_defs.clone());
+        crate::context::emit_snapshot(
+            &window,
+            &request_id,
+            "native",
+            loop_count,
+            &messages,
+            &enabled_tools,
+        );
 
         // Build request body + URL + auth through the provider adapter so the
         // wire format (OpenAI/Ollama/Anthropic/Gemini) is handled in one place.
@@ -2328,10 +2367,10 @@ async fn run_spawn_agent(
     config: &AppConfig,
     cancel_rx: &watch::Receiver<bool>,
 ) -> Result<String, String> {
-    let permit = SUBAGENT_SLOTS
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| "The subagent concurrency limit (3) is already in use. Continue this task directly.".to_string())?;
+    let permit = SUBAGENT_SLOTS.clone().try_acquire_owned().map_err(|_| {
+        "The subagent concurrency limit (3) is already in use. Continue this task directly."
+            .to_string()
+    })?;
     let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
     let task = args["task"].as_str().unwrap_or("").trim();
     if task.is_empty() {
@@ -2364,13 +2403,8 @@ async fn run_spawn_agent(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
     let builder = provider::apply_auth(wire, child_client.post(&url), &config.api_key);
-    let response = send_model_request_with_retry(
-        window,
-        request_id,
-        cancel_rx,
-        builder.json(&body),
-    )
-    .await?;
+    let response =
+        send_model_request_with_retry(window, request_id, cancel_rx, builder.json(&body)).await?;
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
@@ -2970,8 +3004,7 @@ async fn process_tool_calls(
                         .await
                     }?;
 
-                    let was_steering_interrupted =
-                        output == AGENT_STEERING_INTERRUPTED_OUTPUT;
+                    let was_steering_interrupted = output == AGENT_STEERING_INTERRUPTED_OUTPUT;
                     emit_request_event(
                         window,
                         "agent-tool-output",
@@ -3248,7 +3281,7 @@ fn parse_dsml_tool_calls(content: &str) -> Vec<AccumulatedToolCall> {
             }
 
             calls.push(AccumulatedToolCall {
-                id: format!("dsml_{}", calls.len()),
+                id: new_tool_call_id(),
                 name,
                 arguments: serde_json::Value::Object(args).to_string(),
             });
@@ -3449,6 +3482,32 @@ mod role_prompt_tests {
 mod compact_tests {
     use super::*;
 
+    #[test]
+    fn streamed_tool_ids_are_stable_and_unique_across_turns() {
+        let delta =
+            |id: Option<&str>, index, name: Option<&str>, args: &str| provider::ToolCallDelta {
+                index,
+                id: id.map(String::from),
+                name: name.map(String::from),
+                arguments: Some(args.into()),
+            };
+        let mut first = Vec::new();
+        apply_tool_call_delta(&mut first, delta(None, 0, Some("read_file"), "{\"path\":"));
+        let first_id = first[0].id.clone();
+        apply_tool_call_delta(&mut first, delta(Some("call_0"), 0, None, "\"first.txt\"}"));
+        apply_tool_call_delta(&mut first, delta(Some("call_0"), 1, Some("glob"), "{}"));
+        normalize_tool_calls(&mut first);
+        assert_eq!(first[0].id, first_id);
+        assert_ne!(first[0].id, first[1].id);
+        assert_eq!(first[0].arguments, r#"{"path":"first.txt"}"#);
+        let mut second = Vec::new();
+        apply_tool_call_delta(
+            &mut second,
+            delta(Some("call_0"), 0, Some("write_file"), "{}"),
+        );
+        assert_ne!(first[0].id, second[0].id);
+    }
+
     fn tool_msg(len: usize) -> Value {
         json!({ "role": "tool", "tool_call_id": "t", "content": "x".repeat(len) })
     }
@@ -3490,6 +3549,29 @@ mod compact_tests {
         let limited = limit_messages_by_tokens(messages, 1_100);
         assert_eq!(limited.len(), 2);
         assert_eq!(limited.last().unwrap()["content"], "new");
+    }
+
+    #[test]
+    fn token_limits_never_separate_tool_results_from_their_calls() {
+        let call = json!({"role":"assistant", "content":"", "tool_calls":[
+            {"id":"a", "type":"function", "function":{"name":"read_file","arguments":"{}"}},
+            {"id":"b", "type":"function", "function":{"name":"glob","arguments":"{}"}},
+        ]});
+        let group = vec![
+            call,
+            json!({"role":"tool","tool_call_id":"a","content":"a"}),
+            json!({"role":"tool","tool_call_id":"b","content":"b"}),
+        ];
+        let mut messages = vec![json!({"role":"user","content":"old"})];
+        messages.extend(group.clone());
+        assert_eq!(limit_messages_by_tokens(messages.clone(), 1), group);
+        messages.push(json!({"role":"assistant","content":"done"}));
+        let limited = limit_messages_by_tokens(messages, 20);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0]["content"], "done");
+        let large_args =
+            json!({"role":"assistant","tool_calls":[{"function":{"arguments":"x".repeat(8000)}}]});
+        assert!(estimate_message_tokens(&large_args) > 2000);
     }
 }
 

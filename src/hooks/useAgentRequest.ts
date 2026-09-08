@@ -22,7 +22,6 @@ import {
   createSession,
   estimateTextTokens,
   fitAttachmentBudget,
-  isSendableAttachment,
   modelContextLimitForConfig,
   newMessageId,
 } from "../appDefaults";
@@ -30,9 +29,12 @@ import { parseCommand, sessionToMarkdown } from "../utils/helpers";
 import { formatQuoteReply } from "../utils/quote";
 import { resolveRequestConfig } from "../utils/requestConfig";
 import { fallbackSessionTitle } from "../utils/sessionTitle";
+import { activeHistoryGroups, buildPromptWithAttachments, captureActionVariants, estimateApiMessageTokens, imageAttachmentsForApi, serializeMessageForApi } from "../utils/messageHistory";
 import { useAppStore } from "../store/appStore";
 import { runtime } from "../services/agentRuntime";
 import { addLog, notify, finishStreamingLocally } from "../services/agentEvents";
+import { codexHistoryKey } from "../services/codexWorkflow";
+import { captureContextVariants } from "../utils/messageHistory";
 
 export function useAgentRequest({
   lang,
@@ -98,43 +100,12 @@ export function useAgentRequest({
   const formatTokenCount = (value: number) =>
     value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : String(value);
 
-  const imageAttachmentsForApi = (list: Attachment[]) =>
-    list.filter((att) => att.type === "image" && att.data);
-
-  const buildPromptWithAttachments = (message: string, list: Attachment[]) => {
-    const usable = list.filter(isSendableAttachment);
-    if (usable.length === 0) return message;
-    const parts = usable.map((att) => {
-      if (att.type === "image") {
-        return `[Attached Image: ${att.name}]`;
-      }
-      const longestFence = Math.max(2, ...(att.data.match(/`+/g) || []).map((run) => run.length));
-      const fence = "`".repeat(longestFence + 1);
-      return `[Attached File: ${att.name}]\n${fence}\n${att.data}\n${fence}`;
-    });
-    const trimmed = message.trim();
-    return trimmed ? `${parts.join("\n\n")}\n\n${trimmed}` : parts.join("\n\n");
-  };
-
-  const serializeMessageForApi = (message: Message) => {
-    if (!["user", "assistant", "system"].includes(message.role)) return null;
-    const imgs = imageAttachmentsForApi(message.attachments || []);
-    const rawContent = message.variants
-      ? (message.variants[message.currentVariantIndex || 0] || message.content)
-      : message.content;
-    const content = message.role === "user"
-      ? buildPromptWithAttachments(rawContent, message.attachments || [])
-      : rawContent;
-    if (message.role === "assistant" && !content.trim()) return null;
-    return {
-      role: message.role,
-      content,
-      ...(message.role === "user" && imgs.length > 0 ? { attachments: imgs } : {}),
-    };
-  };
-
   const handleCompact = async () => {
     if (!sessionStorageReady || runtime.isStreaming || requestStartingRef.current) return;
+    if (resolvedCurrentConfig.code_engine === "codex") {
+      notify(lang === "zh" ? "Codex 自动管理上下文，当前不支持手动压缩。" : "Codex manages context automatically. Manual compaction is not available.", "info");
+      return;
+    }
     const sessionId = currentSession.id;
     const messages = currentSession.messages;
     if (messages.length < 3) {
@@ -162,10 +133,7 @@ export function useAgentRequest({
           modelContextLimitForConfig(resolvedCurrentConfig.model, models, modelCatalogSourceKey, resolvedCurrentConfig),
           resolvedCurrentConfig.context_limit,
         ),
-        messages: messages.flatMap((message) => {
-          const serialized = serializeMessageForApi(message);
-          return serialized ? [{ role: serialized.role, content: serialized.content }] : [];
-        }),
+        messages: messages.flatMap(serializeMessageForApi),
       });
       setSessions((prev) =>
         prev.map((s) => {
@@ -208,23 +176,6 @@ export function useAgentRequest({
     notify(t("ui.conversation-restored", lang), "success");
   };
 
-  // Outbound history is everything after the last context divider. Each
-  // serialized message keeps a reference to its source so the auto-compact
-  // boundary can be mapped back to a concrete message id.
-  const activeHistoryPairs = (messages: Message[]) => {
-    let lastDividerIdx = -1;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role === "context_divider") {
-        lastDividerIdx = index;
-        break;
-      }
-    }
-    return messages.slice(lastDividerIdx + 1).flatMap((message) => {
-      const serialized = serializeMessageForApi(message);
-      return serialized ? [{ serialized, source: message }] : [];
-    });
-  };
-
   const lastContextDivider = (messages: Message[]) =>
     [...messages].reverse().find((message) => message.role === "context_divider") ?? null;
 
@@ -244,7 +195,7 @@ export function useAgentRequest({
   };
 
   const requestNeedsApiKey = (requestConfig: AppConfig) => (
-    !requestConfig.api_key.trim()
+    requestConfig.code_engine !== "codex" && !requestConfig.api_key.trim()
     && requestConfig.provider !== "ollama"
     && (requestConfig.base_url.includes("deepseek") || requestConfig.base_url.includes("openai.com"))
   );
@@ -305,16 +256,14 @@ export function useAgentRequest({
       && historyDivider?.id === targetSession.contextSummary.dividerId
       ? targetSession.contextSummary
       : null;
-    const outboundPairs = activeHistoryPairs(history);
+    const outboundPairs = activeHistoryGroups(history);
     let sessionMessages = [
       ...(activeSummary ? [summaryAsOutboundMessage(activeSummary)] : []),
-      ...outboundPairs.map((pair) => pair.serialized),
+      ...outboundPairs.flatMap((pair) => pair.serialized),
     ];
     const estimateOutboundTokens = (outbound: typeof sessionMessages) => outbound.reduce((sum, message) => (
       sum
-      + estimateTextTokens(String(message.content || ""))
-      + ((message as { attachments?: Attachment[] }).attachments || []).length * 1100
-      + 6
+      + estimateApiMessageTokens(message)
     ), instructionTokens) + estimateTextTokens(finalMessage) + imageAttachments.length * 1100;
     let estimatedRequestTokens = estimateOutboundTokens(sessionMessages);
 
@@ -324,6 +273,12 @@ export function useAgentRequest({
       requestStartingRef.current = false;
       setPreparingRequestSessionId((current) => current === targetSessionId ? null : current);
     };
+    let codexThreadId: string | null = null;
+    if (requestConfig.code_engine === "codex" && targetSession?.codexThread?.workDir === requestConfig.default_work_dir) {
+      try {
+        if (targetSession.codexThread.historyKey === await codexHistoryKey(history)) codexThreadId = targetSession.codexThread.id;
+      } catch { /* A new thread receives the visible history. */ }
+    }
 
     // Rolling auto-compact, Claude Code style: past half the model window,
     // fold everything but a recent tail into an LLM summary. The summary is
@@ -332,14 +287,13 @@ export function useAgentRequest({
     const AUTO_COMPACT_TRIGGER_RATIO = 0.5;
     const AUTO_COMPACT_KEEP_TAIL = 8;
     if (
-      estimatedRequestTokens > requestContextLimit * AUTO_COMPACT_TRIGGER_RATIO
-      && sessionMessages.length > AUTO_COMPACT_KEEP_TAIL + 4
+      requestConfig.code_engine !== "codex" && estimatedRequestTokens > requestContextLimit * AUTO_COMPACT_TRIGGER_RATIO
+      && outboundPairs.length > AUTO_COMPACT_KEEP_TAIL + 4
     ) {
-      const cutOutbound = sessionMessages.length - AUTO_COMPACT_KEEP_TAIL;
-      // Last source-backed message inside the folded range — the new divider
-      // lands right after it. (Index shifts by one when a previous summary
-      // occupies slot 0 of the outbound array.)
-      const coveredPairs = outboundPairs.slice(0, cutOutbound - (activeSummary ? 1 : 0));
+      // A UI message can contain multiple tool exchanges. Cut whole source
+      // groups so the summary divider and outbound history cover the same turns.
+      const coveredPairs = outboundPairs.slice(0, -AUTO_COMPACT_KEEP_TAIL);
+      const cutOutbound = coveredPairs.reduce((sum, pair) => sum + pair.serialized.length, activeSummary ? 1 : 0);
       const boundarySource = coveredPairs[coveredPairs.length - 1]?.source;
       if (boundarySource?.id) {
         addLog(
@@ -353,10 +307,7 @@ export function useAgentRequest({
             currentConfig: requestConfig,
             requestId: `autocompact-${requestId}`,
             contextTokenLimit: requestContextLimit,
-            messages: sessionMessages.slice(0, cutOutbound).map((message) => ({
-              role: message.role,
-              content: message.content,
-            })),
+            messages: sessionMessages.slice(0, cutOutbound),
           });
           if (summaryText && summaryText.trim()) {
             const dividerId = newMessageId();
@@ -411,7 +362,7 @@ export function useAgentRequest({
       }
     }
 
-    if (estimatedRequestTokens > requestContextLimit * 0.9) {
+    if (requestConfig.code_engine !== "codex" && estimatedRequestTokens > requestContextLimit * 0.9) {
       finishPreparingRequest();
       addLog(
         t("ui.context-near-limit", lang, { tokens: formatTokenCount(estimatedRequestTokens), limit: formatTokenCount(requestContextLimit) }),
@@ -450,10 +401,12 @@ export function useAgentRequest({
 
     runtime.activeRequestId = requestId;
     runtime.activeRequestSessionId = targetSessionId;
+    runtime.activeRequestEngine = requestConfig.code_engine || "native";
+    runtime.activeCodexTurnStarted = false;
     if (assistantMessageId) {
       runtime.assistantMessageIdByRequest[requestId] = assistantMessageId;
     }
-    runtime.activeRequestModel = requestConfig.model;
+    runtime.activeRequestModel = requestConfig.code_engine === "codex" ? requestConfig.codex_model || "Codex" : requestConfig.model;
     runtime.activeRequestWorkDir = requestConfig.default_work_dir;
     runtime.activeRequestContextTokens = estimatedRequestTokens;
     runtime.requestSessionById[requestId] = targetSessionId;
@@ -479,7 +432,9 @@ export function useAgentRequest({
     try {
       await invoke("start_agent_session", {
         requestId,
+        codexThreadId,
         prompt: finalMessage,
+        retrievalQuery: userMessage,
         config: requestConfig,
         sessionMessages,
         sessionMode: sessionConfig.mode,
@@ -489,7 +444,7 @@ export function useAgentRequest({
       if (runtime.activeRequestId === requestId) finishStreamingLocally(requestId);
       return true;
     } catch (error) {
-      if (runtime.activeRequestId === requestId) finishStreamingLocally(requestId);
+      if (runtime.activeRequestId === requestId) finishStreamingLocally(requestId, "error");
       addLog(`Agent error: ${error}`, "error", true, targetSessionId);
       const errorContent = `Error: ${error}`;
       setSessions((previous) => previous.map((session) => {
@@ -502,7 +457,7 @@ export function useAgentRequest({
             ...session,
             messages: [
               ...session.messages,
-              { id: newMessageId(), role: "assistant", content: errorContent, actions: [], timestamp: Date.now() },
+              { id: newMessageId(), role: "assistant", content: errorContent, actions: [], timestamp: Date.now(), run: { requestId, status: "error", startedAt: Date.now(), finishedAt: Date.now() } },
             ],
             updatedAt: Date.now(),
           };
@@ -517,6 +472,7 @@ export function useAgentRequest({
         assistant.variants = variants;
         assistant.currentVariantIndex = variantIndex;
         assistant.content = errorContent;
+        assistant.run = { requestId, status: "error", startedAt: assistant.run?.startedAt || Date.now(), finishedAt: Date.now() };
         messages[assistantIndex] = assistant;
         return { ...session, messages, updatedAt: Date.now() };
       }));
@@ -608,7 +564,7 @@ export function useAgentRequest({
       userMessage,
       requestAttachments: pendingAttachments,
       onAccepted: () => {
-        if (shouldGenerateTitle) {
+        if (shouldGenerateTitle && requestConfig.code_engine !== "codex") {
           runtime.pendingTitleBySession[targetSessionId] = {
             userMessage: userMessage || pendingAttachments.map((attachment) => attachment.name).join(", "),
             fallbackTitle: localTitle,
@@ -737,6 +693,11 @@ export function useAgentRequest({
               content: "",
               variants: [...existingVariants, ""],
               currentVariantIndex: nextVariantIndex,
+              actionVariants: [...captureActionVariants(message), []],
+              contextVariants: [...captureContextVariants(message), {}],
+              contextSnapshots: undefined,
+              learningContext: undefined,
+              run: undefined,
               actions: [],
               reasoningContent: undefined,
               usage: undefined,
@@ -760,6 +721,7 @@ export function useAgentRequest({
       content: editText,
       variants: undefined,
       currentVariantIndex: undefined,
+      actionVariants: undefined,
       timestamp: Date.now(),
     };
     const branch = createBranchSession(

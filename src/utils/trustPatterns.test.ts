@@ -19,6 +19,11 @@ describe("splitCommandSegments", () => {
 });
 
 describe("suggestCommandTrustPattern", () => {
+  it("keeps mutation arguments for ambiguous Git subcommands", () => {
+    expect(suggestCommandTrustPattern("git branch -D old-branch")).toBe("git branch -D old-branch");
+    expect(suggestCommandTrustPattern("git tag -d v1")).toBe("git tag -d v1");
+    expect(suggestCommandTrustPattern("git remote add origin example")).toBe("git remote add origin example");
+  });
   it("uses two tokens for subcommand launchers", () => {
     expect(suggestCommandTrustPattern("git commit -m msg")).toBe("git commit");
     expect(suggestCommandTrustPattern("npm run build:css")).toBe("npm run");

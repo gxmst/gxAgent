@@ -8,6 +8,10 @@ export interface ApiProfile {
 }
 
 export interface AppConfig {
+  learning?: LearningConfig;
+  code_engine: "native" | "codex";
+  codex_executable: string;
+  codex_model: string;
   provider: string;
   wire_format: string;
   base_url: string;
@@ -108,6 +112,9 @@ export interface Attachment {
 }
 
 export interface Message {
+  contextSnapshots?: ContextSnapshot[];
+  learningContext?: LearningContext;
+  contextVariants?: { contextSnapshots?: ContextSnapshot[]; learningContext?: LearningContext; run?: Message["run"] }[];
   /** Stable identity for React keys and context-boundary bookkeeping.
    *  Backfilled on load for legacy messages. */
   id?: string;
@@ -118,11 +125,18 @@ export interface Message {
   contextTokens?: number;
   usage?: UsageStats;
   actions?: ToolAction[];
+  actionVariants?: ToolAction[][];
   reasoningContent?: string;
   variants?: string[];
   currentVariantIndex?: number;
   timestamp?: number;
   searchStatus?: SearchStatus[];
+  run?: {
+    requestId: string;
+    status: "running" | "completed" | "stopped" | "error" | "interrupted";
+    startedAt: number;
+    finishedAt?: number;
+  };
 }
 
 export interface ChatSession {
@@ -143,6 +157,7 @@ export interface ChatSession {
    *  the context divider whose message id is `dividerId`. Cleared implicitly
    *  when a newer divider supersedes that boundary. */
   contextSummary?: ContextSummary | null;
+  codexThread?: { id: string; workDir: string; historyKey: string };
 }
 
 export interface ContextSummary {
@@ -152,6 +167,8 @@ export interface ContextSummary {
 }
 
 export interface SessionConfig {
+  knowledgeEnabled?: boolean;
+  skillIds?: string[];
   schemaVersion: 2;
   mode: "chat" | "code";
   profileId: string | null;
@@ -169,6 +186,8 @@ export interface SessionConfig {
   searchMode: "off" | "auto" | "force";
   /** Code-mode escape hatch: after an explicit warning, skip approval prompts. */
   trustAllOperations?: boolean;
+  engine?: "native" | "codex";
+  codexModel?: string | null;
 }
 
 export interface UsageStats {
@@ -182,6 +201,7 @@ export interface UsageStats {
 }
 
 export interface PendingApproval {
+  source?: "codex";
   request_id: string;
   tool_calls: {
     id: string;
@@ -190,3 +210,10 @@ export interface PendingApproval {
     approval_level: string;
   }[];
 }
+
+export interface LearningConfig { skill_roots: string[]; enabled_skills: string[]; knowledge_enabled: boolean; top_k: number; match_mode: "any" | "all" }
+export interface Skill { id: string; name: string; description: string; path: string; scope: string; body: string; resources: string[]; dependencies: string[]; missingDependencies: string[] }
+export interface KnowledgeHit { chunkId: string; documentId: string; path: string; title: string; text: string; score: number; startChar: number; endChar: number }
+export interface RetrievalReport { query: string; hits: KnowledgeHit[]; durationMs: number; mode: string; topK: number }
+export interface LearningContext { skills: Skill[]; retrieval: RetrievalReport | null }
+export interface ContextSnapshot { engine: string; iteration: number; capturedAt: number; messages: unknown[]; tools: unknown[]; truncated: boolean }

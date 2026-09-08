@@ -17,6 +17,14 @@ pub struct ApiProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub learning: crate::skills::LearningConfig,
+    #[serde(default = "default_code_engine")]
+    pub code_engine: String,
+    #[serde(default = "default_codex_executable")]
+    pub codex_executable: String,
+    #[serde(default)]
+    pub codex_model: String,
     pub provider: String,
     #[serde(default = "default_wire_format")]
     pub wire_format: String,
@@ -114,6 +122,13 @@ fn default_max_tool_calls_per_request() -> u32 {
 
 fn default_preview_sandbox() -> bool {
     true
+}
+
+fn default_code_engine() -> String {
+    "native".into()
+}
+fn default_codex_executable() -> String {
+    "codex".into()
 }
 
 fn default_plan_mode() -> bool {
@@ -269,14 +284,11 @@ pub fn default_trusted_patterns() -> Vec<TrustedPattern> {
         ("execute_command", "git show"),
         ("execute_command", "git tag"),
         ("execute_command", "git stash list"),
-        // --- cargo (read-only) ---
-        ("execute_command", "cargo check"),
-        ("execute_command", "cargo test"),
+        // --- cargo metadata (builds/tests can execute project code) ---
         ("execute_command", "cargo tree"),
         // --- Environment ---
         ("execute_command", "$env:"),
         ("execute_command", "Get-ChildItem Env:"),
-        ("execute_command", "[Environment]::"),
     ];
 
     patterns
@@ -292,6 +304,9 @@ pub fn default_trusted_patterns() -> Vec<TrustedPattern> {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            code_engine: default_code_engine(),
+            codex_executable: default_codex_executable(),
+            codex_model: String::new(),
             provider: "openai".into(),
             wire_format: "openai".into(),
             base_url: "https://api.deepseek.com/v1".into(),
@@ -302,6 +317,7 @@ impl Default for AppConfig {
             max_tokens: None,
             system_prompt: "You are a capable AI assistant with access to local tools (running commands, reading and writing files, searching the web). Help the user accomplish their task by using the available tools when they are needed, and answering directly when they are not. Be careful, honest, and direct. Prefer concrete actions over lengthy explanations. If you are unsure or lack enough information, say so instead of guessing, and do not invent facts, files, command results, or tool output. When a task could be destructive or hard to undo, confirm with the user before proceeding.".into(),
             role_prompt: None,
+            learning: crate::skills::LearningConfig::default(),
             streaming: true,
             thinking_level: "medium".into(),
             context_limit: 128_000,

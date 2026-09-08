@@ -84,6 +84,23 @@ pub struct GitCheckpoint {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunChange {
+    pub path: String,
+    pub status: String,
+    pub diff: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunReview {
+    pub repository_root: String,
+    pub version: String,
+    pub entries: Vec<RunChange>,
+}
+
 pub fn default_workspace_path() -> PathBuf {
     dirs::home_dir()
         .or_else(|| std::env::current_dir().ok())
@@ -780,6 +797,87 @@ fn validate_checkpoint_reference(reference: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn get_git_run_review(work_dir: String, reference: String) -> Result<RunReview, String> {
+    validate_checkpoint_reference(&reference)?;
+    let selected = ensure_workspace_dir(&work_dir, false)?;
+    let root = repository_root(&selected).await?;
+    let baseline = git_output(&root, &["rev-parse", "--verify", &reference]).await?;
+    let temporary_index = TemporaryGitIndex::new(
+        std::env::temp_dir().join(format!("gxagent-review-{}", uuid::Uuid::new_v4().simple())),
+    );
+    // Build the comparison tree through a disposable index so staged and
+    // untracked files participate without altering the user's real index.
+    let index_tree = git_output(&root, &["write-tree"]).await?;
+    git_output_with_index(
+        &root,
+        temporary_index.path(),
+        &["read-tree", &index_tree],
+        false,
+    )
+    .await?;
+    git_output_with_index(&root, temporary_index.path(), &["add", "-A"], false).await?;
+    let current =
+        git_output_with_index(&root, temporary_index.path(), &["write-tree"], false).await?;
+    let raw = git_output_raw(
+        &root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-status",
+            "-z",
+            &baseline,
+            &current,
+        ],
+    )
+    .await?;
+    let mut records = raw.split_terminator('\0');
+    let mut entries = Vec::new();
+    while let Some(status) = records.next() {
+        let path = records.next().ok_or("Invalid Git change record")?;
+        if entries.len() >= 200 {
+            return Err("More than 200 changed files; review this run in Git".to_string());
+        }
+        let mut diff = git_output_raw(
+            &root,
+            &[
+                "--literal-pathspecs",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--no-renames",
+                &baseline,
+                &current,
+                "--",
+                path,
+            ],
+        )
+        .await?;
+        let truncated = diff.len() > 1_000_000;
+        if truncated {
+            let mut end = 1_000_000;
+            while !diff.is_char_boundary(end) {
+                end -= 1;
+            }
+            diff.truncate(end);
+        }
+        entries.push(RunChange {
+            path: path.to_string(),
+            status: status.to_string(),
+            diff,
+            truncated,
+        });
+    }
+    Ok(RunReview {
+        repository_root: root.to_string_lossy().to_string(),
+        version: format!("{}:{}", baseline, current),
+        entries,
+    })
+}
+
+#[tauri::command]
 pub async fn create_git_checkpoint(
     work_dir: Option<String>,
     default_work_dir: Option<String>,
@@ -1060,6 +1158,43 @@ mod tests {
         test_git(&dir, &["add", "staged.txt"]);
         std::fs::write(dir.join("mixed.txt"), "later\n").unwrap();
         std::fs::write(dir.join("after-checkpoint.txt"), "remove me\n").unwrap();
+        let index_before_review = test_git(&dir, &["write-tree"]);
+        let status_before_review = test_git(&dir, &["status", "--porcelain=v1"]);
+        let review = get_git_run_review(
+            dir.to_string_lossy().to_string(),
+            checkpoint.reference.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(test_git(&dir, &["write-tree"]), index_before_review);
+        assert_eq!(
+            test_git(&dir, &["status", "--porcelain=v1"]),
+            status_before_review
+        );
+        assert_eq!(test_git(&dir, &["rev-parse", "HEAD"]), head_before);
+        assert!(!review
+            .entries
+            .iter()
+            .any(|entry| entry.path == "checkpoint-only.txt"));
+        let modified = review
+            .entries
+            .iter()
+            .find(|entry| entry.path == "tracked.txt")
+            .unwrap();
+        assert!(modified.diff.contains("-checkpoint"));
+        assert!(!modified.diff.contains("-initial"));
+        let added = review
+            .entries
+            .iter()
+            .find(|entry| entry.path == "after-checkpoint.txt")
+            .unwrap();
+        assert_eq!(added.status, "A");
+        assert!(added.diff.contains("+remove me"));
+        assert!(
+            get_git_run_review(dir.to_string_lossy().to_string(), "HEAD".to_string())
+                .await
+                .is_err()
+        );
         restore_git_checkpoint(
             Some(dir.to_string_lossy().to_string()),
             None,

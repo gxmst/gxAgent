@@ -1,10 +1,15 @@
 mod agent;
 mod audit;
+mod codex;
+mod codex_transport;
 mod config;
+mod context;
 mod crypto;
+mod knowledge;
 mod mcp;
 mod policy;
 mod provider;
+mod skills;
 mod storage;
 mod text;
 mod tools;
@@ -35,6 +40,8 @@ async fn start_agent_session(
     session_mode: Option<String>,
     search_mode: Option<String>,
     image_attachments: Option<Vec<agent::ImageAttachment>>,
+    codex_thread_id: Option<String>,
+    retrieval_query: Option<String>,
 ) -> Result<(), String> {
     workspace::ensure_workspace_dir(&config.default_work_dir, false)?;
     let mode = session_mode.unwrap_or_else(|| "chat".to_string());
@@ -49,17 +56,33 @@ async fn start_agent_session(
                 .as_millis()
         )
     });
-    let result = agent::start_agent_loop(
-        window.clone(),
-        request_id.clone(),
-        prompt,
-        config,
-        session_messages,
-        mode,
-        smode,
-        images,
-    )
-    .await;
+    let query = retrieval_query.unwrap_or_else(|| prompt.clone());
+    let result = if mode == "code" && config.code_engine == "codex" {
+        codex::run(
+            window.clone(),
+            request_id.clone(),
+            prompt,
+            config,
+            session_messages,
+            codex_thread_id,
+            images,
+            query,
+        )
+        .await
+    } else {
+        agent::start_agent_loop(
+            window.clone(),
+            request_id.clone(),
+            prompt,
+            config,
+            session_messages,
+            mode,
+            smode,
+            images,
+            query,
+        )
+        .await
+    };
     if let Err(ref e) = result {
         let _ = window.emit(
             "agent-stream-chunk",
@@ -107,6 +130,9 @@ async fn resolve_tool_approval(
     approved_ids: Vec<String>,
     rejected_ids: Vec<String>,
 ) -> Result<(), String> {
+    if let Some(result) = codex::approve(&request_id, &approved_ids, &rejected_ids).await {
+        return result;
+    }
     let mut results: Vec<(String, bool)> = Vec::new();
     for id in approved_ids {
         results.push((id, true));
@@ -120,6 +146,9 @@ async fn resolve_tool_approval(
 /// Cancel an active agent session by request id
 #[tauri::command]
 async fn cancel_agent_session(request_id: String) -> Result<(), String> {
+    if let Some(result) = codex::interrupt(&request_id).await {
+        return result;
+    }
     agent::cancel_agent_request(&request_id).await
 }
 
@@ -258,12 +287,18 @@ fn load_config() -> Result<AppConfig, String> {
             }
         }
         if config.tools_migration_version < 4
-            && !config.tools_enabled.iter().any(|tool| tool == "spawn_agent")
+            && !config
+                .tools_enabled
+                .iter()
+                .any(|tool| tool == "spawn_agent")
         {
             config.tools_enabled.push("spawn_agent".to_string());
         }
         if config.tools_migration_version < 5
-            && !config.tools_enabled.iter().any(|tool| tool == "get_current_time")
+            && !config
+                .tools_enabled
+                .iter()
+                .any(|tool| tool == "get_current_time")
         {
             // v5: make the read-only clock available in both ordinary chat and
             // code mode without changing any existing tool choices.
@@ -919,6 +954,9 @@ async fn fetch_ollama_models(base_url: String) -> Result<Vec<Value>, String> {
 /// Push a steering message into the agent's intervention queue
 #[tauri::command]
 async fn push_steering_message(message: String, request_id: String) -> Result<(), String> {
+    if let Some(result) = codex::steer(&request_id, message.clone()).await {
+        return result;
+    }
     agent::push_steering_message(request_id, message).await;
     Ok(())
 }
@@ -995,11 +1033,32 @@ fn compaction_transcript(messages: Vec<Value>) -> String {
                 .get("role")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let content = message.get("content")?;
-            let content = content
-                .as_str()
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| content.to_string());
+            let content = &message["content"];
+            let mut content = content.as_str().map(ToOwned::to_owned).unwrap_or_else(|| {
+                if content.is_null() {
+                    String::new()
+                } else {
+                    content.to_string()
+                }
+            });
+            if let Some(calls) = message["tool_calls"].as_array() {
+                for call in calls {
+                    content.push_str(&format!(
+                        "\n[Tool call {}: {}]\n{}",
+                        call["id"].as_str().unwrap_or("unknown"),
+                        call["function"]["name"].as_str().unwrap_or("unknown"),
+                        call["function"]["arguments"].as_str().unwrap_or("{}")
+                    ));
+                }
+            }
+            if role == "tool" {
+                content = format!(
+                    "[Tool result {}: {}]\n{}",
+                    message["tool_call_id"].as_str().unwrap_or("unknown"),
+                    message["name"].as_str().unwrap_or("unknown"),
+                    content
+                );
+            }
             if content.trim().is_empty() {
                 None
             } else {
@@ -1435,6 +1494,26 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             start_agent_session,
+            skills::list_skills,
+            skills::read_skill_resource,
+            knowledge::index_knowledge_file,
+            knowledge::pick_knowledge_files,
+            knowledge::list_knowledge_documents,
+            knowledge::remove_knowledge_document,
+            knowledge::search_knowledge,
+            knowledge::knowledge_evaluations,
+            knowledge::save_knowledge_case,
+            knowledge::delete_knowledge_case,
+            knowledge::run_knowledge_evaluation,
+            mcp::inspect_mcp_tools,
+            mcp::call_mcp_debug,
+            storage::list_session_backups,
+            storage::create_session_backup,
+            storage::read_session_backup,
+            storage::session_storage_issues,
+            storage::repair_session_backup,
+            codex::inspect_codex,
+            codex::answer_codex_question,
             resolve_tool_approval,
             cancel_agent_session,
             fetch_models,
@@ -1448,6 +1527,7 @@ pub fn run() {
             workspace::list_directory_tree,
             workspace::get_git_status,
             workspace::get_git_diff,
+            workspace::get_git_run_review,
             workspace::restore_git_path,
             workspace::create_git_checkpoint,
             workspace::list_git_checkpoints,
@@ -1492,6 +1572,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_transcript_preserves_tool_arguments_and_result_associations() {
+        let transcript = compaction_transcript(vec![
+            json!({"role":"assistant", "content":null, "tool_calls":[{"id":"call_a", "function":{"name":"read_file", "arguments":"{\"path\":\"first.txt\"}"}}]}),
+            json!({"role":"tool", "tool_call_id":"call_a", "name":"read_file", "content":"first file contents"}),
+        ]);
+        assert!(transcript.contains("Tool call call_a: read_file"));
+        assert!(transcript.contains("first.txt"));
+        assert!(transcript.contains("Tool result call_a: read_file"));
+        assert!(transcript.contains("first file contents"));
+    }
 
     #[test]
     fn compaction_split_preserves_utf8_content() {

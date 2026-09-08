@@ -27,6 +27,9 @@ import {
   Trash2,
   X,
   XCircle,
+  ArrowRight,
+  Wrench,
+  Braces,
 } from "lucide-react";
 import CaturtleLogo from "../../assets/logo.png";
 import { t } from "../../i18n";
@@ -43,8 +46,11 @@ import { TaskProgress } from "../shared/TaskProgress";
 import { ToolResult } from "./ToolResult";
 import { ApprovalCard, messageHasPendingApproval } from "./ApprovalCard";
 import { quoteExcerpt, splitLeadingQuote } from "../../utils/quote";
+import { selectMessageVariant } from "../../utils/messageHistory";
 import { useAppStore } from "../../store/appStore";
 import { runtime } from "../../services/agentRuntime";
+import { EvidenceList } from "../workspace/ContextInspector";
+import { useWorkspaceViewStore } from "../../store/workspaceViewStore";
 
 export interface ChatMessageListProps {
   lang: string;
@@ -70,6 +76,7 @@ export interface ChatMessageListProps {
   modelCatalogSourceKey: string | null;
   setPrompt: (next: string | ((previous: string) => string)) => void;
   chatTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  onShowRun: (messageId?: string) => void;
 }
 
 export function ChatMessageList({
@@ -96,6 +103,7 @@ export function ChatMessageList({
   modelCatalogSourceKey,
   setPrompt,
   chatTextareaRef,
+  onShowRun,
 }: ChatMessageListProps) {
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setSessions = useAppStore((s) => s.setSessions);
@@ -294,11 +302,7 @@ export function ChatMessageList({
                   const newIdx = Math.max(0, (msg.currentVariantIndex || 0) - 1);
                   setSessions(prev => prev.map(s => s.id === currentSessionId ? {
                     ...s,
-                    messages: s.messages.map((m, i) => i === mIdx ? {
-                      ...m,
-                      currentVariantIndex: newIdx,
-                      content: m.variants![newIdx],
-                    } : m)
+                    messages: s.messages.map((m, i) => i === mIdx ? selectMessageVariant(m, newIdx) : m)
                   } : s));
                 }}
               >
@@ -314,11 +318,7 @@ export function ChatMessageList({
                   const newIdx = Math.min(msg.variants!.length - 1, (msg.currentVariantIndex || 0) + 1);
                   setSessions(prev => prev.map(s => s.id === currentSessionId ? {
                     ...s,
-                    messages: s.messages.map((m, i) => i === mIdx ? {
-                      ...m,
-                      currentVariantIndex: newIdx,
-                      content: m.variants![newIdx],
-                    } : m)
+                    messages: s.messages.map((m, i) => i === mIdx ? selectMessageVariant(m, newIdx) : m)
                   } : s));
                 }}
               >
@@ -344,7 +344,12 @@ export function ChatMessageList({
             {msg.role === "assistant" ? (
               <>
                 {/* Tool actions — rendered BEFORE content, in order */}
-                {msg.actions && msg.actions.length > 0 && <div className="agent-action-timeline">
+                {currentSession.sessionConfig.mode === "code" && !!msg.actions?.length && <button className="message-run-summary" onClick={() => onShowRun(msg.id)}>
+                  <Wrench size={14} /><span>{t("ui.tool-activity-count", lang, { count: String(msg.actions.length) })}</span>
+                  {msg.actions.some(action => action.status === "error" || action.status === "blocked") && <span className="message-run-error">{lang === "zh" ? "存在异常" : "Errors"}</span>}
+                  <ArrowRight size={13} />
+                </button>}
+                {currentSession.sessionConfig.mode !== "code" && msg.actions && msg.actions.length > 0 && <div className="agent-action-timeline">
                 <div className="agent-action-timeline-label">{t("ui.tool-activity-count", lang, { count: String(msg.actions.length) })}</div>
                 {msg.actions.map((act, aIdx) => (
                   <Fragment key={`${act.id}-${aIdx}`}>
@@ -480,14 +485,29 @@ export function ChatMessageList({
                 )}
 
                 {/* Markdown content — rendered AFTER tool actions */}
-                <div className="md-content">
-                  <MarkdownContent content={msg.content} lang={lang} />
+                <div className="md-content" onClick={event => {
+                  const link = (event.target as Element).closest("a");
+                  const href = link?.getAttribute("href");
+                  if (!href?.startsWith(`#kb-${msg.id}-`)) return;
+                  event.preventDefault();
+                  const target = document.getElementById(href.slice(1));
+                  if (target instanceof HTMLDetailsElement) {
+                    for (let element: HTMLElement | null = target; element; element = element.parentElement) { if (element instanceof HTMLDetailsElement) element.open = true; }
+                    target.scrollIntoView({ block: "nearest" });
+                  }
+                }}>
+                  <MarkdownContent content={msg.content.replace(/\[KB:([a-f0-9:]+)\]/g, (match, id: string) => {
+                    const index = msg.learningContext?.retrieval?.hits.findIndex(hit => hit.chunkId === id) ?? -1;
+                    return index >= 0 ? `[${index + 1}](#kb-${msg.id}-${id})` : match;
+                  })} lang={lang} />
                   {isStreamingMessage(msg, mIdx) && (
                     <span className="typing-cursor" />
                   )}
                 </div>
 
                 {/* Inline approval card */}
+                {msg.learningContext?.retrieval && <details className="message-evidence"><summary>{lang === "zh" ? "文档出处" : "Document sources"} · {msg.learningContext.retrieval.hits.length}</summary><EvidenceList hits={msg.learningContext.retrieval.hits} lang={lang} prefix={msg.id} /></details>}
+                {(msg.contextSnapshots?.length || msg.learningContext) && <button className="btn btn-sm context-open" onClick={() => { onShowRun(msg.id); useWorkspaceViewStore.getState().setTab(currentSessionId, "context"); }}><Braces size={13} />{lang === "zh" ? "查看上下文" : "Inspect context"}</button>}
                 {pendingApprovals &&
                   msg.actions?.some((a) =>
                     pendingApprovals.tool_calls.some((tc) => tc.id === a.id)
@@ -669,6 +689,7 @@ export function ChatMessageList({
       currentContextTokensBase,
       currentModelLimit,
       currentLocale,
+      onShowRun,
     ]
   );
 
@@ -679,15 +700,15 @@ export function ChatMessageList({
           style={currentSession.sessionConfig.backgroundImage ? { backgroundImage: `url(${currentSession.sessionConfig.backgroundImage})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>
           <div className="preview-placeholder">
             <div className="welcome-icon" style={{ display: "flex", justifyContent: "center" }}>
-              <img src={CaturtleLogo} alt="gxAgent" width="80" height="80" style={{ opacity: 0.95 }} />
+              <img src={CaturtleLogo} alt="" width="44" height="44" />
             </div>
-            <h2 className="welcome-title">{t("welcome.title", lang)}</h2>
-            <p className="welcome-desc">{t("welcome.desc", lang)}</p>
+            <h2 className="welcome-title">{currentSession.sessionConfig.mode === "code" ? (lang === "zh" ? "今天想完成什么？" : "What should we get done?") : (lang === "zh" ? "有什么想聊的？" : "What's on your mind?")}</h2>
             <div className="welcome-prompts">
-              {["welcome.prompt1", "welcome.prompt2", "welcome.prompt3", "welcome.prompt4"].map((key) => {
-                const text = t(key, lang);
+              {(currentSession.sessionConfig.mode === "code"
+                ? (lang === "zh" ? ["审查当前项目，列出需要优先修复的问题", "先分析实现方案，暂时不要修改文件", "运行测试并修复失败项"] : ["Review this project and prioritize the issues", "Propose an implementation plan without changing files", "Run the tests and fix failures"])
+                : [t("welcome.prompt1", lang), t("welcome.prompt2", lang), t("welcome.prompt3", lang)]).map((text) => {
                 return (
-                  <button type="button" className="welcome-prompt" key={key} onClick={() => {
+                  <button type="button" className="welcome-prompt" key={text} onClick={() => {
                     setPrompt(text);
                     requestAnimationFrame(() => chatTextareaRef.current?.focus());
                   }}>

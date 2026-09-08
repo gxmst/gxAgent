@@ -1,5 +1,6 @@
 import type { AppConfig, SessionConfig } from "../types";
 import { ROLE_PRESETS } from "../rolePresets";
+import { learningConfig } from "./learning";
 
 const withWebSearchPolicy = (
   tools: string[],
@@ -59,6 +60,8 @@ export function resolveRequestConfig(
         }
       : {}),
   };
+  resolved.code_engine = sessionConfig.mode === "code" ? sessionConfig.engine || globalConfig.code_engine || "native" : "native";
+  resolved.codex_model = sessionConfig.codexModel ?? globalConfig.codex_model ?? "";
 
   // role_prompt is deliberately request-only. Clear any stale value that may
   // have reached the global/profile object, then set it only for an explicitly
@@ -86,5 +89,9 @@ export function resolveRequestConfig(
   }
 
   resolved.tools_enabled = withWebSearchPolicy(globalConfig.tools_enabled, searchMode);
+  resolved.learning = { ...learningConfig(globalConfig),
+    ...(typeof sessionConfig.knowledgeEnabled === "boolean" ? { knowledge_enabled: sessionConfig.knowledgeEnabled } : {}),
+    ...(sessionConfig.skillIds ? { enabled_skills: sessionConfig.skillIds } : {}),
+  };
   return resolved;
 }

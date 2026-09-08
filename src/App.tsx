@@ -16,6 +16,7 @@ import "./styles/feedback.css";
 import "./styles/onboarding.css";
 import "./styles/workspace.css";
 import "./styles/integrations.css";
+import "./styles/workbench.css";
 import { ROLE_PRESETS, RolePreset } from "./rolePresets";
 import { useGlobalHotkeys } from "./components/shared/CommandSuggestions";
 import { exportAllSessions, importSessions, getToolStats } from "./utils/sessionHelpers";
@@ -29,6 +30,9 @@ import { SettingsModal } from "./components/settings/SettingsModal";
 import { SessionSettingsPanel } from "./components/settings/SessionSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { WorkspacePanel } from "./components/workspace/WorkspacePanel";
+import "./styles/learning.css";
+import { WorkbenchHeader } from "./components/workspace/WorkbenchHeader";
+import { EMPTY_FILE_VIEW, useWorkspaceViewStore } from "./store/workspaceViewStore";
 import { ConfirmDialog, type ConfirmationOptions } from "./components/shared/ConfirmDialog";
 import { t } from "./i18n";
 import { ChatMessageList } from "./components/chat/ChatMessageList";
@@ -44,8 +48,7 @@ import { useAgentRequest } from "./hooks/useAgentRequest";
 import { useSessionLifecycle } from "./hooks/useSessionLifecycle";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 
-const SETTINGS_TAB_ORDER = ["model", "chat", "agent", "search", "data"] as const;
-type SettingsTab = (typeof SETTINGS_TAB_ORDER)[number];
+import { SETTINGS_TAB_ORDER, settingsTabLabel, type SettingsTab } from "./components/settings/settingsNavigation";
 
 
 // ==========================================
@@ -69,7 +72,6 @@ import {
   FONT_OPTIONS,
   themeMode,
   modelCatalogForConfig,
-  modelCatalogKey,
   type ToolStatsDialog,
 } from "./appDefaults";
 
@@ -139,33 +141,24 @@ function App() {
   const activeRunSessionId = useAppStore((s) => s.activeRunSessionId);
   const preparingRequestSessionId = useAppStore((s) => s.preparingRequestSessionId);
   const runtimeBySession = useAppStore((s) => s.runtimeBySession);
-  const checkpointBySession = useAppStore((s) => s.checkpointBySession);
   const hasActiveRequest = activeRunSessionId !== null;
   const hasPendingRequest = hasActiveRequest || preparingRequestSessionId !== null;
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
-  const activeTab = useAppStore((s) => s.activeTab);
-  const setActiveTab = useAppStore((s) => s.setActiveTab);
-  const previewBySession = useAppStore((s) => s.previewBySession);
   const setPreviewBySession = useAppStore((s) => s.setPreviewBySession);
-  const previewSrc = previewBySession[currentSessionId] || "";
-  const setPreviewSrc = useCallback((next: string | ((previous: string) => string)) => {
-    setPreviewBySession((previous) => {
-      const current = previous[currentSessionId] || "";
-      const value = typeof next === "function" ? next(current) : next;
-      return { ...previous, [currentSessionId]: value };
-    });
-  }, [currentSessionId]);
-  const [previewDevice, setPreviewDevice] = useState<"desktop" | "mobile">("desktop");
   const [newProfileName, setNewProfileName] = useState("");
-  const modifiedFilesBySession = useAppStore((s) => s.modifiedFilesBySession);
   const setModifiedFilesBySession = useAppStore((s) => s.setModifiedFilesBySession);
-  const modifiedFiles = modifiedFilesBySession[currentSessionId] || {};
-  const [diffView, setDiffView] = useState(false);
-  const [rolePresetsOpen, setRolePresetsOpen] = useState(false);
-  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(() => window.innerWidth >= 1180);
+  const [mobilePane, setMobilePane] = useState<"conversation" | "review">("conversation");
+  const [selectedRunBySession, setSelectedRunBySession] = useState<Record<string, string | undefined>>({});
+  const showRun = useCallback((messageId?: string) => {
+    useWorkspaceViewStore.getState().setTab(currentSessionId, "activity");
+    setSelectedRunBySession(previous => ({ ...previous, [currentSessionId]: messageId }));
+    setRightPanelOpen(true);
+    setMobilePane("review");
+  }, [currentSessionId]);
   const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const [customPresets, setCustomPresets] = useState<RolePreset[]>(() => {
     try {
@@ -177,28 +170,10 @@ function App() {
     } catch { /* ignore */ }
     return [];
   });
-  const [customPresetForm, setCustomPresetForm] = useState(false);
-  const [editingCustomPreset, setEditingCustomPreset] = useState<RolePreset | null>(null);
   const [sessionSearch, setSessionSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const fileContent = useAppStore((s) => s.fileContent);
-  const setFileContent = useAppStore((s) => s.setFileContent);
-  const selectedFile = useAppStore((s) => s.selectedFile);
-  const setSelectedFile = useAppStore((s) => s.setSelectedFile);
   const workspaceBySession = useAppStore((s) => s.workspaceBySession);
-  const terminalLogsBySession = useAppStore((s) => s.terminalLogsBySession);
   const setTerminalLogsBySession = useAppStore((s) => s.setTerminalLogsBySession);
-  const terminalLogs = terminalLogsBySession[currentSessionId] || [];
-  const previewConsoleLogsBySession = useAppStore((s) => s.previewConsoleLogsBySession);
-  const setPreviewConsoleLogsBySession = useAppStore((s) => s.setPreviewConsoleLogsBySession);
-  const previewConsoleLogs = previewConsoleLogsBySession[currentSessionId] || [];
-  const setPreviewConsoleLogs = useCallback((next: { text: string; type: "log" | "error" | "warn" | "info" }[] | ((previous: { text: string; type: "log" | "error" | "warn" | "info" }[]) => { text: string; type: "log" | "error" | "warn" | "info" }[])) => {
-    setPreviewConsoleLogsBySession((previous) => {
-      const current = previous[currentSessionId] || [];
-      const value = typeof next === "function" ? next(current) : next;
-      return { ...previous, [currentSessionId]: value };
-    });
-  }, [currentSessionId]);
   const [confirmation, setConfirmation] = useState<ConfirmationOptions | null>(null);
   const confirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
   const confirmationReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -230,6 +205,7 @@ function App() {
   const sessions = useAppStore((s) => s.sessions);
   const setSessions = useAppStore((s) => s.setSessions);
   const [sessionStorageReady, setSessionStorageReady] = useState(false);
+  const [sessionLoadAttempt, setSessionLoadAttempt] = useState(0);
   const sessionMutationLocked = !sessionStorageReady || hasPendingRequest;
   const [sessionSaveStatus, setSessionSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [expandedActions, setExpandedActions] = useState<Record<string, boolean>>({});
@@ -250,25 +226,25 @@ function App() {
 
   // Resize state
   const [sidebarWidth, setSidebarWidth] = useState(() => {
-    try { const v = localStorage.getItem("gx_sidebar_width"); return v ? parseInt(v) : 220; } catch { return 220; }
+    try { const v = Number(localStorage.getItem("gx_sidebar_width")); return v > 0 && Number.isFinite(v) ? v : 280; } catch { return 280; }
   });
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
-    try { const v = localStorage.getItem("gx_right_panel_width"); return v ? parseInt(v) : 360; } catch { return 360; }
+    try { const v = Number(localStorage.getItem("gx_right_panel_width")); return v > 0 && Number.isFinite(v) ? Math.max(320, v) : 480; } catch { return 480; }
   });
   const [draggingSidebar, setDraggingSidebar] = useState(false);
   const [draggingRight, setDraggingRight] = useState(false);
 
-  const minChatWidthForViewport = () => window.innerWidth <= 980 ? 240 : 320;
+  const minChatWidthForViewport = () => window.innerWidth <= 800 ? 280 : 360;
   const maxSidebarWidthForViewport = () => {
-    const rightReservation = rightPanelOpen && window.innerWidth > 980 ? rightPanelWidth + 4 : 0;
+    const rightReservation = rightPanelOpen && window.innerWidth >= 1180 ? rightPanelWidth + 5 : 0;
     return Math.min(
       400,
       Math.max(180, window.innerWidth - rightReservation - 4 - minChatWidthForViewport()),
     );
   };
   const maxRightPanelWidthForViewport = () => Math.min(
-    600,
-    Math.max(200, window.innerWidth - sidebarWidth - 8 - minChatWidthForViewport()),
+    900,
+    Math.max(320, window.innerWidth - (window.innerWidth >= 1180 && navigationOpen ? sidebarWidth : 0) - 8 - minChatWidthForViewport()),
   );
 
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -292,6 +268,12 @@ function App() {
   // Set when the localStorage mirror write was skipped mid-stream, so the
   // next idle persist refreshes it even if nothing else changed.
   const mirrorPendingRef = useRef(false);
+  const persistLatestRef = useRef<((throwOnError?: boolean) => Promise<void>) | null>(null);
+  useEffect(() => {
+    const repaired = () => setSessionLoadAttempt(attempt => attempt + 1);
+    window.addEventListener("gx-session-storage-repaired", repaired);
+    return () => window.removeEventListener("gx-session-storage-repaired", repaired);
+  }, []);
   const sessionPersistenceEpochRef = useRef(0);
   const closeSessionSettings = useCallback((restoreFocus = false) => {
     setSessionSettingsOpen(false);
@@ -331,8 +313,7 @@ function App() {
   // and the separate archived section disappears for the duration.
   const { visibleSessions, archivedSessions, searchSnippets } = useMemo(() => {
     const query = debouncedSearch.trim();
-    const modeSessions = sessions
-      .filter((session) => (session.sessionConfig.mode || "chat") === sidebarNav);
+    const modeSessions = sessions;
     if (!query) {
       return {
         visibleSessions: modeSessions.filter((session) => !session.archived).sort(compareSidebarSessions),
@@ -346,7 +327,7 @@ function App() {
       archivedSessions: [] as ChatSession[],
       searchSnippets: Object.fromEntries(matches.map((match) => [match.session.id, match.snippet])),
     };
-  }, [debouncedSearch, sessions, sidebarNav]);
+  }, [debouncedSearch, sessions]);
   const tabbableSessionId = visibleSessions.some((session) => session.id === currentSessionId)
     ? currentSessionId
     : visibleSessions[0]?.id;
@@ -402,9 +383,23 @@ function App() {
   }, []);
 
   useEffect(() => {
-    setRightPanelOpen(currentMode === "code");
+    setRightPanelOpen(false);
+    setMobilePane("conversation");
     setSidebarNav(currentMode);
   }, [currentMode]);
+
+  useEffect(() => {
+    setMobilePane("conversation");
+    if (window.innerWidth < 1180) setNavigationOpen(false);
+    closeSessionSettings();
+  }, [currentSessionId, closeSessionSettings]);
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1180px)");
+    const onChange = () => setNavigationOpen(query.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
 
   // ==========================================
   // Theme
@@ -434,8 +429,6 @@ function App() {
       if (e.key === "Escape") {
         if (contextMenu) { setContextMenu(null); return; }
         if (toolStatsDialog) { setToolStatsDialog(null); return; }
-        if (rolePresetsOpen) { setRolePresetsOpen(false); setCustomPresetForm(false); setEditingCustomPreset(null); return; }
-        if (modelPickerOpen) { setModelPickerOpen(false); return; }
         if (settingsOpen) { setSettingsOpen(false); return; }
         if (sessionSettingsOpen) { closeSessionSettings(true); return; }
         if (rightPanelOpen && window.matchMedia("(max-width: 980px)").matches) {
@@ -447,7 +440,7 @@ function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [confirmation, contextMenu, modelPickerOpen, rightPanelOpen, rolePresetsOpen, sessionSettingsOpen, settingsOpen, settleConfirmation, toolStatsDialog]);
+  }, [confirmation, contextMenu, rightPanelOpen, sessionSettingsOpen, settingsOpen, settleConfirmation, toolStatsDialog]);
 
   useEffect(() => () => {
     confirmationResolverRef.current?.(false);
@@ -483,20 +476,6 @@ function App() {
     document.documentElement.style.setProperty("--app-font-family", selected.css);
   }, [config.font_family]);
 
-  useEffect(() => {
-    const handleIframeMessage = (event: MessageEvent) => {
-      if (event.data && event.data.type === "iframe-console-log") {
-        const { logType, text } = event.data;
-        const sessionId = useAppStore.getState().currentSessionId;
-        setPreviewConsoleLogsBySession((previous) => {
-          const next = [...(previous[sessionId] || []), { text, type: logType }];
-          return { ...previous, [sessionId]: next.length > 200 ? next.slice(-200) : next };
-        });
-      }
-    };
-    window.addEventListener("message", handleIframeMessage);
-    return () => window.removeEventListener("message", handleIframeMessage);
-  }, []);
 
   // ==========================================
   // Init logs with language
@@ -549,7 +528,7 @@ function App() {
 
     const onMouseMove = (ev: MouseEvent) => {
       const delta = startX - ev.clientX;
-      const newWidth = Math.max(200, Math.min(maxRightPanelWidthForViewport(), startWidth + delta));
+      const newWidth = Math.max(320, Math.min(maxRightPanelWidthForViewport(), startWidth + delta));
       latestWidth = newWidth;
       setRightPanelWidth(newWidth);
     };
@@ -561,7 +540,7 @@ function App() {
     };
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-  }, [rightPanelWidth, sidebarWidth]);
+  }, [rightPanelWidth, sidebarWidth, navigationOpen]);
 
   // Keep persisted panel widths from squeezing the conversation into an
   // unusable sliver after a window resize or a monitor change.
@@ -575,7 +554,7 @@ function App() {
         return next;
       });
       setRightPanelWidth((previous) => {
-        const next = Math.max(200, Math.min(maxRightPanelWidthForViewport(), previous));
+        const next = Math.max(320, Math.min(maxRightPanelWidthForViewport(), previous));
         if (next !== previous) {
           try { localStorage.setItem("gx_right_panel_width", String(next)); } catch { /* ignore */ }
         }
@@ -585,7 +564,7 @@ function App() {
     clampLayoutWidths();
     window.addEventListener("resize", clampLayoutWidths);
     return () => window.removeEventListener("resize", clampLayoutWidths);
-  }, [rightPanelOpen, rightPanelWidth, sidebarWidth]);
+  }, [rightPanelOpen, rightPanelWidth, sidebarWidth, navigationOpen]);
 
   // ==========================================
   // Init: Load config & presets
@@ -646,43 +625,52 @@ function App() {
     (async () => {
       const loadedSessions = await loadSessions();
       if (cancelled) return;
-      if (loadedSessions !== null) {
-        const storedSessions = normalizeSessions(loadedSessions);
-        const rawById = Object.fromEntries(loadedSessions
-          .filter((session): session is ChatSession => Boolean(session && typeof session === "object" && typeof session.id === "string"))
-          .map((session) => [session.id, JSON.stringify(session)]));
-        lastPersistedSessionsRef.current = rawById;
-        sessionJsonCacheRef.current = Object.fromEntries(
-          storedSessions.map((session) => [session.id, JSON.stringify(session)]),
-        );
-        // Keep migrated sessions dirty so backfilled stable message ids and
-        // token-budget conversions are written to the authoritative backend.
-        sessionObjCacheRef.current = Object.fromEntries(storedSessions
-          .filter((session) => rawById[session.id] === JSON.stringify(session))
-          .map((session) => [session.id, session]));
-        setSessions(storedSessions);
-        setCurrentSessionId((prev) =>
-          storedSessions.some((session) => session.id === prev) ? prev : storedSessions[0].id
-        );
-        try {
-          localStorage.setItem("gx_sessions", JSON.stringify(storedSessions));
-        } catch { /* backend remains authoritative */ }
+      if (loadedSessions === null) {
+        setSessionStorageReady(false);
+        setSessionSaveStatus("error");
+        notify(lang === "zh" ? "会话读取失败，已暂停保存。" : "Could not load sessions. Saving is paused.", "error", {
+          actionLabel: lang === "zh" ? "重试" : "Retry",
+          onAction: () => setSessionLoadAttempt((attempt) => attempt + 1),
+          duration: 0,
+        });
+        return;
       }
+      const storedSessions = normalizeSessions(loadedSessions);
+      const rawById = Object.fromEntries(loadedSessions
+        .filter((session): session is ChatSession => Boolean(session && typeof session === "object" && typeof session.id === "string"))
+        .map((session) => [session.id, JSON.stringify(session)]));
+      lastPersistedSessionsRef.current = rawById;
+      sessionJsonCacheRef.current = Object.fromEntries(
+        storedSessions.map((session) => [session.id, JSON.stringify(session)]),
+      );
+      // Keep migrated sessions dirty so backfilled stable message ids and
+      // token-budget conversions are written to the authoritative backend.
+      sessionObjCacheRef.current = Object.fromEntries(storedSessions
+        .filter((session) => rawById[session.id] === JSON.stringify(session))
+        .map((session) => [session.id, session]));
+      setSessions(storedSessions);
+      setCurrentSessionId((prev) =>
+        storedSessions.some((session) => session.id === prev) ? prev : storedSessions[0].id
+      );
+      try {
+        localStorage.setItem("gx_sessions", JSON.stringify(storedSessions));
+      } catch { /* backend remains authoritative */ }
 
       setSessionStorageReady(true);
+      setSessionSaveStatus("idle");
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [loadSessions]);
+  }, [loadSessions, sessionLoadAttempt]);
 
   useEffect(() => {
     if (!sessionStorageReady) return;
 
     let cancelled = false;
     const persistenceEpoch = sessionPersistenceEpochRef.current;
-    const persist = async () => {
+    const persist = async (throwOnError = false) => {
       if (persistenceEpoch !== sessionPersistenceEpochRef.current) return;
 
       // Incremental change detection: session objects are immutable-per-change
@@ -691,7 +679,8 @@ function App() {
       // stringifying the whole store on every change was a main-thread stall
       // that grew linearly with total history size.
       const dirty = sessions.filter((session) => sessionObjCacheRef.current[session.id] !== session);
-      if (dirty.length === 0 && !mirrorPendingRef.current) return;
+      if (dirty.length === 0 && !mirrorPendingRef.current
+        && sessions.every(session => lastPersistedSessionsRef.current[session.id] === sessionJsonCacheRef.current[session.id])) return;
       for (const session of dirty) {
         sessionJsonCacheRef.current[session.id] = JSON.stringify(session);
         sessionObjCacheRef.current[session.id] = session;
@@ -755,12 +744,11 @@ function App() {
       } catch (error) {
         if (!cancelled) setSessionSaveStatus("error");
         console.error("Failed to persist changed sessions:", error);
+        if (throwOnError) throw error;
       }
     };
 
-    // While streaming, defer persistence until tokens stop arriving. The
-    // stream-complete handler flips isStreaming, re-running this effect and
-    // persisting the final state once.
+    persistLatestRef.current = persist;
     const delay = hasActiveRequest ? 1500 : 400;
     const timer = setTimeout(() => { void persist(); }, delay);
     return () => {
@@ -768,6 +756,12 @@ function App() {
       clearTimeout(timer);
     };
   }, [saveSession, sessionStorageReady, sessions, hasActiveRequest]);
+
+  useEffect(() => {
+    if (!sessionStorageReady) return;
+    const timer = window.setInterval(() => { void persistLatestRef.current?.(); }, 5000);
+    return () => { window.clearInterval(timer); persistLatestRef.current = null; };
+  }, [sessionStorageReady]);
 
   useEffect(() => {
     try {
@@ -844,29 +838,23 @@ function App() {
       setModifiedFilesBySession((previous) => ({ ...previous, [currentSessionId]: {} }));
       setPreviewBySession((previous) => ({ ...previous, [currentSessionId]: "" }));
     }
-    runtime.fileRequestSequence[currentSessionId] = (runtime.fileRequestSequence[currentSessionId] || 0) + 1;
-    setFileContent(null);
-    setSelectedFile(null);
-    void refreshWorkspace(currentSessionId, effectiveWorkDir);
+    const views = useWorkspaceViewStore.getState();
+    if (views.files[currentSessionId]?.workDir !== effectiveWorkDir) {
+      runtime.fileRequestSequence[currentSessionId] = (runtime.fileRequestSequence[currentSessionId] || 0) + 1;
+      views.setFile(currentSessionId, { ...EMPTY_FILE_VIEW, workDir: effectiveWorkDir });
+    }
+    if (currentMode === "code" || rightPanelOpen) void refreshWorkspace(currentSessionId, effectiveWorkDir);
   }, [currentSessionId, effectiveWorkDir]);
 
   // ==========================================
   // Helpers
   // ==========================================
 
-  const {
-    selectWorkspaceFile,
-    attachWorkspaceFile,
-    selectGitEntry,
-    restoreGitEntry,
-    restoreRunCheckpoint,
-    acceptRunCheckpoint,
-  } = useWorkspaceActions({
+  const workspaceActions = useWorkspaceActions({
     lang,
     effectiveWorkDir,
     sessionMutationLocked,
     requestConfirmation,
-    setDiffView,
     attachmentsBySession,
     setAttachmentsBySession,
     attachmentLoadingBySession,
@@ -932,6 +920,7 @@ function App() {
   });
 
   const {
+    createNewSessionInMode,
     createNewSession,
     switchSidebarMode,
     replaceAllSessions,
@@ -959,7 +948,6 @@ function App() {
     setEditingMessageIdxBySession,
     setEditTextBySession,
     setExpandedActions,
-    setDiffView,
   });
   createNewSessionRef.current = createNewSession;
   switchSidebarModeRef.current = switchSidebarMode;
@@ -1095,23 +1083,17 @@ function App() {
     setSessions((previous) => moveSessionInSidebar(previous, sessionId, direction));
   };
 
-  const currentSettingsTabLabel = {
-    model: t("settings.tab.model", lang),
-    chat: t("settings.tab.chat", lang),
-    agent: t("settings.tab.agent", lang),
-    search: t("settings.tab.search", lang),
-    data: t("settings.tab.data", lang),
-  }[settingsTab];
+  const currentSettingsTabLabel = settingsTabLabel(settingsTab, lang);
 
   const handleSettingsTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     const currentIndex = SETTINGS_TAB_ORDER.indexOf(settingsTab);
     const nextIndex = event.key === "Home"
       ? 0
       : event.key === "End"
         ? SETTINGS_TAB_ORDER.length - 1
-        : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + SETTINGS_TAB_ORDER.length)
+        : (currentIndex + (["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : -1) + SETTINGS_TAB_ORDER.length)
           % SETTINGS_TAB_ORDER.length;
     const nextTab = SETTINGS_TAB_ORDER[nextIndex];
     setSettingsTab(nextTab);
@@ -1119,7 +1101,7 @@ function App() {
   };
 
   return (
-    <div className="app-container" onContextMenu={(e) => {
+    <div className={`app-container workbench mode-${currentMode} ${navigationOpen ? "navigation-open" : "navigation-closed"} mobile-pane-${mobilePane} ${rightPanelOpen ? "review-open" : "review-closed"}`} onContextMenu={(e) => {
       // 只在空白区域显示全局菜单
       if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains('chat-panel') || (e.target as HTMLElement).classList.contains('chat-messages')) {
         handleContextMenu(e);
@@ -1128,6 +1110,9 @@ function App() {
       <ToastStack />
 
       {/* ====== Sidebar ====== */}
+      <div className="workbench-body">
+      <div id="workbench-navigation" className="workbench-navigation" style={{ width: sidebarWidth }}>
+      <WorkbenchHeader lang={lang} config={config} setConfig={setConfig} navigationOpen={navigationOpen} onToggleNavigation={() => setNavigationOpen(open => !open)} onSettings={() => setSettingsOpen(true)} />
       <Sidebar
         lang={lang}
         config={config}
@@ -1151,9 +1136,9 @@ function App() {
         allPresets={ALL_PRESETS}
         addLog={addLog}
         getModelDisplayName={getModelDisplayName}
-        switchSidebarMode={switchSidebarMode}
         createNewSession={createNewSession}
-        setCurrentSessionId={setCurrentSessionId}
+        createProjectTask={(workDir) => { void createNewSessionInMode("code", workDir); }}
+        setCurrentSessionId={(id) => { setCurrentSessionId(id); if (window.innerWidth < 1180) setNavigationOpen(false); }}
         setSessions={setSessions}
         deleteSession={deleteSession}
         setSessionArchived={setSessionArchived}
@@ -1163,10 +1148,11 @@ function App() {
         setSettingsOpen={setSettingsOpen}
         setSessionSettingsOpen={setSessionSettingsOpen}
       />
+      </div>
 
       {/* Sidebar resize handle */}
       <div
-        className={`resize-divider ${draggingSidebar ? "dragging" : ""}`}
+        className={`resize-divider sidebar-divider ${draggingSidebar ? "dragging" : ""}`}
         onMouseDown={handleSidebarDrag}
         role="separator"
         aria-orientation="vertical"
@@ -1186,21 +1172,32 @@ function App() {
 
       {/* ====== Main Workspace ====== */}
       <div className="workspace-container">
+        <div className="mobile-workspace-tabs" role="group" aria-label={lang === "zh" ? "工作区视图" : "Workspace view"}>
+          <button aria-pressed={mobilePane === "conversation"} onClick={() => setMobilePane("conversation")}>{lang === "zh" ? (currentMode === "code" ? "任务" : "对话") : "Conversation"}</button>
+          <button aria-pressed={mobilePane === "review"} onClick={() => { setRightPanelOpen(true); setMobilePane("review"); }}>{lang === "zh" ? (currentMode === "code" ? "审查" : "资料") : "Workspace"}</button>
+        </div>
         {/* LEFT: Chat */}
         <section className="chat-panel">
           <ChatHeader
+            key={currentSessionId}
             lang={lang}
-            config={config}
-            setConfig={setConfig}
             currentSession={currentSession}
-            effectiveWorkDir={effectiveWorkDir}
+            navigationOpen={navigationOpen}
+            onToggleNavigation={() => setNavigationOpen(open => !open)}
+            onModeChange={switchSidebarMode}
+            disabled={!sessionStorageReady}
             sessionSaveStatus={sessionSaveStatus}
             sessionSettingsOpen={sessionSettingsOpen}
             setSessionSettingsOpen={setSessionSettingsOpen}
             sessionSettingsToggleRef={sessionSettingsToggleRef}
             rightPanelOpen={rightPanelOpen}
-            setRightPanelOpen={setRightPanelOpen}
+            setRightPanelOpen={(value) => { setRightPanelOpen(value); if (window.innerWidth <= 800) setMobilePane("review"); }}
+            onShowRun={() => showRun()}
           />
+          {!sessionStorageReady && <div className={`session-load-state ${sessionSaveStatus === "error" ? "error" : ""}`} role="status">
+            <span>{sessionSaveStatus === "error" ? (lang === "zh" ? "会话读取失败，保存已暂停。" : "Session loading failed. Saving is paused.") : (lang === "zh" ? "正在读取会话…" : "Loading conversations...")}</span>
+            {sessionSaveStatus === "error" && <button className="btn" onClick={() => setSessionLoadAttempt(attempt => attempt + 1)}>{lang === "zh" ? "重试" : "Retry"}</button>}
+          </div>}
 
           {/* Session Settings Panel */}
           {sessionSettingsOpen && (
@@ -1221,6 +1218,8 @@ function App() {
               setSessions={setSessions}
               undoCompact={undoCompact}
               requestConfirmation={requestConfirmation}
+              customPresets={customPresets}
+              setCustomPresets={setCustomPresets}
             />
           )}
 
@@ -1248,6 +1247,7 @@ function App() {
             modelCatalogSourceKey={modelCatalogSourceKey}
             setPrompt={setPrompt}
             chatTextareaRef={chatTextareaRef}
+            onShowRun={showRun}
           />
 
           <Composer
@@ -1269,91 +1269,54 @@ function App() {
             addFilesAsAttachments={addFilesAsAttachments}
             pickAndParseAttachments={pickAndParseAttachments}
             patchSessionConfig={patchSessionConfig}
-            allPresets={ALL_PRESETS}
-            customPresets={customPresets}
-            setCustomPresets={setCustomPresets}
-            rolePresetsOpen={rolePresetsOpen}
-            setRolePresetsOpen={setRolePresetsOpen}
-            modelPickerOpen={modelPickerOpen}
-            setModelPickerOpen={setModelPickerOpen}
-            customPresetForm={customPresetForm}
-            setCustomPresetForm={setCustomPresetForm}
-            editingCustomPreset={editingCustomPreset}
-            setEditingCustomPreset={setEditingCustomPreset}
-            setSidebarNav={setSidebarNav}
             getModelDisplayName={getModelDisplayName}
             cacheModelDisplayName={cacheModelDisplayName}
             modelsForCurrentConfig={modelsForCurrentConfig}
+            onSettings={() => setSessionSettingsOpen(true)}
+            effectiveWorkDir={effectiveWorkDir}
+            branch={currentWorkspace.branch}
           />
         </section>
 
         {/* Right panel resize handle */}
         {rightPanelOpen && (
           <div
-            className={`resize-divider ${draggingRight ? "dragging" : ""}`}
+            className={`resize-divider review-divider ${draggingRight ? "dragging" : ""}`}
             onMouseDown={handleRightDrag}
             role="separator"
             aria-orientation="vertical"
             aria-label={t("ui.resize-workspace-panel", lang)}
-            aria-valuemin={200}
-            aria-valuemax={600}
+            aria-valuemin={320}
+            aria-valuemax={maxRightPanelWidthForViewport()}
             aria-valuenow={rightPanelWidth}
             tabIndex={0}
             onKeyDown={(event) => {
               if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
               event.preventDefault();
-              const nextWidth = Math.max(200, Math.min(maxRightPanelWidthForViewport(), rightPanelWidth + (event.key === "ArrowLeft" ? 12 : -12)));
+              const nextWidth = Math.max(320, Math.min(maxRightPanelWidthForViewport(), rightPanelWidth + (event.key === "ArrowLeft" ? 12 : -12)));
               setRightPanelWidth(nextWidth);
               try { localStorage.setItem("gx_right_panel_width", String(nextWidth)); } catch { /* ignore */ }
             }}
           />
         )}
 
-        {rightPanelOpen && (
-          <button
-            type="button"
-            className="canvas-backdrop"
-            aria-label={t("ui.close-workspace-panel", lang)}
-            onClick={() => setRightPanelOpen(false)}
-          />
-        )}
-
         {/* RIGHT: Workspace */}
         <WorkspacePanel
+          key={`${currentSessionId}:${effectiveWorkDir}`}
           lang={lang}
           config={config}
-          currentSession={currentSession}
-          currentSessionId={currentSessionId}
-          rightPanelOpen={rightPanelOpen}
-          rightPanelWidth={rightPanelWidth}
-          setRightPanelOpen={setRightPanelOpen}
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          terminalLogs={terminalLogs}
-          statusLabel={statusLabel}
-          currentWorkspace={currentWorkspace}
-          refreshWorkspace={refreshWorkspace}
-          selectWorkspaceFile={selectWorkspaceFile}
-          attachWorkspaceFile={attachWorkspaceFile}
-          isAttachmentLoading={isAttachmentLoading}
-          selectGitEntry={selectGitEntry}
-          restoreGitEntry={restoreGitEntry}
-          checkpointBySession={checkpointBySession}
-          acceptRunCheckpoint={acceptRunCheckpoint}
-          restoreRunCheckpoint={restoreRunCheckpoint}
-          sessionMutationLocked={sessionMutationLocked}
-          selectedFile={selectedFile}
-          fileContent={fileContent}
-          modifiedFiles={modifiedFiles}
-          diffView={diffView}
-          setDiffView={setDiffView}
-          previewSrc={previewSrc}
-          setPreviewSrc={setPreviewSrc}
-          previewDevice={previewDevice}
-          setPreviewDevice={setPreviewDevice}
-          previewConsoleLogs={previewConsoleLogs}
-          setPreviewConsoleLogs={setPreviewConsoleLogs}
+          session={currentSession}
+          open={rightPanelOpen}
+          width={rightPanelWidth}
+          onClose={() => { setRightPanelOpen(false); setMobilePane("conversation"); }}
+          workspace={currentWorkspace}
+          onRefresh={() => { void refreshWorkspace(currentSessionId, effectiveWorkDir); }}
+          actions={workspaceActions}
+          attachmentsLoading={isAttachmentLoading}
+          disabled={sessionMutationLocked}
+          selectedRunId={selectedRunBySession[currentSessionId]}
         />
+      </div>
       </div>
 
       {/* ====== Settings Modal ====== */}
@@ -1363,10 +1326,6 @@ function App() {
           config={config}
           setConfig={setConfig}
           models={modelsForGlobalConfig}
-          setModels={(list) => {
-            setModels(list);
-            setModelCatalogSourceKey(modelCatalogKey(config));
-          }}
           modelsLoading={modelsLoading}
           settingsTab={settingsTab}
           setSettingsTab={setSettingsTab}
@@ -1395,6 +1354,11 @@ function App() {
           presets={presets}
           applyPreset={applyPreset}
           sessionMutationLocked={sessionMutationLocked}
+          createSessionSnapshot={async () => {
+            if (sessionMutationLocked || !persistLatestRef.current) throw new Error(lang === "zh" ? "会话存储尚未就绪" : "Task storage is not ready");
+            await persistLatestRef.current(true);
+            await invoke("create_session_backup");
+          }}
           hasAttachmentLoading={hasAttachmentLoading}
           replaceAllSessions={replaceAllSessions}
           requestConfirmation={requestConfirmation}

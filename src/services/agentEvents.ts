@@ -9,6 +9,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store/appStore";
+import { useWorkspaceViewStore } from "../store/workspaceViewStore";
 import { runtime, uiCallbacks } from "./agentRuntime";
 import { t } from "../i18n";
 import {
@@ -21,6 +22,10 @@ import {
 } from "../appDefaults";
 import { normalizeGeneratedTitle } from "../utils/sessionTitle";
 import type { Message, ToolAction, PendingApproval, SearchStatus } from "../types";
+import { useCodexStore, type CodexQuestion } from "../store/codexStore";
+import { rememberCodexHistory } from "./codexWorkflow";
+import { normalizeLearningContext, normalizeSnapshots } from "../utils/learning";
+import type { ContextSnapshot, LearningContext } from "../types";
 // Type-only imports: erased at compile time, so no runtime dependency on components.
 import type { DirectoryNode } from "../components/workspace/WorkspaceTree";
 import type { GitStatusEntry } from "../components/workspace/WorkspaceChanges";
@@ -46,9 +51,11 @@ export const notify = (
     actionLabel: options?.actionLabel,
     onAction: options?.onAction,
   }]);
-  window.setTimeout(() => {
-    store().setToasts((prev) => prev.filter((toast) => toast.id !== id));
-  }, options?.duration ?? 3200);
+  if (options?.duration !== 0) {
+    window.setTimeout(() => {
+      store().setToasts((prev) => prev.filter((toast) => toast.id !== id));
+    }, options?.duration ?? 3200);
+  }
 };
 
 export const addLog = (
@@ -175,7 +182,12 @@ const ensureRequestAssistant = (
   initial: Partial<Message> = {},
 ) => {
   const existingIndex = findRequestAssistantIndex(messages, requestId);
-  if (existingIndex >= 0) return existingIndex;
+  if (existingIndex >= 0) {
+    if (requestId && messages[existingIndex].run?.requestId !== requestId) {
+      messages[existingIndex] = { ...messages[existingIndex], run: { requestId, status: "running", startedAt: Date.now() } };
+    }
+    return existingIndex;
+  }
   if (!requestId && messages.length > 0 && messages[messages.length - 1].role === "assistant") {
     return messages.length - 1;
   }
@@ -188,6 +200,7 @@ const ensureRequestAssistant = (
     timestamp: Date.now(),
     model: runtime.activeRequestModel,
     contextTokens: runtime.activeRequestContextTokens,
+    run: { requestId, status: "running", startedAt: Date.now() },
     ...initial,
   };
   messages.push(message);
@@ -209,18 +222,45 @@ const updateRequestAssistantAction = (
   messages[assistantIndex] = assistant;
 };
 
-export const finishStreamingLocally = (expectedRequestId = runtime.activeRequestId) => {
+export const finishStreamingLocally = (
+  expectedRequestId = runtime.activeRequestId,
+  status?: "completed" | "stopped" | "error",
+) => {
   if (expectedRequestId && runtime.activeRequestId && expectedRequestId !== runtime.activeRequestId) return;
   flushStreamBufferNow();
   const sessionId = runtime.activeRequestSessionId;
+  if (sessionId && expectedRequestId) {
+    const finalStatus = status || (store().runtimeBySession[sessionId]?.status === "stopping" ? "stopped" : "completed");
+    store().setSessions(sessions => sessions.map(session => {
+      if (session.id !== sessionId) return session;
+      const index = findRequestAssistantIndex(session.messages, expectedRequestId);
+      if (index < 0) return session;
+      const messages = [...session.messages];
+      const message = messages[index];
+      messages[index] = { ...message, actions: message.actions?.map(action =>
+        ["drafting", "executing", "pending_approval"].includes(action.status)
+          ? { ...action, status: finalStatus === "error" ? "error" : "blocked", output: action.output || (finalStatus === "stopped" ? "Run stopped before this action completed." : "Run ended before this action completed.") }
+          : action), run: {
+        requestId: expectedRequestId,
+        startedAt: message.run?.startedAt || message.timestamp || Date.now(),
+        status: finalStatus,
+        finishedAt: Date.now(),
+      } };
+      return { ...session, messages, updatedAt: Date.now() };
+    }));
+    if (runtime.activeRequestEngine === "codex" && runtime.activeCodexTurnStarted && (finalStatus === "completed" || finalStatus === "stopped")) rememberCodexHistory(sessionId);
+  }
   if (expectedRequestId) {
     delete runtime.requestSessionById[expectedRequestId];
     delete runtime.assistantMessageIdByRequest[expectedRequestId];
   }
   runtime.isStreaming = false;
+  runtime.activeCodexTurnStarted = false;
+  runtime.activeRequestEngine = "native";
   runtime.activeRequestId = "";
   runtime.activeRequestSessionId = "";
   if (sessionId) {
+    useCodexStore.getState().setQuestion(sessionId, null);
     store().setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: null }));
     store().setApprovalSubmittingBySession((previous) => ({ ...previous, [sessionId]: false }));
     store().setRuntimeBySession((previous) => ({ ...previous, [sessionId]: null }));
@@ -355,6 +395,44 @@ export async function initAgentEventListeners(): Promise<() => void> {
   const unlisteners: (() => void)[] = [];
 
   async function setup() {
+    unlisteners.push(await listen<{ requestId: string; snapshot: ContextSnapshot }>("agent-context", event => {
+      if (!isCurrentRequestPayload(event.payload)) return;
+      const snapshots = normalizeSnapshots([event.payload.snapshot]);
+      if (!snapshots?.length) return;
+      const sessionId = agentEventSessionId(event.payload);
+      store().setSessions(previous => previous.map(session => {
+        if (session.id !== sessionId) return session;
+        const messages = [...session.messages];
+        const index = ensureRequestAssistant(messages, event.payload.requestId);
+        messages[index] = { ...messages[index], contextSnapshots: [...(messages[index].contextSnapshots || []), ...snapshots].slice(-6) };
+        return { ...session, messages };
+      }));
+    }));
+    unlisteners.push(await listen<{ requestId: string; learning: LearningContext }>("agent-learning-context", event => {
+      if (!isCurrentRequestPayload(event.payload)) return;
+      const learningContext = normalizeLearningContext(event.payload.learning);
+      if (!learningContext) return;
+      const sessionId = agentEventSessionId(event.payload);
+      store().setSessions(previous => previous.map(session => {
+        if (session.id !== sessionId) return session;
+        const messages = [...session.messages];
+        const index = ensureRequestAssistant(messages, event.payload.requestId);
+        messages[index] = { ...messages[index], learningContext };
+        return { ...session, messages };
+      }));
+    }));
+    unlisteners.push(await listen<{ requestId: string; threadId: string; workDir: string; model?: string }>("agent-codex-thread", event => {
+      if (!isCurrentRequestPayload(event.payload)) return;
+      runtime.activeCodexTurnStarted = true;
+      const sessionId = agentEventSessionId(event.payload);
+      const { threadId, workDir, model } = event.payload;
+      if (model) runtime.activeRequestModel = model;
+      store().setSessions(sessions => sessions.map(session => session.id === sessionId ? { ...session, codexThread: { id: threadId, workDir, historyKey: "" } } : session));
+    }));
+    unlisteners.push(await listen<{ requestId: string; question: CodexQuestion | null }>("agent-codex-question", event => {
+      if (!isCurrentRequestPayload(event.payload)) return;
+      useCodexStore.getState().setQuestion(agentEventSessionId(event.payload), event.payload.question);
+    }));
     unlisteners.push(
       await listen<void>("open-settings", () => {
         store().setSettingsOpen(true);
@@ -537,7 +615,8 @@ export async function initAgentEventListeners(): Promise<() => void> {
         "agent-tool-drafting",
         (event) => {
           if (!isCurrentRequestPayload(event.payload)) return;
-          const { index, id: toolId, name, arguments: args } = event.payload;
+          const { id: toolId, name, arguments: args } = event.payload;
+          if (!toolId) return;
           const sessionId = agentEventSessionId(event.payload);
           const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
           store().setSessions((prev) =>
@@ -547,18 +626,16 @@ export async function initAgentEventListeners(): Promise<() => void> {
               const assistantIndex = ensureRequestAssistant(messages, requestId);
               const assistant = { ...messages[assistantIndex] };
               const actions = assistant.actions ? [...assistant.actions] : [];
-              if (index >= actions.length || !actions[index]) {
-                actions[index] = {
-                  id: toolId || `tc-${index}-${Date.now()}`,
+              const index = actions.findIndex((action) => action.id === toolId);
+              if (index < 0) {
+                actions.push({
+                  id: toolId,
                   name,
                   arguments: args,
                   status: "drafting",
-                };
-              } else {
-                actions[index] = { ...actions[index], arguments: args };
-                if (toolId && actions[index].id.startsWith("tc-")) {
-                  actions[index].id = toolId;
-                }
+                });
+              } else if (actions[index].status === "drafting") {
+                actions[index] = { ...actions[index], name: name || actions[index].name, arguments: args };
               }
               assistant.actions = actions;
               messages[assistantIndex] = assistant;
@@ -724,16 +801,15 @@ export async function initAgentEventListeners(): Promise<() => void> {
             if (filePath && event.payload.afterExists && typeof content === "string") {
               if (!isErrorOutput && /\.(html?|svg)$/i.test(filePath)) {
                 store().setPreviewBySession((previous) => ({ ...previous, [sessionId]: content }));
-                if (store().currentSessionId === sessionId) store().setActiveTab("preview");
               }
               const absoluteFilePath = resolveWorkspacePath(runtime.activeRequestWorkDir, filePath);
-              const selectedFile = store().selectedFile;
-              if (runtime.effectiveWorkDir === runtime.activeRequestWorkDir
-                && selectedFile
-                && comparableWorkspacePath(selectedFile) === comparableWorkspacePath(absoluteFilePath)) {
-                const visibleSessionId = store().currentSessionId;
-                runtime.fileRequestSequence[visibleSessionId] = (runtime.fileRequestSequence[visibleSessionId] || 0) + 1;
-                store().setFileContent(content);
+              const views = useWorkspaceViewStore.getState();
+              for (const [viewSessionId, file] of Object.entries(views.files)) {
+                if (comparableWorkspacePath(file.workDir) !== comparableWorkspacePath(runtime.activeRequestWorkDir)
+                  || !file.path
+                  || comparableWorkspacePath(resolveWorkspacePath(file.workDir, file.path)) !== comparableWorkspacePath(absoluteFilePath)) continue;
+                runtime.fileRequestSequence[viewSessionId] = (runtime.fileRequestSequence[viewSessionId] || 0) + 1;
+                views.setFile(viewSessionId, { content, loading: false, error: "" });
               }
             }
           }
@@ -816,6 +892,9 @@ export async function initAgentEventListeners(): Promise<() => void> {
         if (!isCurrentRequestPayload(event.payload)) return;
         const sessionId = agentEventSessionId(event.payload);
         const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
+        const pending = store().pendingApprovalsBySession[sessionId];
+        if (event.payload.approvalRequestId && pending?.request_id !== event.payload.approvalRequestId) return;
+        const itemIds = new Set(pending?.tool_calls.map(call => call.id));
         store().setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: null }));
         store().setSessions((prev) => prev.map((session) => {
           if (session.id !== sessionId) return session;
@@ -824,10 +903,28 @@ export async function initAgentEventListeners(): Promise<() => void> {
           if (assistantIndex < 0) return session;
           const assistant = { ...messages[assistantIndex] };
           if (assistant.role !== "assistant" || !assistant.actions) return session;
-          assistant.actions = assistant.actions.map((action) => action.status === "pending_approval"
-            ? { ...action, status: "blocked" as const, output: "Approval cancelled by user steering." }
+          assistant.actions = assistant.actions.map((action) => action.status === "pending_approval" && (!pending || itemIds.has(action.id))
+            ? { ...action, status: "blocked" as const, output: "Approval is no longer pending." }
             : action);
           messages[assistantIndex] = assistant;
+          return { ...session, messages };
+        }));
+      })
+    );
+
+    unlisteners.push(
+      await listen<{ requestId: string; approvalRequestId: string; itemId: string; approved: boolean }>("agent-tool-approval-resolved", (event) => {
+        if (!isCurrentRequestPayload(event.payload)) return;
+        const { requestId, approvalRequestId, itemId, approved } = event.payload;
+        const sessionId = agentEventSessionId(event.payload);
+        store().setPendingApprovalsBySession(previous => previous[sessionId]?.request_id === approvalRequestId
+          ? { ...previous, [sessionId]: null } : previous);
+        store().setSessions(previous => previous.map(session => {
+          if (session.id !== sessionId) return session;
+          const messages = [...session.messages];
+          updateRequestAssistantAction(messages, requestId, itemId, action => action.status === "pending_approval"
+            ? { ...action, status: approved ? "executing" : "blocked", ...(approved ? {} : { output: "Declined by user." }) }
+            : action);
           return { ...session, messages };
         }));
       })
@@ -837,6 +934,7 @@ export async function initAgentEventListeners(): Promise<() => void> {
       await listen<{
         requestId?: string;
         content?: string;
+        authoritative?: boolean;
         loopCount?: number;
         ttftMs?: number;
         responseTimeMs?: number;
@@ -850,10 +948,20 @@ export async function initAgentEventListeners(): Promise<() => void> {
           prev.map((s) => {
             if (s.id !== sessionId) return s;
             const messages = [...s.messages];
-            const assistantIndex = findRequestAssistantIndex(messages, requestId);
+            const authoritative = done.authoritative === true && typeof done.content === "string";
+            const assistantIndex = authoritative
+              ? ensureRequestAssistant(messages, requestId)
+              : findRequestAssistantIndex(messages, requestId);
             if (assistantIndex < 0) return s;
             const assistant = { ...messages[assistantIndex] };
             if (assistant.role !== "assistant") return s;
+            if (authoritative) {
+              const variantIndex = assistant.currentVariantIndex || 0;
+              assistant.content = done.content!;
+              assistant.variants = [...(assistant.variants || [assistant.content])];
+              assistant.variants[variantIndex] = assistant.content;
+              assistant.currentVariantIndex = variantIndex;
+            }
             const usage = assistant.usage || {
               promptTokens: assistant.contextTokens || runtime.activeRequestContextTokens || 0,
               completionTokens: estimateTextTokens(assistant.content),
@@ -905,7 +1013,7 @@ export async function initAgentEventListeners(): Promise<() => void> {
         if (visibleSessionId !== sessionId && runtime.effectiveWorkDir === completedWorkDir) {
           void refreshWorkspace(visibleSessionId, completedWorkDir);
         }
-        finishStreamingLocally(requestId);
+        finishStreamingLocally(requestId, status === "cancelled" ? "stopped" : status === "error" ? "error" : "completed");
         const eventLang = runtime.lang;
         addLog(status === "cancelled" ? (eventLang === "zh" ? "已停止当前输出。" : "Current output stopped.") : t("log.complete", eventLang), "info", false, sessionId);
         if (status !== "cancelled" && status !== "error" && runtime.pendingTitleBySession[sessionId]) {

@@ -1,11 +1,3 @@
-/**
- * The full settings dialog: five tabs (model/chat/agent/search/data),
- * API profiles, whitelist and MCP management, import/export.
- *
- * Extracted verbatim from App.tsx; all state still lives in App and comes
- * in through props, so behavior is unchanged. Splitting the tabs into
- * their own components (and giving them local state) is the follow-up.
- */
 import type { KeyboardEvent, RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog } from "radix-ui";
@@ -17,7 +9,6 @@ import {
   Plus,
   RefreshCw,
   Save,
-  Search,
   Server,
   Settings2,
   ShieldAlert,
@@ -28,6 +19,7 @@ import {
   Upload,
   X,
   Zap,
+  Wrench,
 } from "lucide-react";
 import { t } from "../../i18n";
 import type { AppConfig, ChatSession, ModelInfo, ProviderPreset } from "../../types";
@@ -37,25 +29,27 @@ import {
   LANGUAGE_OPTIONS,
   MAX_CONTEXT_BUDGET,
   THEME_OPTIONS,
-  TOOL_NAMES,
   createDefaultSession,
   formatContextBudget,
-  toolIcon,
 } from "../../appDefaults";
 import { SecretInput } from "../shared/SecretInput";
-import { McpAddForm } from "../mcp/McpAddForm";
-import { McpServerManager, type McpServerView } from "../mcp/McpServerManager";
+import { type McpServerView } from "../mcp/McpServerManager";
+import { ToolsSettings } from "./ToolsSettings";
+import { EngineSettings } from "./EngineSettings";
+import { SkillsSettings } from "./SkillsSettings";
+import { KnowledgeSettings } from "./KnowledgeSettings";
+import { BackupSettings } from "./BackupSettings";
+import { useAppStore } from "../../store/appStore";
 import type { ConfirmationOptions } from "../shared/ConfirmDialog";
 import { sortModels, sortProfileEntries } from "../../utils/modelSorting";
 
-type SettingsTab = "model" | "chat" | "agent" | "search" | "data";
+import { settingsTabLabel, type SettingsTab } from "./settingsNavigation";
 
 export interface SettingsModalProps {
   lang: string;
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   models: ModelInfo[];
-  setModels: (models: ModelInfo[]) => void;
   modelsLoading: boolean;
   settingsTab: SettingsTab;
   setSettingsTab: React.Dispatch<React.SetStateAction<SettingsTab>>;
@@ -84,6 +78,7 @@ export interface SettingsModalProps {
   presets: ProviderPreset[];
   applyPreset: (preset: ProviderPreset) => void;
   sessionMutationLocked: boolean;
+  createSessionSnapshot: () => Promise<void>;
   hasAttachmentLoading: boolean;
   replaceAllSessions: (sessions: ChatSession[], currentId: string) => void;
   requestConfirmation: (options: ConfirmationOptions) => Promise<boolean>;
@@ -91,7 +86,7 @@ export interface SettingsModalProps {
 
 export function SettingsModal(props: SettingsModalProps) {
   const {
-    lang, config, setConfig, models, setModels, modelsLoading,
+    lang, config, setConfig, models, modelsLoading,
     settingsTab, setSettingsTab, setSettingsOpen, settingsBodyRef,
     handleSettingsTabKeyDown, currentSettingsTabLabel,
     newProfileName, setNewProfileName, handleSaveProfile,
@@ -100,9 +95,11 @@ export function SettingsModal(props: SettingsModalProps) {
     customGlobalContextBudget, setCustomGlobalContextBudget,
     toggleTool, removeTrustedPattern, mcpStatusByName, testMcpServer,
     deleteMcpServer, presets, applyPreset, sessionMutationLocked,
-    hasAttachmentLoading, replaceAllSessions, requestConfirmation,
+    hasAttachmentLoading, replaceAllSessions, requestConfirmation, createSessionSnapshot,
   } = props;
   const profileEntries = sortProfileEntries(Object.entries(config.profiles), lang);
+  const selectedWorkDir = useAppStore(s => s.sessions.find(session => session.id === s.currentSessionId)?.sessionConfig.workDir);
+  const projectConfig = { ...config, default_work_dir: selectedWorkDir || config.default_work_dir };
   const configuredModelIds = new Set(profileEntries.map(([, profile]) => profile.default_model));
   const otherModels = sortModels(
     models.filter((model) => !configuredModelIds.has(model.id)),
@@ -148,11 +145,14 @@ export function SettingsModal(props: SettingsModalProps) {
 
         <div className="settings-tabs" role="tablist" aria-label={t("settings.title", lang)}>
           {([
-            { id: "model" as const, label: t("settings.tab.model", lang), icon: <Zap size={14} /> },
-            { id: "chat" as const, label: t("settings.tab.chat", lang), icon: <MessageSquare size={14} /> },
-            { id: "agent" as const, label: t("settings.tab.agent", lang), icon: <ShieldAlert size={14} /> },
-            { id: "search" as const, label: t("settings.tab.search", lang), icon: <Globe size={14} /> },
-            { id: "data" as const, label: t("settings.tab.data", lang), icon: <Server size={14} /> },
+            { id: "model" as const, label: settingsTabLabel("model", lang), icon: <Zap size={14} /> },
+            { id: "chat" as const, label: settingsTabLabel("chat", lang), icon: <MessageSquare size={14} /> },
+            { id: "agent" as const, label: settingsTabLabel("agent", lang), icon: <ShieldAlert size={14} /> },
+            { id: "tools" as const, label: settingsTabLabel("tools", lang), icon: <Wrench size={14} /> },
+            { id: "skills" as const, label: settingsTabLabel("skills", lang), icon: <Settings2 size={14} /> },
+            { id: "knowledge" as const, label: settingsTabLabel("knowledge", lang), icon: <Server size={14} /> },
+            { id: "search" as const, label: settingsTabLabel("search", lang), icon: <Globe size={14} /> },
+            { id: "data" as const, label: settingsTabLabel("data", lang), icon: <Server size={14} /> },
           ]).map((tab) => (
             <button
               key={tab.id}
@@ -174,6 +174,9 @@ export function SettingsModal(props: SettingsModalProps) {
         </div>
 
         <div ref={settingsBodyRef} className="modal-body settings-modal-body">
+          {settingsTab === "tools" && <ToolsSettings lang={lang} config={config} setConfig={setConfig} toggleTool={toggleTool} statuses={mcpStatusByName} onTest={testMcpServer} onDelete={deleteMcpServer} addLog={addLog} requestConfirmation={requestConfirmation} />}
+          {settingsTab === "skills" && <SkillsSettings config={projectConfig} setConfig={setConfig} lang={lang} />}
+          {settingsTab === "knowledge" && <KnowledgeSettings config={projectConfig} setConfig={setConfig} lang={lang} requestConfirmation={requestConfirmation} />}
           {/* ===== Tab 1: 模型与 API ===== */}
           {settingsTab === "model" && (
           <section
@@ -183,6 +186,7 @@ export function SettingsModal(props: SettingsModalProps) {
             aria-labelledby="settings-tab-model"
           >
           {/* API Profiles */}
+          <EngineSettings lang={lang} config={config} setConfig={setConfig} />
           <div className="form-group settings-wide">
             <label className="form-label">{t("profile.title", lang)}</label>
             <div className="profile-list">
@@ -527,32 +531,9 @@ export function SettingsModal(props: SettingsModalProps) {
             />
           </div>
 
-          <div className="form-group settings-wide">
-            <label className="form-label">{t("settings.tools", lang)}</label>
-            <div className="tools-grid tool-card-grid">
-              {TOOL_NAMES.map((tool) => (
-                <button
-                  key={tool.key}
-                  onClick={() => toggleTool(tool.key)}
-                  className={`tool-card-toggle ${config.tools_enabled.includes(tool.key) ? "active" : ""}`}
-                >
-                  <span className="tool-card-icon">{toolIcon(tool.key, 13)}</span>
-                  <span className="tool-card-body">
-                    <span className="tool-card-title">{tool.label}</span>
-                    <span className="tool-card-desc">{tool.description}</span>
-                  </span>
-                  <span className={`tool-risk ${tool.risk}`}>{tool.risk}</span>
-                </button>
-              ))}
-            </div>
-            <div className="tool-suggestion-note">
-              {t("ui.tool-suggestion-note", lang)}
-            </div>
-          </div>
-
           {/* Whitelist Management */}
           <div className="form-group settings-wide">
-            <label className="form-label">{t("whitelist.title", lang)}</label>
+            <label className="form-label">gxAgent {t("whitelist.title", lang)}</label>
             <div className="whitelist-container">
               {config.trusted_patterns.length === 0 ? (
                 <div className="whitelist-empty">{t("whitelist.empty", lang)}</div>
@@ -592,7 +573,7 @@ export function SettingsModal(props: SettingsModalProps) {
           </div>
 
           <div className="form-group">
-            <label className="form-label"><Timer size={12} /> {t("settings.commandTimeout", lang)}</label>
+            <label className="form-label"><Timer size={12} /> gxAgent {t("settings.commandTimeout", lang)}</label>
             <input
               type="number"
               className="input-text"
@@ -604,7 +585,7 @@ export function SettingsModal(props: SettingsModalProps) {
           </div>
 
           <div className="form-group">
-            <label className="form-label">{t("settings.maxAgentLoops", lang)}</label>
+            <label className="form-label">gxAgent {t("settings.maxAgentLoops", lang)}</label>
             <input
               type="number"
               className="input-text"
@@ -616,7 +597,7 @@ export function SettingsModal(props: SettingsModalProps) {
           </div>
 
           <div className="form-group">
-            <label className="form-label">{t("settings.maxToolCalls", lang)}</label>
+            <label className="form-label">gxAgent {t("settings.maxToolCalls", lang)}</label>
             <input
               type="number"
               className="input-text"
@@ -697,52 +678,8 @@ export function SettingsModal(props: SettingsModalProps) {
             role="tabpanel"
             aria-labelledby="settings-tab-data"
           >
-          <div className="settings-panel">
-            <div className="settings-panel-header">
-              <span><Server size={13} /> {t("mcp.title", lang)}</span>
-              <span>{Object.keys(config.mcp_servers).length}</span>
-            </div>
-            <McpServerManager
-              lang={lang}
-              servers={Object.entries(config.mcp_servers).map(([name, server]) => ({
-                name,
-                command: server.command,
-                args: server.args || [],
-                state: mcpStatusByName[name]?.state || "stopped",
-                toolCount: mcpStatusByName[name]?.toolCount,
-                message: mcpStatusByName[name]?.message,
-              }))}
-              onTest={(name) => { void testMcpServer(name); }}
-              onDelete={(name) => { void deleteMcpServer(name); }}
-            />
-            <McpAddForm setConfig={setConfig} addLog={addLog} lang={lang} t={t} config={config} />
-          </div>
-
-          {/* Ollama Model Fetch */}
-          {config.provider === "ollama" && (
-            <div className="settings-panel">
-              <div className="settings-panel-header">
-                <span><Zap size={13} /> Ollama</span>
-              </div>
-              <button
-                className="settings-action-card"
-                onClick={async () => {
-                  try {
-                    const list = await invoke<ModelInfo[]>("fetch_ollama_models", { baseUrl: config.base_url });
-                    setModels(list);
-                    addLog(t("log.modelsFetched", lang, { count: String(list.length), url: config.base_url }), "success");
-                  } catch (e) {
-                    addLog(t("log.modelsFailed", lang) + String(e), "error");
-                  }
-                }}
-              >
-                <Search size={14} />
-                <span>{t("mcp.fetchModels", lang)}</span>
-              </button>
-            </div>
-          )}
-
           {/* Export / Import / Clear */}
+          <BackupSettings lang={lang} disabled={sessionMutationLocked || hasAttachmentLoading} hasAttachmentLoading={hasAttachmentLoading} createSnapshot={createSessionSnapshot} requestConfirmation={requestConfirmation} />
           <div className="settings-panel">
             <div className="settings-panel-header">
               <span><Save size={13} /> {t("settings.tab.data", lang)}</span>

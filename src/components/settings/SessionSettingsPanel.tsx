@@ -8,7 +8,7 @@
  */
 import type { RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Popover } from "radix-ui";
+import { Dialog } from "radix-ui";
 import { RotateCcw, X } from "lucide-react";
 import { t } from "../../i18n";
 import type { AppConfig, ChatSession, ModelInfo, SessionConfig } from "../../types";
@@ -21,6 +21,9 @@ import {
 } from "../../appDefaults";
 import type { ConfirmationOptions } from "../shared/ConfirmDialog";
 import { sortModels, sortProfileEntries } from "../../utils/modelSorting";
+import type { RolePreset } from "../../rolePresets";
+import { RolePresetManager } from "./RolePresetManager";
+import { SessionLearningSettings } from "./SessionLearningSettings";
 
 export interface SessionSettingsPanelProps {
   lang: string;
@@ -39,6 +42,8 @@ export interface SessionSettingsPanelProps {
   setSessions: React.Dispatch<React.SetStateAction<ChatSession[]>>;
   undoCompact: () => void;
   requestConfirmation: (options: ConfirmationOptions) => Promise<boolean>;
+  customPresets: RolePreset[];
+  setCustomPresets: React.Dispatch<React.SetStateAction<RolePreset[]>>;
 }
 
 export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
@@ -47,8 +52,9 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
     models, runtimeBySession, sessionMutationLocked,
     customSessionContextBudget, setCustomSessionContextBudget,
     sessionSettingsPanelRef, closeSessionSettings, patchSessionConfig,
-    setSessions, undoCompact, requestConfirmation,
+    setSessions, undoCompact, requestConfirmation, customPresets, setCustomPresets,
   } = props;
+  const codex = resolvedCurrentConfig.code_engine === "codex";
   const profileEntries = sortProfileEntries(Object.entries(config.profiles), lang);
   const configuredModelIds = new Set(profileEntries.map(([, profile]) => profile.default_model));
   const otherModels = sortModels(
@@ -57,36 +63,30 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
   );
 
   return (
-    <Popover.Root
+    <Dialog.Root
       open
-      modal={false}
       onOpenChange={(next) => {
         if (!next) closeSessionSettings(true);
       }}
     >
-      <Popover.Anchor asChild>
-        <span className="session-settings-anchor" aria-hidden="true" />
-      </Popover.Anchor>
-      <Popover.Portal>
-        <Popover.Content
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
           ref={sessionSettingsPanelRef}
           className="session-settings-panel"
-          side="bottom"
-          align="end"
-          sideOffset={8}
-          collisionPadding={12}
+          aria-describedby={undefined}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             sessionSettingsPanelRef.current?.focus();
           }}
           onCloseAutoFocus={(event) => event.preventDefault()}
           role="dialog"
-          aria-modal="false"
+          aria-modal="true"
           aria-labelledby="session-settings-title"
           tabIndex={-1}
         >
           <div className="session-settings-header">
-              <span id="session-settings-title" style={{ fontWeight: 600, fontSize: "var(--font-ui)" }}>{t("session.settings", lang)}</span>
+              <Dialog.Title asChild><span id="session-settings-title" style={{ fontWeight: 600, fontSize: "var(--font-ui)" }}>{t("session.settings", lang)}</span></Dialog.Title>
               <button
                 className="panel-toggle-btn"
                 onClick={() => closeSessionSettings(true)}
@@ -96,6 +96,11 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
               </button>
           </div>
           <div className="session-settings-body">
+              <SessionLearningSettings config={config} session={currentSession.sessionConfig} patch={patchSessionConfig} lang={lang} />
+              <div className="session-inheritance">
+                <span>{lang === "zh" ? "默认配置来源" : "Default configuration"}</span><strong>{lang === "zh" ? "全局设置" : "Global settings"}</strong>
+                <span>{lang === "zh" ? "当前模型来源" : "Model source"}</span><strong>{(codex ? Boolean(currentSession.sessionConfig.codexModel) : currentSession.sessionConfig.model !== null || currentSession.sessionConfig.profileId !== null) ? (lang === "zh" ? "当前会话" : "This conversation") : (lang === "zh" ? "继承默认" : "Inherited")}</strong>
+              </div>
               {/* Name */}
               <label className="session-field">
                 <span className="session-label">{t("session.name", lang)}</span>
@@ -107,6 +112,8 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
                   }}
                 />
               </label>
+              <RolePresetManager lang={lang} session={currentSession} customPresets={customPresets} setCustomPresets={setCustomPresets} onChange={patchSessionConfig} />
+              {currentSession.sessionConfig.mode === "code" && <label className="session-field"><span className="session-label">{lang === "zh" ? "编码引擎" : "Coding engine"}</span><select className="session-select" disabled={sessionMutationLocked} value={currentSession.sessionConfig.engine || ""} onChange={event => patchSessionConfig({ engine: (event.target.value || undefined) as SessionConfig["engine"] })}><option value="">{lang === "zh" ? "继承全局设置" : "Inherit global settings"}</option><option value="native">gxAgent</option><option value="codex">Codex</option></select></label>}
               {/* System Prompt */}
               <label className="session-field">
                 <span className="session-label">{t("session.systemPrompt", lang)}</span>
@@ -121,7 +128,8 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
                 />
               </label>
               <label className="session-field">
-                <span className="session-label">Profile / API</span>
+                <span className="session-label">{codex ? (lang === "zh" ? "Codex 模型" : "Codex model") : "Profile / API"}</span>
+                {codex ? <input className="session-input" value={currentSession.sessionConfig.codexModel || ""} placeholder={config.codex_model || (lang === "zh" ? "继承 Codex 默认" : "Inherit Codex default")} onChange={event => patchSessionConfig({ codexModel: event.target.value || null })} /> :
                 <select
                   className="session-select"
                   value={currentSession.sessionConfig.profileId || ""}
@@ -134,8 +142,9 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
                   {profileEntries.map(([profileId, profile]) => (
                     <option key={profileId} value={profileId}>{profile.name} ({profile.default_model})</option>
                   ))}
-                </select>
+                </select>}
               </label>
+              {!codex && <>
               {/* Model */}
               <label className="session-field">
                 <span className="session-label">{t("session.model", lang)}</span>
@@ -244,6 +253,7 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
               </label>
                 </div>
               </details>
+              </>}
               <label className="session-field">
                 <span className="session-label">{t("ui.working-directory", lang)}</span>
                 <div className="session-workspace-row">
@@ -258,12 +268,12 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
               </label>
               {(currentSession.sessionConfig.mode || "chat") === "code" && (
                 <label className="session-field session-field-row trust-all-field">
-                  <span><span className="session-label">{t("ui.trust-all-operations", lang)}</span><small>{t("ui.skip-ordinary-approvals-hard-dangerous", lang)}</small></span>
-                  <input type="checkbox" checked={Boolean(currentSession.sessionConfig.trustAllOperations)} onChange={async (event) => {
+                  <span><span className="session-label">{t("ui.trust-all-operations", lang)}</span><small>{codex ? (lang === "zh" ? "Codex 完整访问权限，关闭操作审批" : "Codex full access with approvals disabled") : t("ui.skip-ordinary-approvals-hard-dangerous", lang)}</small></span>
+                  <input type="checkbox" disabled={sessionMutationLocked || (codex && resolvedCurrentConfig.plan_mode)} checked={Boolean(currentSession.sessionConfig.trustAllOperations)} onChange={async (event) => {
                     const checked = event.target.checked;
                     if (checked && !await requestConfirmation({
                       title: t("ui.trust-all-title", lang),
-                      message: t("ui.danger-code-mode-will-stop", lang),
+                      message: codex ? (lang === "zh" ? "Codex 将获得完整文件和网络访问权限，并跳过操作审批。确认启用？" : "Codex will have full file and network access with operation approvals disabled. Enable full access?") : t("ui.danger-code-mode-will-stop", lang),
                       confirmLabel: t("ui.trust-all-operations", lang),
                       cancelLabel: t("ui.cancel", lang),
                       danger: true,
@@ -316,11 +326,12 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
               {/* Reset */}
               <button
                 className="btn btn-secondary"
+                disabled={sessionMutationLocked}
                 style={{ marginTop: 8, width: "100%" }}
                 onClick={() => {
                   setSessions(prev => prev.map(s => s.id === currentSessionId ? {
                     ...s,
-                    sessionConfig: { ...DEFAULT_SESSION_CONFIG, mode: s.sessionConfig.mode },
+                    sessionConfig: { ...DEFAULT_SESSION_CONFIG, mode: s.sessionConfig.mode, workDir: s.sessionConfig.workDir },
                     updatedAt: Date.now(),
                   } : s));
                 }}
@@ -333,8 +344,8 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
                 </button>
               )}
           </div>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

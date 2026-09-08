@@ -5,9 +5,15 @@ import { ChatSession } from '../types';
 export function useSessionStorage() {
   const [loading, setLoading] = useState(false);
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const writableRef = useRef(false);
 
   const enqueueWrite = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
-    const result = writeQueueRef.current.then(operation, operation);
+    if (!writableRef.current) return Promise.reject(new Error('Session storage has not been loaded successfully'));
+    const guardedOperation = () => {
+      if (!writableRef.current) throw new Error('Session storage has not been loaded successfully');
+      return operation();
+    };
+    const result = writeQueueRef.current.then(guardedOperation, guardedOperation);
     writeQueueRef.current = result.then(() => undefined, () => undefined);
     return result;
   }, []);
@@ -50,8 +56,12 @@ export function useSessionStorage() {
 
   const loadSessions = useCallback(async (): Promise<ChatSession[] | null> => {
     setLoading(true);
+    writableRef.current = false;
     try {
-      return await invoke('load_sessions');
+      const sessions = await invoke<ChatSession[]>('load_sessions');
+      if (!Array.isArray(sessions)) throw new Error('Invalid session storage response');
+      writableRef.current = true;
+      return sessions;
     } catch (e) {
       console.error('Failed to load sessions:', e);
       return null;

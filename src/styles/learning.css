@@ -1,0 +1,240 @@
+.lab-surface {
+  min-width: 0;
+}
+.settings-modal .settings-page.lab-surface {
+  display: block;
+}
+.lab-section {
+  min-width: 0;
+  padding: 16px 0;
+  border-top: 1px solid var(--border-default);
+  grid-column: 1 / -1;
+}
+.lab-section h4,
+.lab-surface h4 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.lab-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+  min-width: 0;
+}
+.lab-toolbar h4 {
+  margin: 0 auto 0 0;
+}
+.lab-toolbar > input,
+.lab-toolbar > select {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.lab-surface input:not([type="checkbox"]),
+.lab-surface select,
+.lab-surface textarea,
+.lab-section input:not([type="checkbox"]),
+.lab-section select,
+.lab-section textarea {
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 9px;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.lab-surface textarea,
+.lab-section textarea {
+  resize: vertical;
+  font-family: monospace;
+  width: 100%;
+}
+.lab-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  min-width: 0;
+  margin-bottom: 12px;
+}
+.lab-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+.lab-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  margin: 8px 0;
+}
+.lab-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-default);
+  min-width: 0;
+}
+.lab-row > div:first-child,
+.lab-row > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.lab-row small {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+.lab-row .btn {
+  flex-shrink: 0;
+}
+.lab-path {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.lab-muted {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.lab-error {
+  color: var(--error);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.lab-json,
+.context-entry pre,
+.evidence-list pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 10px;
+  margin: 8px 0;
+  max-height: 360px;
+  overflow: auto;
+  background: var(--bg-sidebar);
+  border-radius: 4px;
+}
+.context-entry {
+  border-bottom: 1px solid var(--border-default);
+  padding: 10px 0;
+  min-width: 0;
+}
+.context-entry summary,
+.evidence-list summary,
+.message-evidence > summary {
+  cursor: pointer;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.context-inspector {
+  padding: 12px;
+}
+.evidence-list details {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-default);
+}
+.evidence-list summary small {
+  color: var(--text-secondary);
+  margin-left: 8px;
+}
+.evidence-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding-top: 8px;
+  overflow-wrap: anywhere;
+}
+.skill-row {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border-default);
+}
+.skill-row > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-row > label strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.skill-row > label input, .skill-row > label small {
+  flex-shrink: 0;
+}
+.context-inspector p {
+  overflow-wrap: anywhere;
+}
+.skill-row > label small {
+  margin-left: auto;
+  color: var(--text-secondary);
+}
+.skill-row p {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.lab-resource {
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  text-align: left;
+  padding: 6px 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.lab-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 10px 0;
+  font-size: 12px;
+}
+.lab-metrics strong {
+  margin-left: 5px;
+}
+.knowledge-documents,
+.backup-list {
+  max-height: 380px;
+  overflow-y: auto;
+}
+.message-evidence {
+  margin-top: 12px;
+}
+.context-open {
+  margin-top: 8px;
+  color: var(--text-secondary);
+}
+@media (max-width: 560px) {
+  .review-tabs {
+    overflow-x: auto;
+  }
+  .review-tabs > [role="tab"] {
+    flex-shrink: 0;
+    padding: 8px 7px !important;
+  }
+  .lab-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .lab-controls > .lab-field:first-child {
+    grid-column: 1 / -1;
+  }
+  .lab-row .btn {
+    max-width: 108px;
+    white-space: normal;
+  }
+}

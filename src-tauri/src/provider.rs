@@ -638,6 +638,8 @@ pub struct StreamDelta {
 #[derive(Debug, Clone)]
 pub struct ToolCallDelta {
     pub index: usize,
+    /// Retained for adapter diagnostics; execution assigns a stable local id.
+    #[allow(dead_code)]
     pub id: Option<String>,
     pub name: Option<String>,
     /// Partial JSON-arguments fragment to append.
@@ -649,6 +651,7 @@ pub struct ToolCallDelta {
 /// deltas reference it.
 #[derive(Debug, Default)]
 pub struct StreamState {
+    completed: bool,
     /// Anthropic: maps content-block index -> ("text" | "tool_use", tool index).
     /// We track how many tool_use blocks we've seen to assign stable indices.
     anth_block_is_tool: std::collections::HashMap<usize, usize>,
@@ -663,31 +666,98 @@ pub struct StreamState {
 ///
 /// `line` is one already-trimmed line from the response stream. Returns an
 /// empty vec for lines that carry no payload (comments, blank lines, etc.).
-pub fn parse_stream_line(wire: Wire, line: &str, state: &mut StreamState) -> Vec<StreamDelta> {
-    match wire {
-        Wire::OpenAI => parse_openai_sse(line),
-        Wire::Ollama => parse_ollama_line(line),
-        Wire::Anthropic => parse_anthropic_sse(line, state),
-        Wire::Gemini => parse_gemini_sse(line, state),
+pub fn parse_stream_line(
+    wire: Wire,
+    line: &str,
+    state: &mut StreamState,
+) -> Result<Vec<StreamDelta>, String> {
+    let line = line.trim();
+    if line.is_empty()
+        || (!wire.is_ollama()
+            && [":", "event:", "id:", "retry:"]
+                .iter()
+                .any(|prefix| line.starts_with(prefix)))
+    {
+        return Ok(vec![]);
+    }
+    let data = if wire.is_ollama() {
+        line
+    } else {
+        line.strip_prefix("data:").unwrap_or(line).trim()
+    };
+    if wire == Wire::OpenAI && data == "[DONE]" {
+        state.completed = true;
+        return Ok(vec![StreamDelta {
+            done: true,
+            ..Default::default()
+        }]);
+    }
+    let v: Value =
+        serde_json::from_str(data).map_err(|error| format!("Invalid streaming JSON: {error}"))?;
+    if !v.is_object() {
+        return Err("Invalid streaming response: expected an object".into());
+    }
+    if let Some(error) = v.get("error").filter(|error| !error.is_null()) {
+        let message = error
+            .as_str()
+            .or_else(|| error["message"].as_str())
+            .map(String::from)
+            .unwrap_or_else(|| error.to_string());
+        return Err(format!("Provider stream error: {message}"));
+    }
+    if v["type"] == "error" {
+        return Err("Provider stream error: unspecified error".into());
+    }
+    let deltas = match wire {
+        Wire::OpenAI => parse_openai_sse(&v),
+        Wire::Ollama => parse_ollama_line(&v),
+        Wire::Anthropic => parse_anthropic_sse(&v, state),
+        Wire::Gemini => parse_gemini_sse(&v, state),
+    };
+    // A finish reason ends the model turn, but usage can arrive in later chunks.
+    state.completed |= deltas.iter().any(|delta| delta.done)
+        || (wire == Wire::OpenAI
+            && v["choices"][0]["finish_reason"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()))
+        || (wire == Wire::Gemini
+            && v["candidates"][0]["finishReason"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()));
+    Ok(deltas)
+}
+
+#[derive(Default)]
+pub struct StreamDecoder {
+    buffer: String,
+    utf8: crate::text::IncrementalUtf8Decoder,
+    state: StreamState,
+    pub done: bool,
+}
+
+impl StreamDecoder {
+    pub fn push(&mut self, wire: Wire, bytes: &[u8]) -> Result<Vec<StreamDelta>, String> {
+        self.buffer.push_str(&self.utf8.push(bytes));
+        let mut deltas = Vec::new();
+        while let Some(pos) = self.buffer.find('\n') {
+            let line: String = self.buffer.drain(..=pos).collect();
+            deltas.extend(parse_stream_line(wire, &line, &mut self.state)?);
+        }
+        self.done |= deltas.iter().any(|delta| delta.done);
+        Ok(deltas)
+    }
+
+    pub fn finish(&mut self, wire: Wire) -> Result<Vec<StreamDelta>, String> {
+        self.buffer.push_str(&self.utf8.finish());
+        let deltas = parse_stream_line(wire, &std::mem::take(&mut self.buffer), &mut self.state)?;
+        if !self.state.completed {
+            return Err("Provider stream ended before a completion marker was received".into());
+        }
+        Ok(deltas)
     }
 }
 
-fn parse_openai_sse(line: &str) -> Vec<StreamDelta> {
-    if !line.starts_with("data:") {
-        return vec![];
-    }
-    let data = line[5..].trim();
-    if data == "[DONE]" {
-        return vec![StreamDelta {
-            done: true,
-            ..Default::default()
-        }];
-    }
-    let v: Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-
+fn parse_openai_sse(v: &Value) -> Vec<StreamDelta> {
     let mut delta = StreamDelta::default();
 
     if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
@@ -731,11 +801,7 @@ fn parse_openai_sse(line: &str) -> Vec<StreamDelta> {
     vec![delta]
 }
 
-fn parse_ollama_line(line: &str) -> Vec<StreamDelta> {
-    let v: Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
+fn parse_ollama_line(v: &Value) -> Vec<StreamDelta> {
     let mut delta = StreamDelta::default();
 
     if let Some(content) = v["message"]["content"].as_str() {
@@ -774,21 +840,7 @@ fn parse_ollama_line(line: &str) -> Vec<StreamDelta> {
     vec![delta]
 }
 
-fn parse_anthropic_sse(line: &str, state: &mut StreamState) -> Vec<StreamDelta> {
-    // Anthropic SSE: "event: <type>" lines followed by "data: {json}". We only
-    // need the data lines; the JSON itself carries a "type" field.
-    if !line.starts_with("data:") {
-        return vec![];
-    }
-    let data = line[5..].trim();
-    if data.is_empty() {
-        return vec![];
-    }
-    let v: Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-
+fn parse_anthropic_sse(v: &Value, state: &mut StreamState) -> Vec<StreamDelta> {
     let mut delta = StreamDelta::default();
     match v["type"].as_str() {
         Some("message_start") => {
@@ -859,21 +911,7 @@ fn parse_anthropic_sse(line: &str, state: &mut StreamState) -> Vec<StreamDelta> 
     vec![delta]
 }
 
-fn parse_gemini_sse(line: &str, state: &mut StreamState) -> Vec<StreamDelta> {
-    // Gemini stream (alt=sse) emits "data: {json}" lines, each a GenerateContent
-    // response chunk with candidates[].content.parts[].
-    if !line.starts_with("data:") {
-        return vec![];
-    }
-    let data = line[5..].trim();
-    if data.is_empty() {
-        return vec![];
-    }
-    let v: Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-
+fn parse_gemini_sse(v: &Value, state: &mut StreamState) -> Vec<StreamDelta> {
     let mut delta = StreamDelta::default();
 
     if let Some(um) = v.get("usageMetadata") {
@@ -914,14 +952,6 @@ fn parse_gemini_sse(line: &str, state: &mut StreamState) -> Vec<StreamDelta> {
                     }
                 }
             }
-            // finishReason present => this candidate is complete.
-            if cand
-                .get("finishReason")
-                .map(|r| !r.is_null())
-                .unwrap_or(false)
-            {
-                delta.done = true;
-            }
         }
     }
 
@@ -952,7 +982,7 @@ pub fn parse_full_response(
             let reasoning = msg["reasoning_content"].as_str().unwrap_or("").to_string();
             let mut calls = Vec::new();
             if let Some(tcs) = msg["tool_calls"].as_array() {
-                for (idx, tc) in tcs.iter().enumerate() {
+                for tc in tcs {
                     let args = if tc["function"]["arguments"].is_string() {
                         tc["function"]["arguments"]
                             .as_str()
@@ -962,11 +992,7 @@ pub fn parse_full_response(
                         tc["function"]["arguments"].to_string()
                     };
                     calls.push(AccumulatedToolCall {
-                        id: tc["id"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .map(String::from)
-                            .unwrap_or_else(|| format!("call_{}", idx)),
+                        id: crate::agent::new_tool_call_id(),
                         name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
                         arguments: args,
                     });
@@ -990,7 +1016,6 @@ pub fn parse_full_response(
             let mut reasoning = String::new();
             let mut calls = Vec::new();
             if let Some(blocks) = body["content"].as_array() {
-                let mut idx = 0;
                 for b in blocks {
                     match b["type"].as_str() {
                         Some("text") => content.push_str(b["text"].as_str().unwrap_or("")),
@@ -999,14 +1024,10 @@ pub fn parse_full_response(
                         }
                         Some("tool_use") => {
                             calls.push(AccumulatedToolCall {
-                                id: b["id"]
-                                    .as_str()
-                                    .unwrap_or(&format!("call_{}", idx))
-                                    .to_string(),
+                                id: crate::agent::new_tool_call_id(),
                                 name: b["name"].as_str().unwrap_or("").to_string(),
                                 arguments: b["input"].to_string(),
                             });
-                            idx += 1;
                         }
                         _ => {}
                     }
@@ -1020,18 +1041,16 @@ pub fn parse_full_response(
             let mut content = String::new();
             let mut calls = Vec::new();
             if let Some(parts) = body["candidates"][0]["content"]["parts"].as_array() {
-                let mut idx = 0;
                 for p in parts {
                     if let Some(t) = p["text"].as_str() {
                         content.push_str(t);
                     }
                     if let Some(fc) = p.get("functionCall").filter(|x| !x.is_null()) {
                         calls.push(AccumulatedToolCall {
-                            id: format!("gemini_call_{}", idx),
+                            id: crate::agent::new_tool_call_id(),
                             name: fc["name"].as_str().unwrap_or("").to_string(),
                             arguments: fc["args"].to_string(),
                         });
-                        idx += 1;
                     }
                 }
             }
@@ -1054,6 +1073,65 @@ pub fn is_jsonl(wire: Wire) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_decoder_propagates_errors_and_rejects_truncation() {
+        for (wire, partial, error) in [
+            (Wire::OpenAI, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n", "data: {\"error\":{\"message\":\"model failed\"}}\n"),
+            (Wire::Anthropic, "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n", "data: {\"type\":\"error\",\"error\":{\"message\":\"model failed\"}}\n"),
+            (Wire::Gemini, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n", "data: {\"error\":{\"message\":\"model failed\"}}\n"),
+            (Wire::Ollama, "{\"message\":{\"content\":\"partial\"},\"done\":false}\n", "{\"error\":\"model failed\"}\n"),
+        ] {
+            let mut decoder = StreamDecoder::default();
+            let deltas = decoder.push(wire, partial.as_bytes()).unwrap();
+            assert_eq!(deltas[0].content.as_deref(), Some("partial"));
+            assert!(decoder.finish(wire).unwrap_err().contains("completion marker"));
+            assert!(decoder.push(wire, error.as_bytes()).unwrap_err().contains("model failed"));
+            assert!(StreamDecoder::default().push(wire, b"data: {broken\n").is_err());
+        }
+    }
+
+    #[test]
+    fn completion_without_a_final_newline_is_accepted_for_every_provider() {
+        for (wire, payload) in [
+            (Wire::OpenAI, "data: [DONE]"),
+            (Wire::Anthropic, "data: {\"type\":\"message_stop\"}"),
+            (
+                Wire::Gemini,
+                "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}",
+            ),
+            (Wire::Ollama, "{\"done\":true}"),
+        ] {
+            let mut decoder = StreamDecoder::default();
+            for byte in payload.as_bytes() {
+                decoder.push(wire, &[*byte]).unwrap();
+            }
+            decoder.finish(wire).unwrap();
+        }
+    }
+
+    #[test]
+    fn finish_reason_does_not_discard_later_usage_or_errors() {
+        let mut decoder = StreamDecoder::default();
+        decoder
+            .push(
+                Wire::OpenAI,
+                b"data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n",
+            )
+            .unwrap();
+        assert!(!decoder.done);
+        let usage = decoder
+            .push(
+                Wire::OpenAI,
+                b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3}}\n",
+            )
+            .unwrap();
+        assert_eq!(usage[0].completion_tokens, Some(3));
+        decoder.finish(Wire::OpenAI).unwrap();
+        assert!(decoder
+            .push(Wire::OpenAI, b"data: {\"error\":\"late error\"}\n")
+            .is_err());
+    }
 
     fn cfg() -> AppConfig {
         AppConfig {
@@ -1125,7 +1203,8 @@ mod tests {
             gemini,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse"
         );
-        assert!(build_url(Wire::Gemini, "https://g/v1beta", "m", false).ends_with("/models/m:generateContent"));
+        assert!(build_url(Wire::Gemini, "https://g/v1beta", "m", false)
+            .ends_with("/models/m:generateContent"));
         assert_eq!(
             build_url(Wire::Ollama, "http://localhost:11434/", "m", true),
             "http://localhost:11434/api/chat"
@@ -1216,7 +1295,7 @@ mod tests {
     fn parse_openai_sse_extracts_content_reasoning_tools_and_usage() {
         let mut state = StreamState::default();
         let line = r#"data: {"choices":[{"delta":{"content":"hey","reasoning_content":"think","tool_calls":[{"index":0,"id":"c1","function":{"name":"grep","arguments":"{\"pat"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":3}}"#;
-        let deltas = parse_stream_line(Wire::OpenAI, line, &mut state);
+        let deltas = parse_stream_line(Wire::OpenAI, line, &mut state).unwrap();
         assert_eq!(deltas.len(), 1);
         let d = &deltas[0];
         assert_eq!(d.content.as_deref(), Some("hey"));
@@ -1224,7 +1303,7 @@ mod tests {
         assert_eq!(d.tool_calls[0].name.as_deref(), Some("grep"));
         assert_eq!(d.prompt_tokens, Some(10));
         assert!(!d.done);
-        let done = parse_stream_line(Wire::OpenAI, "data: [DONE]", &mut state);
+        let done = parse_stream_line(Wire::OpenAI, "data: [DONE]", &mut state).unwrap();
         assert!(done[0].done);
     }
 
@@ -1236,17 +1315,18 @@ mod tests {
             Wire::Anthropic,
             r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#,
             &mut state,
-        );
+        )
+        .unwrap();
         parse_stream_line(
             Wire::Anthropic,
             r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"a1","name":"grep"}}"#,
             &mut state,
-        );
+        ).unwrap();
         let frag = parse_stream_line(
             Wire::Anthropic,
             r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}"#,
             &mut state,
-        );
+        ).unwrap();
         assert_eq!(frag[0].tool_calls[0].index, 0);
         assert_eq!(
             frag[0].tool_calls[0].arguments.as_deref(),
@@ -1256,12 +1336,12 @@ mod tests {
             Wire::Anthropic,
             r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"a2","name":"glob"}}"#,
             &mut state,
-        );
+        ).unwrap();
         let frag2 = parse_stream_line(
             Wire::Anthropic,
             r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
             &mut state,
-        );
+        ).unwrap();
         // second tool block gets the next tool index, not a restart at 0
         assert_eq!(frag2[0].tool_calls[0].index, 1);
     }
@@ -1270,7 +1350,7 @@ mod tests {
     fn parse_ollama_line_reads_message_and_done() {
         let mut state = StreamState::default();
         let line = r#"{"message":{"content":"hi","tool_calls":[{"function":{"name":"grep","arguments":{"p":"x"}}}]},"done":true,"prompt_eval_count":7,"eval_count":2}"#;
-        let deltas = parse_stream_line(Wire::Ollama, line, &mut state);
+        let deltas = parse_stream_line(Wire::Ollama, line, &mut state).unwrap();
         let d = &deltas[0];
         assert_eq!(d.content.as_deref(), Some("hi"));
         assert_eq!(d.tool_calls[0].name.as_deref(), Some("grep"));
@@ -1285,12 +1365,12 @@ mod tests {
             Wire::Gemini,
             r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"grep","args":{"p":1}}}]}}]}"#,
             &mut state,
-        );
+        ).unwrap();
         let two = parse_stream_line(
             Wire::Gemini,
             r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"glob","args":{}}}]}}]}"#,
             &mut state,
-        );
+        ).unwrap();
         assert_eq!(one[0].tool_calls[0].index, 0);
         assert_eq!(
             two[0].tool_calls[0].index, 1,
@@ -1307,7 +1387,7 @@ mod tests {
         let (content, reasoning, calls, pt, ct) = parse_full_response(Wire::OpenAI, &openai);
         assert_eq!(content, "done");
         assert_eq!(reasoning, "r");
-        assert_eq!(calls[0].id, "c9");
+        assert!(calls[0].id.starts_with("call_"));
         // non-string arguments objects are serialized, not dropped
         assert!(calls[0].arguments.contains("\"p\""));
         assert_eq!((pt, ct), (5, 6));

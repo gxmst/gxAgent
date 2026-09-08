@@ -19,6 +19,7 @@ import {
   resolveWorkspacePath,
 } from "../appDefaults";
 import { useAppStore } from "../store/appStore";
+import { EMPTY_FILE_VIEW, useWorkspaceViewStore } from "../store/workspaceViewStore";
 import { runtime } from "../services/agentRuntime";
 import { addLog, notify, refreshWorkspace } from "../services/agentEvents";
 
@@ -27,7 +28,6 @@ export function useWorkspaceActions({
   effectiveWorkDir,
   sessionMutationLocked,
   requestConfirmation,
-  setDiffView,
   attachmentsBySession,
   setAttachmentsBySession,
   attachmentLoadingBySession,
@@ -38,7 +38,6 @@ export function useWorkspaceActions({
   effectiveWorkDir: string;
   sessionMutationLocked: boolean;
   requestConfirmation: (options: ConfirmationOptions) => Promise<boolean>;
-  setDiffView: React.Dispatch<React.SetStateAction<boolean>>;
   attachmentsBySession: Record<string, Attachment[]>;
   setAttachmentsBySession: React.Dispatch<React.SetStateAction<Record<string, Attachment[]>>>;
   attachmentLoadingBySession: Record<string, boolean>;
@@ -50,8 +49,7 @@ export function useWorkspaceActions({
   ) => void;
 }) {
   const currentSessionId = useAppStore((s) => s.currentSessionId);
-  const setFileContent = useAppStore((s) => s.setFileContent);
-  const setSelectedFile = useAppStore((s) => s.setSelectedFile);
+  const setFileView = useWorkspaceViewStore((s) => s.setFile);
   const workspaceBySession = useAppStore((s) => s.workspaceBySession);
   const setWorkspaceBySession = useAppStore((s) => s.setWorkspaceBySession);
   const setModifiedFilesBySession = useAppStore((s) => s.setModifiedFilesBySession);
@@ -60,21 +58,24 @@ export function useWorkspaceActions({
   const setCheckpointBySession = useAppStore((s) => s.setCheckpointBySession);
   const currentWorkspace = workspaceBySession[currentSessionId] || createEmptyWorkspaceState();
 
-  const selectWorkspaceFile = async (node: DirectoryNode) => {
+  const selectWorkspaceFile = async (node: Pick<DirectoryNode, "path">) => {
     const sessionId = currentSessionId;
     const workDir = effectiveWorkDir;
     const sequence = (runtime.fileRequestSequence[sessionId] || 0) + 1;
     runtime.fileRequestSequence[sessionId] = sequence;
-    setSelectedFile(node.path);
-    setFileContent(null);
+    setFileView(sessionId, { workDir, path: node.path, content: null, loading: true, error: "" });
     try {
       const content = await invoke<string>("read_file_content", { path: node.path, workDir });
-      if (useAppStore.getState().currentSessionId !== sessionId
-        || runtime.effectiveWorkDir !== workDir
+      if (useWorkspaceViewStore.getState().files[sessionId]?.workDir !== workDir
         || runtime.fileRequestSequence[sessionId] !== sequence) return;
-      setSelectedFile(node.path);
-      setFileContent(content);
+      setFileView(sessionId, { content, loading: false });
+      if (/\.(html?|svg)$/i.test(node.path)) {
+        setPreviewBySession(previous => ({ ...previous, [sessionId]: content }));
+      }
     } catch (error) {
+      if (useWorkspaceViewStore.getState().files[sessionId]?.workDir !== workDir
+        || runtime.fileRequestSequence[sessionId] !== sequence) return;
+      setFileView(sessionId, { error: String(error), loading: false });
       addLog(`Failed to read file: ${error}`, "error", true, sessionId);
     }
   };
@@ -172,11 +173,9 @@ export function useWorkspaceActions({
       if (entry.originalPath && entry.originalPath !== entry.path) {
         await invoke("restore_git_path", { workDir, path: entry.originalPath, staged: false });
       }
-      if (useAppStore.getState().currentSessionId === sessionId && runtime.effectiveWorkDir === workDir) {
+      if (useWorkspaceViewStore.getState().files[sessionId]?.workDir === workDir) {
         runtime.fileRequestSequence[sessionId] = (runtime.fileRequestSequence[sessionId] || 0) + 1;
-        setFileContent(null);
-        setSelectedFile(null);
-        setDiffView(false);
+        setFileView(sessionId, { ...EMPTY_FILE_VIEW, workDir });
       }
       const restoredKeys = new Set([
         resolveWorkspacePath(repositoryRoot, entry.path),
@@ -215,11 +214,9 @@ export function useWorkspaceActions({
     })) return;
     try {
       await invoke("restore_git_checkpoint", { workDir: checkpoint.workDir, commit: checkpoint.commit });
-      if (useAppStore.getState().currentSessionId === sessionId && runtime.effectiveWorkDir === checkpoint.workDir) {
+      if (useWorkspaceViewStore.getState().files[sessionId]?.workDir === checkpoint.workDir) {
         runtime.fileRequestSequence[sessionId] = (runtime.fileRequestSequence[sessionId] || 0) + 1;
-        setFileContent(null);
-        setSelectedFile(null);
-        setDiffView(false);
+        setFileView(sessionId, { ...EMPTY_FILE_VIEW, workDir: checkpoint.workDir });
       }
       setModifiedFilesBySession((previous) => ({ ...previous, [sessionId]: {} }));
       setPreviewBySession((previous) => ({ ...previous, [sessionId]: "" }));

@@ -92,21 +92,27 @@ fn split_compound_segments(cmd: &str) -> Option<Vec<String>> {
 
     while i < chars.len() {
         let c = chars[i];
-        let prev = if i > 0 { chars[i - 1] } else { ' ' };
-
-        if c == '\'' && !in_double_quote && prev != '`' {
+        if c == '\'' && !in_double_quote {
             in_single_quote = !in_single_quote;
             current.push(c);
             i += 1;
             continue;
         }
-        if c == '"' && !in_single_quote && prev != '`' {
+        if c == '"' && !in_single_quote {
             in_double_quote = !in_double_quote;
             current.push(c);
             i += 1;
             continue;
         }
-        if in_single_quote || in_double_quote {
+        if in_single_quote {
+            current.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '`' || (c == '$' && chars.get(i + 1) == Some(&'(')) {
+            return None;
+        }
+        if in_double_quote {
             current.push(c);
             i += 1;
             continue;
@@ -164,6 +170,12 @@ fn split_compound_segments(cmd: &str) -> Option<Vec<String>> {
                 } else {
                     return None;
                 }
+                if chars
+                    .get(i)
+                    .is_some_and(|c| !c.is_whitespace() && !matches!(c, ';' | '|' | '&'))
+                {
+                    return None;
+                }
             }
             '$' | '@' => {
                 if chars.get(i + 1) == Some(&'(') {
@@ -174,7 +186,7 @@ fn split_compound_segments(cmd: &str) -> Option<Vec<String>> {
             }
             // Script blocks (`ForEach-Object { ... }`) can wrap arbitrary
             // execution — never auto-approve.
-            '{' => return None,
+            '{' | '}' | '(' | ')' => return None,
             _ => {
                 current.push(c);
                 i += 1;
@@ -493,6 +505,21 @@ fn is_trusted(
             if segments.is_empty() {
                 return false;
             }
+            // A preceding location change invalidates relative-path checks.
+            let workspace_read_root = workspace_read_root.filter(|_| {
+                !segments.iter().any(|s| {
+                    matches!(
+                        extract_command_name(s).as_str(),
+                        "cd" | "chdir"
+                            | "sl"
+                            | "set-location"
+                            | "pushd"
+                            | "popd"
+                            | "push-location"
+                            | "pop-location"
+                    )
+                })
+            });
             segments
                 .iter()
                 .all(|segment| command_segment_is_trusted(segment, patterns, workspace_read_root))
@@ -538,17 +565,47 @@ fn command_segment_is_trusted(
             continue;
         }
 
-        if cmd_lower == pattern_lower {
-            return true;
+        if pattern_lower.ends_with(':') {
+            if pattern_lower == "$env:"
+                && cmd_lower.strip_prefix("$env:").is_some_and(|name| {
+                    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+            {
+                return true;
+            }
+            continue;
         }
 
-        // Environment variable reads use PowerShell's $env:NAME syntax.
-        // Chaining characters cannot appear here: segment splitting already
-        // consumed them.
-        if pattern_lower.ends_with(':') && cmd_lower.starts_with(&pattern_lower) {
-            return true;
+        if let Some(base) = ["git branch", "git tag", "git remote"].iter().find(|base| {
+            pattern_lower == **base
+                || pattern_lower
+                    .strip_prefix(**base)
+                    .is_some_and(|rest| rest.starts_with(' '))
+        }) {
+            // Explicit mutations are trusted exactly, including case-sensitive
+            // Git flags and ref names. Only listing patterns can expand.
+            if segment == pattern_trimmed
+                || ((pattern_lower == *base || git_listing_matches(pattern_trimmed, base))
+                    && (cmd_lower == pattern_lower
+                        || cmd_lower
+                            .strip_prefix(&pattern_lower)
+                            .is_some_and(|rest| rest.starts_with(' ')))
+                    && git_listing_matches(segment, base))
+            {
+                return true;
+            }
+            continue;
         }
-
+        if matches!(pattern_lower.as_str(), "git diff" | "git log" | "git show")
+            && (segment.contains(['\'', '"', '$'])
+                || cmd_lower.split_whitespace().any(|arg| {
+                    ["--out", "--ext", "--text"]
+                        .iter()
+                        .any(|flag| arg.starts_with(flag))
+                }))
+        {
+            continue;
+        }
         // For patterns with arguments, require exact prefix + space
         if cmd_lower.starts_with(&pattern_lower) {
             let remainder = &cmd_lower[pattern_lower.len()..];
@@ -556,15 +613,36 @@ fn command_segment_is_trusted(
                 return true;
             }
         }
-
-        // Also match by extracted command name for simple commands
-        if !segment.contains(' ')
-            && extract_command_name(segment) == extract_command_name(pattern_trimmed)
-        {
-            return true;
-        }
     }
     false
+}
+
+fn git_listing_matches(command: &str, pattern: &str) -> bool {
+    let Some(rest) = command
+        .get(pattern.len()..)
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        return false;
+    };
+    let allowed: &[&str] = match pattern {
+        "git branch" => &[
+            "--list",
+            "-l",
+            "-a",
+            "--all",
+            "-r",
+            "--remotes",
+            "-v",
+            "-vv",
+            "--verbose",
+            "--show-current",
+        ],
+        "git tag" => &["--list", "-l"],
+        "git remote" => &["-v", "--verbose"],
+        _ => return false,
+    };
+    // Preserve case: git branch -D/-M/-C are mutations, unlike some lowercase options.
+    rest.split_whitespace().all(|arg| allowed.contains(&arg))
 }
 
 /// Read-only commands that are auto-approved when every path they touch stays
@@ -586,7 +664,11 @@ fn is_workspace_scoped_read(segment: &str, workspace_root: &str) -> bool {
     if root.is_empty() {
         return false;
     }
-    let name = extract_command_name(segment);
+    let name = segment
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
     if !WORKSPACE_READ_COMMANDS.contains(&name.as_str()) {
         return false;
     }
@@ -602,8 +684,35 @@ fn is_workspace_scoped_read(segment: &str, workspace_root: &str) -> bool {
             continue;
         }
         let arg = token.trim_matches(|c| c == '"' || c == '\'');
-        if arg.is_empty() || arg.starts_with('-') {
-            continue; // PowerShell-style flag
+        if arg.is_empty() {
+            continue;
+        }
+        if arg.contains(',') {
+            return false;
+        }
+        if arg.starts_with('-') {
+            // Inline values and abbreviated/unknown parameters are ambiguous.
+            if ![
+                "-path",
+                "-literalpath",
+                "-raw",
+                "-totalcount",
+                "-head",
+                "-tail",
+                "-encoding",
+                "-pattern",
+                "-simplematch",
+                "-casesensitive",
+                "-list",
+                "-allmatches",
+                "-context",
+                "-notmatch",
+            ]
+            .contains(&arg.to_lowercase().as_str())
+            {
+                return false;
+            }
+            continue;
         }
         if arg.contains("..") {
             return false; // parent traversal
@@ -620,10 +729,15 @@ fn is_workspace_scoped_read(segment: &str, workspace_root: &str) -> bool {
         let bytes = arg.as_bytes();
         let has_drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
         if has_drive {
+            if bytes.get(2).is_none_or(|c| *c != b'\\' && *c != b'/') || arg[2..].contains(':') {
+                return false;
+            }
             let arg_norm = normalize_path_for_prefix(arg);
             if !path_has_prefix(&arg_norm, &root_norm) {
                 return false; // absolute path outside the workspace
             }
+        } else if arg.contains(':') {
+            return false; // PowerShell providers and alternate data streams
         }
         // Anything else is a plain relative token: it resolves under the
         // working directory (execute_command runs with cwd = workspace).
@@ -949,11 +1063,23 @@ mod tests {
     #[test]
     fn unrestricted_skips_prompts_but_keeps_hard_blocks() {
         assert!(matches!(
-            check_approval("run_python", r#"{"code":"print(1)"}"#, "unrestricted", &[], "C:\\proj"),
+            check_approval(
+                "run_python",
+                r#"{"code":"print(1)"}"#,
+                "unrestricted",
+                &[],
+                "C:\\proj"
+            ),
             ApprovalLevel::AutoApprove
         ));
         assert!(matches!(
-            check_approval("execute_command", r#"{"command":"Remove-Item -Recurse -Force C:\\Windows"}"#, "unrestricted", &[], "C:\\proj"),
+            check_approval(
+                "execute_command",
+                r#"{"command":"Remove-Item -Recurse -Force C:\\Windows"}"#,
+                "unrestricted",
+                &[],
+                "C:\\proj"
+            ),
             ApprovalLevel::Blocked
         ));
     }
@@ -969,5 +1095,101 @@ mod tests {
             check_approval("execute_command", &args, "standard", &[], "C:\\proj"),
             ApprovalLevel::AutoApprove
         ));
+    }
+
+    #[test]
+    fn legacy_defaults_do_not_trust_execution_or_mutations() {
+        let patterns = crate::config::default_trusted_patterns();
+        for command in [
+            "Write-Output \"$(Set-Content probe.txt injected)\"",
+            "Write-Output (Set-Content probe.txt injected)",
+            "Write-Output 'safe`'; Set-Content probe.txt injected # '",
+            "Write-Output \"a`\"; Set-Content probe.txt injected\"",
+            "git branch -D example-branch",
+            "git branch new-branch",
+            "git tag v2",
+            "git tag -d v1",
+            "git remote add origin example",
+            "git diff --output=probe.txt",
+            "git show --ext-diff",
+            "git diff \"--output=probe.txt\"",
+            "git diff --out\"put\"=probe.txt",
+            "$env:Path = 'changed'",
+            "[Environment]::SetEnvironmentVariable('x','y')",
+            "Get-Content -Path:../outside.txt",
+            "Get-Content -LiteralPath:../outside.txt",
+            "Get-Content ok.txt,C:\\outside.txt",
+            "Get-Content Env:SECRET",
+            "Get-Content C:relative.txt",
+            "Get-Content C:\\proj\\foo:stream",
+            "cd C:\\outside; Get-Content file.txt",
+            ".\\Get-Content secret.txt",
+            "C:\\outside\\hostname.exe",
+            "cargo check",
+            "cargo test",
+        ] {
+            assert!(
+                matches!(
+                    check_approval(
+                        "execute_command",
+                        &cmd_args(command),
+                        "standard",
+                        &patterns,
+                        "C:\\proj"
+                    ),
+                    ApprovalLevel::NeedsConfirmation
+                ),
+                "{command}"
+            );
+        }
+        for command in [
+            "Write-Output '$(Set-Content probe.txt injected)'",
+            "git branch --list",
+            "git branch -a",
+            "git tag --list",
+            "git remote -v",
+            "Get-Content -LiteralPath src\\main.rs",
+            "$env:Path",
+        ] {
+            assert!(
+                is_trusted(
+                    "execute_command",
+                    &cmd_args(command),
+                    &patterns,
+                    Some("C:\\proj")
+                ),
+                "{command}"
+            );
+        }
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("cargo test"),
+            &exec_patterns(&["cargo test"]),
+            None
+        ));
+        assert!(is_trusted(
+            "execute_command",
+            &cmd_args("git branch -D reviewed-branch"),
+            &exec_patterns(&["git branch -D reviewed-branch"]),
+            None
+        ));
+        for (pattern, command) in [
+            ("git branch --list", "git branch --list -D old-branch"),
+            (
+                "git branch -d reviewed-branch",
+                "git branch -D reviewed-branch",
+            ),
+            (
+                "git branch -D reviewed-branch",
+                "git branch -D reviewed-branch another-branch",
+            ),
+        ] {
+            assert!(!is_trusted(
+                "execute_command",
+                &cmd_args(command),
+                &exec_patterns(&[pattern]),
+                None
+            ));
+        }
     }
 }

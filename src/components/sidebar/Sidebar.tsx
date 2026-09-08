@@ -13,8 +13,14 @@ import {
   BarChart3,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Download,
+  FolderOpen,
+  FolderPlus,
+  SquarePen,
+  Wrench,
   MessageSquare,
+  MoreHorizontal,
   Pencil,
   Pin,
   Plus,
@@ -42,6 +48,8 @@ import { getToolStats } from "../../utils/sessionHelpers";
 import type { SearchSnippet } from "../../utils/sessionSearch";
 import { PositionedContextMenu } from "../shared/PositionedContextMenu";
 import { ConnectionStatus } from "../shared/ConnectionStatus";
+import { groupProjectSessions, taskState, taskStateLabel } from "../../utils/workbench";
+import type { SettingsTab } from "../settings/settingsNavigation";
 
 type SidebarContextMenu = { sessionId: string; x: number; y: number } | null;
 
@@ -70,15 +78,15 @@ export interface SidebarProps {
   allPresets: RolePreset[];
   addLog: (text: string, type?: "info" | "success" | "error" | "cmd", showToast?: boolean, sessionId?: string) => void;
   getModelDisplayName: (modelId: string) => string;
-  switchSidebarMode: (mode: SessionConfig["mode"]) => void;
   createNewSession: () => void;
+  createProjectTask: (workDir: string) => void;
   setCurrentSessionId: (id: string) => void;
   setSessions: React.Dispatch<React.SetStateAction<ChatSession[]>>;
   deleteSession: (id: string, e: React.MouseEvent) => void;
   setSessionArchived: (id: string, archived: boolean) => void;
   moveSessionInList: (sessionId: string, direction: "up" | "down") => void;
   setToolStatsDialog: React.Dispatch<React.SetStateAction<ToolStatsDialog | null>>;
-  setSettingsTab: (tab: "model" | "chat" | "agent" | "search" | "data") => void;
+  setSettingsTab: (tab: SettingsTab) => void;
   setSettingsOpen: (open: boolean) => void;
   setSessionSettingsOpen: (open: boolean) => void;
 }
@@ -89,13 +97,16 @@ export function Sidebar(props: SidebarProps) {
     currentSessionId, tabbableSessionId, sidebarNav, sidebarWidth, sessionSearch,
     setSessionSearch, debouncedSearch, sessionStorageReady, historyListRef,
     runtimeBySession, pendingApprovalsBySession, contextMenu, setContextMenu,
-    allPresets: ALL_PRESETS, addLog, getModelDisplayName, switchSidebarMode,
-    createNewSession, setCurrentSessionId, setSessions, deleteSession,
+    allPresets: ALL_PRESETS, addLog, getModelDisplayName,
+    createNewSession, createProjectTask, setCurrentSessionId, setSessions, deleteSession,
     setSessionArchived, moveSessionInList, setToolStatsDialog, setSettingsTab,
     setSettingsOpen, setSessionSettingsOpen,
   } = props;
 
   const [archivedOpen, setArchivedOpen] = useState(false);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
+  const projects = groupProjectSessions(visibleSessions.filter(session => session.sessionConfig.mode === "code"), config.default_work_dir);
+  const chats = visibleSessions.filter(session => session.sessionConfig.mode !== "code");
   const archivedTabbableSessionId = archivedOpen
     ? archivedSessions.find((session) => session.id === currentSessionId)?.id
       ?? archivedSessions[0]?.id
@@ -104,30 +115,10 @@ export function Sidebar(props: SidebarProps) {
 
   return (
     <aside className="sidebar" style={{ width: sidebarWidth }}>
-  {/* Pill Navigation */}
-  <div className="sidebar-nav-pills">
-    <button
-      className={`sidebar-pill ${sidebarNav === "chat" ? "active" : ""}`}
-      onClick={() => switchSidebarMode("chat")}
-      aria-pressed={sidebarNav === "chat"}
-    >
-      <MessageSquare size={12} /> Chat
-    </button>
-    <button
-      className={`sidebar-pill ${sidebarNav === "code" ? "active" : ""}`}
-      onClick={() => switchSidebarMode("code")}
-      aria-pressed={sidebarNav === "code"}
-    >
-      <TerminalIcon size={12} /> Code
-    </button>
-  </div>
-
-  {/* New Session Button */}
-  <div style={{ padding: "4px 10px" }}>
-    <button className="btn sidebar-new-btn" disabled={!sessionStorageReady} onClick={createNewSession}>
-      <Plus size={13} /> {t("session.new", lang)}
-    </button>
-  </div>
+  <nav className="sidebar-shortcuts" aria-label={lang === "zh" ? "工作入口" : "Workspace actions"}>
+    <button disabled={!sessionStorageReady} onClick={createNewSession}><SquarePen size={17} /><span>{sidebarNav === "code" ? (lang === "zh" ? "新建任务" : "New task") : t("session.new", lang)}</span></button>
+    <button onClick={() => { setSettingsTab("tools"); setSettingsOpen(true); }}><Wrench size={17} /><span>{lang === "zh" ? "工具与 MCP" : "Tools & MCP"}</span></button>
+  </nav>
 
   {/* Session Search */}
   <div style={{ padding: "2px 10px 4px" }}>
@@ -206,7 +197,7 @@ export function Sidebar(props: SidebarProps) {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flex: 1 }}>
-          {activePreset && (
+          {activePreset && s.sessionConfig.mode === "chat" && (
             <span className="history-preset-icon" title={`${t("role.activePreset", lang)}: ${lang === "zh" ? activePreset.nameZh : activePreset.name}`}>
               {activePreset.emoji}
             </span>
@@ -224,9 +215,8 @@ export function Sidebar(props: SidebarProps) {
               </span>
             )}
             <span className="history-meta">
-              {s.messages.filter(m => m.role !== "context_divider").length}{t("ui.msgs", lang)}
-              {runtime && <> · {runtime.status === "stopping" ? (t("ui.stopping-2", lang)) : (t("ui.running", lang))}</>}
-              {awaitingApproval && <> · {t("ui.approval", lang)}</>}
+              {sidebarNav === "code" ? taskStateLabel(taskState(s, runtime, awaitingApproval), lang) : <>{s.messages.filter(m => m.role !== "context_divider").length}{t("ui.msgs", lang)}</>}
+              {sidebarNav === "chat" && runtime && <> · {taskStateLabel(taskState(s, runtime, awaitingApproval), lang)}</>}
               {s.messages.length > 0 && s.messages[s.messages.length - 1].timestamp && (
                 <> · {new Date(s.messages[s.messages.length - 1].timestamp!).toLocaleTimeString(t("ui.en-us", lang), { hour: "2-digit", minute: "2-digit" })}</>
               )}
@@ -236,13 +226,38 @@ export function Sidebar(props: SidebarProps) {
         <span className="history-mode-tag" title={s.sessionConfig.mode === "code" ? t("mode.code", lang) : t("mode.chat", lang)}>
           {s.pinned ? <Pin size={10} /> : s.sessionConfig.mode === "code" ? <TerminalIcon size={10} /> : <MessageSquare size={10} />}
         </span>
+        <button type="button" className="history-more" aria-label={lang === "zh" ? `任务选项：${s.title || "未命名"}` : `Options: ${s.title || "Untitled"}`} title={lang === "zh" ? "更多选项" : "More options"}
+          onKeyDown={event => event.stopPropagation()}
+          onClick={event => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); setContextMenu({ sessionId: s.id, x: rect.right, y: rect.bottom }); }}>
+          <MoreHorizontal size={14} />
+        </button>
       </div>
         );
       };
 
       return (
         <>
-          {visibleSessions.map((session) => renderSessionRow(session, "visible"))}
+          <div className="sidebar-section-heading"><span>{lang === "zh" ? "项目" : "Projects"}</span><button className="panel-toggle-btn" disabled={!sessionStorageReady} onClick={() => createProjectTask("")} title={lang === "zh" ? "打开项目" : "Open project"} aria-label={lang === "zh" ? "打开项目" : "Open project"}><FolderPlus size={15} /></button></div>
+          {projects.map(project => {
+            const expanded = Boolean(debouncedSearch.trim()) || !collapsedProjects.has(project.id);
+            return <section className="project-group" key={project.id}>
+              <div className="project-heading">
+                <button className="project-toggle" aria-expanded={expanded} title={project.workDir} onClick={() => setCollapsedProjects(previous => {
+                  const next = new Set(previous);
+                  if (next.has(project.id)) next.delete(project.id); else next.add(project.id);
+                  return next;
+                })}>
+                  {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  <FolderOpen size={14} /><span>{project.name || (lang === "zh" ? "未关联项目" : "No project")}</span>
+                  <small>{project.sessions.length}</small>
+                </button>
+                <button className="panel-toggle-btn" disabled={!sessionStorageReady} title={lang === "zh" ? "新建任务" : "New task"} aria-label={lang === "zh" ? `在 ${project.name || "项目"} 中新建任务` : `New task in ${project.name || "project"}`} onClick={() => createProjectTask(project.workDir)}><Plus size={14} /></button>
+              </div>
+              {expanded && <div className="project-tasks">{project.sessions.map(session => renderSessionRow(session, "visible"))}</div>}
+            </section>;
+          })}
+          {chats.length > 0 && <><div className="sidebar-section-heading"><span>{lang === "zh" ? "聊天" : "Chats"}</span></div><div className="chat-history-list">{chats.map(session => renderSessionRow(session, "visible"))}</div></>}
+          {visibleSessions.length === 0 && !debouncedSearch.trim() && <div className="search-empty-hint">{lang === "zh" ? "暂无会话" : "No conversations"}</div>}
           {visibleSessions.length === 0 && debouncedSearch.trim() && (
             <div className="search-empty-hint">
               <Search size={16} aria-hidden="true" />
@@ -474,7 +489,7 @@ export function Sidebar(props: SidebarProps) {
   <div className="sidebar-footer">
     <button
       className="sidebar-tools-summary"
-      onClick={() => { setSettingsTab("agent"); setSettingsOpen(true); }}
+      onClick={() => { setSettingsTab("tools"); setSettingsOpen(true); }}
       title={t("ui.manage-agent-and-tools", lang)}
     >
       <span className="sidebar-tools-summary-icon"><Zap size={13} /></span>

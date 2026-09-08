@@ -21,6 +21,8 @@ export const runtime = {
   /** Session that owns the in-flight request ("" when idle). */
   activeRequestSessionId: "",
   activeRequestModel: "",
+  activeRequestEngine: "native" as "native" | "codex",
+  activeCodexTurnStarted: false,
   activeRequestContextTokens: 0,
   activeRequestWorkDir: "",
   /** Mirrors hasActiveRequest; also flipped synchronously around request start/stop. */

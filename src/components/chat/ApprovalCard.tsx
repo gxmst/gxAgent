@@ -8,6 +8,7 @@
  * through props.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
 import { CheckCircle2, ShieldAlert, XCircle } from "lucide-react";
 import { t } from "../../i18n";
 import type { AppConfig, Message, PendingApproval, TrustedPattern } from "../../types";
@@ -34,9 +35,11 @@ export function ApprovalCard({ lang, config, setConfig, className = "" }: Approv
   const setPendingApprovalsBySession = useAppStore((s) => s.setPendingApprovalsBySession);
   const approvalSubmitting = useAppStore((s) => Boolean(s.approvalSubmittingBySession[s.currentSessionId]));
   const setApprovalSubmittingBySession = useAppStore((s) => s.setApprovalSubmittingBySession);
+  const [error, setError] = useState<{ requestId: string; message: string } | null>(null);
 
   const handleApproval = async (approved: boolean, trustPattern: boolean = false) => {
     if (!pendingApprovals || approvalSubmitting) return;
+    setError(null);
     const sessionId = currentSessionId;
     setApprovalSubmittingBySession((previous) => ({ ...previous, [sessionId]: true }));
     const approvedIds = approved
@@ -52,7 +55,7 @@ export function ApprovalCard({ lang, config, setConfig, className = "" }: Approv
         approvedIds,
         rejectedIds,
       });
-      setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: null }));
+      setPendingApprovalsBySession((previous) => previous[sessionId]?.request_id === pendingApprovals.request_id ? ({ ...previous, [sessionId]: null }) : previous);
 
       // If approved with trust, add each tool call's suggested patterns to
       // the whitelist. Compound commands contribute one pattern per segment
@@ -83,6 +86,7 @@ export function ApprovalCard({ lang, config, setConfig, className = "" }: Approv
         }
       }
     } catch (e) {
+      setError({ requestId: pendingApprovals.request_id, message: String(e) });
       addLog(`Approval error: ${e}`, "error");
     } finally {
       setApprovalSubmittingBySession((previous) => ({ ...previous, [sessionId]: false }));
@@ -107,20 +111,21 @@ export function ApprovalCard({ lang, config, setConfig, className = "" }: Approv
           </pre>
         </div>
       ))}
-      <div className="approval-trust-preview">
+      {pendingApprovals.source !== "codex" && <div className="approval-trust-preview">
         {t("approval.trustPreview", lang, { patterns: trustPreview })}
-      </div>
+      </div>}
       <div className="approval-actions">
         <button className="btn btn-approve" disabled={approvalSubmitting} onClick={() => handleApproval(true)}>
           <CheckCircle2 size={13} /> {t("approval.approve", lang)}
         </button>
-        <button className="btn btn-approve-trust" disabled={approvalSubmitting} onClick={() => handleApproval(true, true)} title={t("approval.trustHint", lang)}>
+        {pendingApprovals.source !== "codex" && <button className="btn btn-approve-trust" disabled={approvalSubmitting} onClick={() => handleApproval(true, true)} title={t("approval.trustHint", lang)}>
           <ShieldAlert size={13} /> {t("approval.approveAndTrust", lang)}
-        </button>
+        </button>}
         <button className="btn btn-reject" disabled={approvalSubmitting} onClick={() => handleApproval(false)}>
           <XCircle size={13} /> {t("approval.reject", lang)}
         </button>
       </div>
+      {error?.requestId === pendingApprovals.request_id && <div className="workspace-inline-state error" role="alert">{error.message}</div>}
     </div>
   );
 }

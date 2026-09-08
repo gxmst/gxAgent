@@ -156,7 +156,7 @@ fn cleanup_temp_files(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Path has no parent: {}", path.display()))?;
@@ -273,6 +273,7 @@ fn save_session_in_dir(dir: &Path, session: &Value) -> Result<(), String> {
     let id = session_id_from_value(session)?;
     let path = session_path(dir, &id)?;
     let json = serde_json::to_vec_pretty(session).map_err(|e| e.to_string())?;
+    backup_session(dir, &id, false)?;
     atomic_write(&path, &json)?;
 
     let ids = ordered_session_ids(dir)?;
@@ -294,11 +295,13 @@ fn save_sessions_in_dir(dir: &Path, sessions: &[Value]) -> Result<(), String> {
     for (session, id) in sessions.iter().zip(&ids) {
         let path = session_path(dir, id)?;
         let json = serde_json::to_vec_pretty(session).map_err(|e| e.to_string())?;
+        backup_session(dir, id, true)?;
         atomic_write(&path, &json)?;
     }
 
     for existing_id in list_session_ids_from_dir(dir)? {
         if !seen.contains(&existing_id) {
+            backup_session(dir, &existing_id, true)?;
             remove_file_if_exists(&session_path(dir, &existing_id)?)?;
         }
     }
@@ -315,14 +318,18 @@ fn load_session_from_dir(dir: &Path, id: &str) -> Result<Value, String> {
 fn load_sessions_from_dir(dir: &Path) -> Result<Vec<Value>, String> {
     let mut sessions = Vec::new();
     for id in ordered_session_ids(dir)? {
-        if let Ok(session) = load_session_from_dir(dir, &id) {
-            sessions.push(session);
+        let session = load_session_from_dir(dir, &id)
+            .map_err(|error| format!("Could not load session {id}: {error}"))?;
+        if session_id_from_value(&session)? != id {
+            return Err(format!("Session id does not match file: {id}"));
         }
+        sessions.push(session);
     }
     Ok(sessions)
 }
 
 fn delete_session_from_dir(dir: &Path, id: &str) -> Result<(), String> {
+    backup_session(dir, id, true)?;
     remove_file_if_exists(&session_path(dir, id)?)?;
     let ids = ordered_session_ids(dir)?;
     write_index(dir, &ids)
@@ -330,6 +337,7 @@ fn delete_session_from_dir(dir: &Path, id: &str) -> Result<(), String> {
 
 fn clear_sessions_from_dir(dir: &Path) -> Result<(), String> {
     for id in list_session_ids_from_dir(dir)? {
+        backup_session(dir, &id, true)?;
         remove_file_if_exists(&session_path(dir, &id)?)?;
     }
     remove_file_if_exists(&index_path(dir))
@@ -369,10 +377,273 @@ pub fn clear_sessions() -> Result<(), String> {
     with_sessions_dir(clear_sessions_from_dir)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBackup {
+    id: String,
+    session_id: String,
+    title: String,
+    created_at: u64,
+    bytes: u64,
+}
+
+// Automatic snapshots are interval-based; existing backups are never overwritten.
+fn backup_session(dir: &Path, id: &str, force: bool) -> Result<(), String> {
+    let path = session_path(dir, id)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = fs::read(&path).map_err(|e| e.to_string())?;
+    let value: Value = match serde_json::from_slice(&content) {
+        Ok(value) => value,
+        Err(_) => return Ok(()), // Never overwrite a good backup with a corrupt session.
+    };
+    if session_id_from_value(&value)? != id {
+        return Err("Session id mismatch".into());
+    }
+    let backup_dir = dir.join("backups").join(id);
+    fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    let mut files: Vec<_> = fs::read_dir(&backup_dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|v| v.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+    if !force {
+        if let Some(last) = files.last() {
+            if last
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() < 300)
+            {
+                return Ok(());
+            }
+        }
+    }
+    let name = format!(
+        "{}-{}.json",
+        chrono::Utc::now().timestamp_millis(),
+        uuid::Uuid::new_v4()
+    );
+    atomic_write(&backup_dir.join(name), &content)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_session_backups() -> Result<Vec<SessionBackup>, String> {
+    with_sessions_dir(|dir| {
+        let root = dir.join("backups");
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut backups = Vec::new();
+        for entry in walkdir::WalkDir::new(root)
+            .min_depth(2)
+            .max_depth(2)
+            .follow_links(false)
+        {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !entry.file_type().is_file()
+                || entry.path().extension().and_then(|s| s.to_str()) != Some("json")
+            {
+                continue;
+            }
+            let value: Value = match fs::read(entry.path())
+                .ok()
+                .and_then(|data| serde_json::from_slice(&data).ok())
+            {
+                Some(v) => v,
+                None => continue,
+            };
+            let session_id = session_id_from_value(&value)?;
+            let id = entry
+                .path()
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            backups.push(SessionBackup {
+                created_at: id
+                    .split('-')
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                id,
+                session_id,
+                title: value["title"].as_str().unwrap_or("").into(),
+                bytes: entry.metadata().map_err(|e| e.to_string())?.len(),
+            });
+        }
+        backups.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+        Ok(backups)
+    })
+}
+
+#[tauri::command]
+pub fn create_session_backup() -> Result<(), String> {
+    with_sessions_dir(|dir| {
+        for id in ordered_session_ids(dir)? {
+            backup_session(dir, &id, true)?;
+        }
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub fn read_session_backup(session_id: String, backup_id: String) -> Result<Value, String> {
+    validate_session_id(&session_id)?;
+    validate_session_id(&backup_id)?;
+    with_sessions_dir(|dir| {
+        let path = dir
+            .join("backups")
+            .join(&session_id)
+            .join(format!("{backup_id}.json"));
+        let mut value: Value = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        if session_id_from_value(&value)? != session_id {
+            return Err("Backup session id mismatch".into());
+        }
+        // Restore as a separate task so neither the current task nor its Codex thread is overwritten.
+        value["id"] = Value::String(format!("restored-{}", uuid::Uuid::new_v4()));
+        value["title"] = Value::String(format!(
+            "{} (restored)",
+            value["title"].as_str().unwrap_or("")
+        ));
+        value
+            .as_object_mut()
+            .ok_or("Invalid backup")?
+            .remove("codexThread");
+        Ok(value)
+    })
+}
+
+#[tauri::command]
+pub fn session_storage_issues() -> Result<Vec<Value>, String> {
+    with_sessions_dir(|dir| {
+        Ok(ordered_session_ids(dir)?
+            .iter()
+            .filter_map(|id| {
+                load_session_from_dir(dir, id)
+                    .and_then(|value| {
+                        if session_id_from_value(&value)? != *id {
+                            Err("Session id mismatch".into())
+                        } else {
+                            Ok(value)
+                        }
+                    })
+                    .err()
+                    .map(|error| serde_json::json!({"sessionId":id,"error":error}))
+            })
+            .collect())
+    })
+}
+
+fn repair_backup_in_dir(dir: &Path, session_id: &str, backup_id: &str) -> Result<(), String> {
+    validate_session_id(session_id)?;
+    validate_session_id(backup_id)?;
+    let path = session_path(dir, session_id)?;
+    if let Ok(value) = load_session_from_dir(dir, session_id) {
+        if session_id_from_value(&value).as_deref() == Ok(session_id) {
+            return Err("Session is readable; restore a copy instead".into());
+        }
+    }
+    let bytes = fs::read(
+        dir.join("backups")
+            .join(session_id)
+            .join(format!("{backup_id}.json")),
+    )
+    .map_err(|e| e.to_string())?;
+    let mut value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if session_id_from_value(&value)? != session_id {
+        return Err("Backup session id mismatch".into());
+    }
+    if path.exists() {
+        let damaged = fs::read(&path).map_err(|e| e.to_string())?;
+        atomic_write(
+            &dir.join("recovery")
+                .join(format!("{session_id}-{}.json", uuid::Uuid::new_v4())),
+            &damaged,
+        )?;
+    }
+    // A server-side thread can contain turns newer than the restored snapshot.
+    value
+        .as_object_mut()
+        .ok_or("Invalid backup")?
+        .remove("codexThread");
+    atomic_write(
+        &path,
+        &serde_json::to_vec(&value).map_err(|e| e.to_string())?,
+    )
+}
+
+#[tauri::command]
+pub fn repair_session_backup(session_id: String, backup_id: String) -> Result<(), String> {
+    with_sessions_dir(|dir| repair_backup_in_dir(dir, &session_id, &backup_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn updates_and_deletions_preserve_recoverable_snapshots() {
+        let dir = TestDir::new();
+        let old =
+            json!({"id":"one","title":"before","messages":[{"role":"user","content":"original"}]});
+        save_session_in_dir(dir.path(), &old).unwrap();
+        save_session_in_dir(dir.path(), &json!({"id":"one","title":"after"})).unwrap();
+        let backup_dir = dir.path().join("backups/one");
+        let first = fs::read_dir(&backup_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let value: Value = serde_json::from_slice(&fs::read(&first).unwrap()).unwrap();
+        assert_eq!(value, old);
+        delete_session_from_dir(dir.path(), "one").unwrap();
+        assert_eq!(fs::read_dir(backup_dir).unwrap().count(), 2);
+        assert!(first.exists());
+    }
+
+    #[test]
+    fn corruption_repair_keeps_the_damaged_file_and_checks_identity() {
+        let dir = TestDir::new();
+        save_session_in_dir(
+            dir.path(),
+            &json!({"id":"one","messages":[],"codexThread":{"id":"old-thread"}}),
+        )
+        .unwrap();
+        backup_session(dir.path(), "one", true).unwrap();
+        let backup = fs::read_dir(dir.path().join("backups/one"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let backup_id = backup.file_stem().unwrap().to_str().unwrap();
+        assert!(repair_backup_in_dir(dir.path(), "one", backup_id).is_err());
+        fs::write(dir.path().join("one.json"), b"damaged data").unwrap();
+        repair_backup_in_dir(dir.path(), "one", backup_id).unwrap();
+        assert!(load_session_from_dir(dir.path(), "one")
+            .unwrap()
+            .get("codexThread")
+            .is_none());
+        let original_backup: Value = serde_json::from_slice(&fs::read(&backup).unwrap()).unwrap();
+        assert_eq!(original_backup["codexThread"]["id"], "old-thread");
+        let damaged = fs::read_dir(dir.path().join("recovery"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(fs::read(damaged).unwrap(), b"damaged data");
+        assert!(repair_backup_in_dir(dir.path(), "../escape", backup_id).is_err());
+    }
 
     struct TestDir {
         path: PathBuf,
@@ -403,6 +674,22 @@ mod tests {
             .filter_map(Result::ok)
             .any(|entry| is_temp_file(&entry.path()));
         assert!(!has_temp_file, "atomic write left a temporary file behind");
+    }
+
+    #[test]
+    fn loading_a_corrupt_session_fails_instead_of_returning_partial_history() {
+        let dir = TestDir::new();
+        save_sessions_in_dir(
+            dir.path(),
+            &[json!({"id": "good"}), json!({"id": "broken"})],
+        )
+        .unwrap();
+        let broken = session_path(dir.path(), "broken").unwrap();
+        fs::write(&broken, b"{invalid").unwrap();
+        assert!(load_sessions_from_dir(dir.path())
+            .unwrap_err()
+            .contains("broken"));
+        assert_eq!(fs::read_to_string(broken).unwrap(), "{invalid");
     }
 
     #[test]

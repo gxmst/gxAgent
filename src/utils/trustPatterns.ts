@@ -41,6 +41,9 @@ export const suggestCommandTrustPattern = (segment: string): string => {
   while (tokens.length && (tokens[0] === "&" || tokens[0] === ".")) tokens.shift();
   const first = tokens[0] || "";
   const second = tokens[1];
+  if (first.toLowerCase() === "git" && ["branch", "tag", "remote"].includes(second?.toLowerCase())) {
+    return segment.trim();
+  }
   if (MULTI_COMMAND_LAUNCHERS.has(first.toLowerCase()) && second && !second.startsWith("-")) {
     return `${first} ${second}`;
   }

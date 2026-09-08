@@ -7,6 +7,7 @@
  * App-local per-session maps, persistence caches and refs flow in as params.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { useRef } from "react";
 import { t } from "../i18n";
 import type { Attachment, ChatSession, SessionConfig } from "../types";
 import {
@@ -16,6 +17,7 @@ import {
 } from "../appDefaults";
 import { compareSidebarSessions } from "../utils/sessionOrder";
 import { useAppStore } from "../store/appStore";
+import { useWorkspaceViewStore } from "../store/workspaceViewStore";
 import { runtime } from "../services/agentRuntime";
 import { addLog, notify, discardStreamBuffer } from "../services/agentEvents";
 
@@ -41,7 +43,6 @@ export function useSessionLifecycle({
   setEditingMessageIdxBySession,
   setEditTextBySession,
   setExpandedActions,
-  setDiffView,
 }: {
   lang: string;
   sessionStorageReady: boolean;
@@ -64,16 +65,14 @@ export function useSessionLifecycle({
   setEditingMessageIdxBySession: React.Dispatch<React.SetStateAction<Record<string, number | null>>>;
   setEditTextBySession: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   setExpandedActions: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
-  setDiffView: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
+  const deletingSessionIdsRef = useRef(new Set<string>());
   const sessions = useAppStore((s) => s.sessions);
   const setSessions = useAppStore((s) => s.setSessions);
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setCurrentSessionId = useAppStore((s) => s.setCurrentSessionId);
   const setActiveRunSessionId = useAppStore((s) => s.setActiveRunSessionId);
-  const preparingRequestSessionId = useAppStore((s) => s.preparingRequestSessionId);
   const setPreparingRequestSessionId = useAppStore((s) => s.setPreparingRequestSessionId);
-  const runtimeBySession = useAppStore((s) => s.runtimeBySession);
   const setRuntimeBySession = useAppStore((s) => s.setRuntimeBySession);
   const checkpointBySession = useAppStore((s) => s.checkpointBySession);
   const setCheckpointBySession = useAppStore((s) => s.setCheckpointBySession);
@@ -86,14 +85,10 @@ export function useSessionLifecycle({
   const setApprovalSubmittingBySession = useAppStore((s) => s.setApprovalSubmittingBySession);
   const setUsageStatsBySession = useAppStore((s) => s.setUsageStatsBySession);
   const setQuoteBySession = useAppStore((s) => s.setQuoteBySession);
-  const setFileContent = useAppStore((s) => s.setFileContent);
-  const setSelectedFile = useAppStore((s) => s.setSelectedFile);
-  const setActiveTab = useAppStore((s) => s.setActiveTab);
-
-  const createNewSessionInMode = async (mode: SessionConfig["mode"]) => {
+  const createNewSessionInMode = async (mode: SessionConfig["mode"], projectWorkDir?: string) => {
     if (!sessionStorageReady) return null;
-    let workDir: string | null = null;
-    if (mode === "code") {
+    let workDir: string | null = projectWorkDir || null;
+    if (mode === "code" && !workDir) {
       try {
         workDir = await invoke<string | null>("pick_workspace_directory");
       } catch (error) {
@@ -115,8 +110,10 @@ export function useSessionLifecycle({
   };
 
   const switchSidebarMode = (mode: SessionConfig["mode"]) => {
-    setSidebarNav(mode);
-    if (currentSession.sessionConfig.mode === mode) return;
+    if (currentSession.sessionConfig.mode === mode) {
+      setSidebarNav(mode);
+      return;
+    }
     const rememberedSessionId = lastSessionByModeRef.current[mode];
     const target = sessions.find((session) => (
       session.id === rememberedSessionId
@@ -126,6 +123,7 @@ export function useSessionLifecycle({
       .filter((session) => session.sessionConfig.mode === mode && !session.archived)
       .sort(compareSidebarSessions)[0];
     if (target) {
+      setSidebarNav(mode);
       setCurrentSessionId(target.id);
     } else {
       void createNewSessionInMode(mode);
@@ -166,10 +164,7 @@ export function useSessionLifecycle({
     requestStartingRef.current = false;
     runtime.activeRequestId = "";
     runtime.activeRequestSessionId = "";
-    setFileContent(null);
-    setSelectedFile(null);
-    setDiffView(false);
-    setActiveTab("activity");
+    useWorkspaceViewStore.getState().clear();
     runtime.requestSessionById = {};
     runtime.workspaceRequestSequence = {};
     runtime.fileRequestSequence = {};
@@ -182,6 +177,7 @@ export function useSessionLifecycle({
   };
 
   const dropSessionUiState = (sessionId: string) => {
+    useWorkspaceViewStore.getState().clear(sessionId);
     setDraftsBySession((previous) => omitSessionKey(previous, sessionId));
     setAttachmentsBySession((previous) => omitSessionKey(previous, sessionId));
     setAttachmentLoadingBySession((previous) => omitSessionKey(previous, sessionId));
@@ -254,45 +250,66 @@ export function useSessionLifecycle({
   const deleteSession = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!sessionStorageReady) return;
-    if (sessions.length <= 1) return;
-    if (attachmentLoadingBySession[id] || preparingRequestSessionId === id) {
+    const latest = useAppStore.getState();
+    if (latest.sessions.length <= 1 || deletingSessionIdsRef.current.has(id)) return;
+    if (attachmentLoadingBySession[id] || latest.preparingRequestSessionId === id) {
       notify(t("ui.wait-for-attachments-to-finish", lang), "error");
       return;
     }
-    if (runtimeBySession[id]) {
+    if (latest.runtimeBySession[id]) {
       notify(t("ui.stop-the-running-task-before", lang), "error");
       return;
     }
-    const target = sessions.find(s => s.id === id);
+    const target = latest.sessions.find(s => s.id === id);
     if (!target) return;
-    const originalIndex = sessions.findIndex((session) => session.id === id);
-    const wasCurrentSession = currentSessionId === id;
-    const remaining = sessions.filter((s) => s.id !== id);
+    const originalIndex = latest.sessions.findIndex((session) => session.id === id);
+    const wasCurrentSession = latest.currentSessionId === id;
     const targetMode = target?.sessionConfig.mode || sidebarNav;
-    const orderedModeSessions = sessions
+    const orderedModeSessions = latest.sessions
       .filter((session) => session.sessionConfig.mode === targetMode && !session.archived)
       .sort(compareSidebarSessions);
     const deletedVisibleIndex = orderedModeSessions.findIndex((session) => session.id === id);
-    const remainingInMode = orderedModeSessions.filter((session) => session.id !== id);
-    const fallbackSession = remainingInMode[Math.min(
-      Math.max(deletedVisibleIndex, 0),
-      Math.max(remainingInMode.length - 1, 0),
-    )] || remaining[0];
+    deletingSessionIdsRef.current.add(id);
     try {
       sessionPersistenceEpochRef.current += 1;
+      // Remove before queuing the delete so subsequent autosaves cannot enqueue
+      // a stale copy of this session behind the deletion.
+      setSessions((previous) => previous.filter((session) => session.id !== id));
+      if (wasCurrentSession) {
+        const remaining = useAppStore.getState().sessions;
+        const remainingInMode = remaining
+          .filter((session) => session.sessionConfig.mode === targetMode && !session.archived)
+          .sort(compareSidebarSessions);
+        const fallbackSession = remainingInMode[Math.min(
+          Math.max(deletedVisibleIndex, 0),
+          Math.max(remainingInMode.length - 1, 0),
+        )] || remaining[0];
+        setCurrentSessionId(fallbackSession.id);
+        setSidebarNav(fallbackSession.sessionConfig.mode || "chat");
+      }
       await deleteStoredSession(id);
+      const remaining = useAppStore.getState().sessions;
       try { localStorage.setItem("gx_sessions", JSON.stringify(remaining)); } catch { /* backend is authoritative */ }
-      setSessions(remaining);
       delete lastPersistedSessionsRef.current[id];
       delete sessionObjCacheRef.current[id];
       delete sessionJsonCacheRef.current[id];
     } catch (error) {
+      sessionPersistenceEpochRef.current += 1;
+      // The backend may have removed the file before an index write failed.
+      // Make the restored session dirty so autosave can repair that partial delete.
+      delete lastPersistedSessionsRef.current[id];
+      delete sessionObjCacheRef.current[id];
+      delete sessionJsonCacheRef.current[id];
+      setSessions((previous) => {
+        if (previous.some((session) => session.id === id)) return previous;
+        const next = [...previous];
+        next.splice(Math.min(originalIndex, next.length), 0, target);
+        return next;
+      });
       addLog(`${t("ui.delete-failed", lang)}: ${error}`, "error", true);
       return;
-    }
-    if (wasCurrentSession) {
-      setCurrentSessionId(fallbackSession.id);
-      setSidebarNav(fallbackSession.sessionConfig.mode || "chat");
+    } finally {
+      deletingSessionIdsRef.current.delete(id);
     }
     let restored = false;
     const finalizeTimer = window.setTimeout(() => {

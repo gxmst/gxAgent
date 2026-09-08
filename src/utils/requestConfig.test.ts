@@ -4,6 +4,9 @@ import { ROLE_PRESETS } from "../rolePresets";
 import { resolveActiveRolePrompt, resolveRequestConfig } from "./requestConfig";
 
 const globalConfig: AppConfig = {
+  code_engine: "native",
+  codex_executable: "codex",
+  codex_model: "",
   provider: "openai",
   wire_format: "openai",
   base_url: "https://global.example/v1",

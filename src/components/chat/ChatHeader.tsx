@@ -1,155 +1,63 @@
-/**
- * Chat pane header: session title with inline rename, work-dir / save-status
- * subtitle, mode indicator, and the theme / session-settings / right-panel /
- * always-on-top toggles.
- *
- * Extracted verbatim from App.tsx. Title edits go through the zustand store;
- * the title-editing and always-on-top flags are component-local because
- * nothing else in App reads them.
- */
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import {
-  MessageSquare,
-  Moon,
-  PanelRightClose,
-  PanelRightOpen,
-  Pin,
-  Settings2,
-  Sun,
-  Terminal as TerminalIcon,
-} from "lucide-react";
+import { CircleCheck, Loader2, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pencil, Settings2 } from "lucide-react";
 import { t } from "../../i18n";
-import type { AppConfig, ChatSession } from "../../types";
-import { THEME_OPTIONS } from "../../appDefaults";
+import type { ChatSession, SessionConfig } from "../../types";
 import { useAppStore } from "../../store/appStore";
+import { taskState, taskStateLabel } from "../../utils/workbench";
 
 export interface ChatHeaderProps {
   lang: string;
-  config: AppConfig;
-  setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   currentSession: ChatSession;
-  effectiveWorkDir: string;
+  navigationOpen: boolean;
+  onToggleNavigation: () => void;
+  onModeChange: (mode: SessionConfig["mode"]) => void;
+  disabled: boolean;
   sessionSaveStatus: "idle" | "saving" | "saved" | "error";
   sessionSettingsOpen: boolean;
   setSessionSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
   sessionSettingsToggleRef: React.RefObject<HTMLButtonElement | null>;
   rightPanelOpen: boolean;
   setRightPanelOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  onShowRun: () => void;
 }
 
-export function ChatHeader({
-  lang,
-  config,
-  setConfig,
-  currentSession,
-  effectiveWorkDir,
-  sessionSaveStatus,
-  sessionSettingsOpen,
-  setSessionSettingsOpen,
-  sessionSettingsToggleRef,
-  rightPanelOpen,
-  setRightPanelOpen,
-}: ChatHeaderProps) {
-  const currentSessionId = useAppStore((s) => s.currentSessionId);
-  const setSessions = useAppStore((s) => s.setSessions);
-  const currentMode = currentSession.sessionConfig.mode || "chat";
-
-  const [editingSessionTitle, setEditingSessionTitle] = useState(false);
-  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
-
-  // Header quick-toggle: flip between light and dark. If the active theme is a
-  // custom dark theme, this jumps to the plain light theme and vice versa.
-  const toggleTheme = () => {
-    setConfig((prev) => {
-      const current = THEME_OPTIONS.find((th) => th.value === prev.theme);
-      const isDark = current?.mode === "dark";
-      return { ...prev, theme: isDark ? "light" : "dark" };
-    });
+export function ChatHeader({ lang, currentSession, navigationOpen, onToggleNavigation, onModeChange, disabled, sessionSaveStatus, sessionSettingsOpen, setSessionSettingsOpen, sessionSettingsToggleRef, rightPanelOpen, setRightPanelOpen, onShowRun }: ChatHeaderProps) {
+  const zh = lang === "zh";
+  const setSessions = useAppStore(state => state.setSessions);
+  const runtime = useAppStore(state => state.runtimeBySession[currentSession.id]);
+  const approval = useAppStore(state => state.pendingApprovalsBySession[currentSession.id]);
+  const preparing = useAppStore(state => state.preparingRequestSessionId === currentSession.id);
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(currentSession.title);
+  const coding = currentSession.sessionConfig.mode === "code";
+  const status = taskState(currentSession, runtime, approval, preparing);
+  const saveTitle = () => {
+    if (title.trim() && title.trim() !== currentSession.title) {
+      setSessions(sessions => sessions.map(session => session.id === currentSession.id ? { ...session, title: title.trim(), updatedAt: Date.now() } : session));
+    }
+    setEditing(false);
   };
 
-  return (
-    <header className="panel-header">
-      <div className="panel-heading">
-        {editingSessionTitle ? (
-          <input
-            className="session-title-editable"
-            value={currentSession.title}
-            onChange={(e) => {
-              setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, title: e.target.value } : s));
-            }}
-            onBlur={() => setEditingSessionTitle(false)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') setEditingSessionTitle(false);
-              if (e.key === 'Escape') setEditingSessionTitle(false);
-            }}
-            autoFocus
-          />
-        ) : (
-          <span
-            className="panel-title"
-            style={{ fontSize: "var(--font-ui)", cursor: "pointer" }}
-            onDoubleClick={() => setEditingSessionTitle(true)}
-            title={t("ui.rename-title-hint", lang)}
-          >
-            {currentSession.title || t("session.new", lang)}
-          </span>
-        )}
-        <div className="panel-subtitle">
-          {effectiveWorkDir || "."}
-          {sessionSaveStatus === "saving" && ` · ${t("ui.saving", lang)}`}
-          {sessionSaveStatus === "error" && (
-            <span className="panel-subtitle-error"> · {t("ui.save-failed", lang)}</span>
-          )}
-        </div>
-      </div>
-      <div className="panel-header-controls">
-        <div className="panel-status-cluster">
-          <span className={`mode-indicator ${currentMode}`}>
-            {currentMode === "chat" ? <MessageSquare size={11} /> : <TerminalIcon size={11} />}
-            {currentMode === "chat" ? t("mode.chat", lang) : t("mode.code", lang)}
-          </span>
-        </div>
-        <div className="panel-action-cluster">
-          <button
-            className="panel-toggle-btn"
-            onClick={toggleTheme}
-            title={t("ui.toggle-theme", lang)}
-            aria-label={t("ui.toggle-theme", lang)}
-          >
-            {config.theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
-          </button>
-          <button
-            ref={sessionSettingsToggleRef}
-            className="panel-toggle-btn"
-            onClick={() => setSessionSettingsOpen(!sessionSettingsOpen)}
-            title={t("session.settings", lang)}
-            aria-haspopup="dialog"
-            aria-expanded={sessionSettingsOpen}
-          >
-            <Settings2 size={14} />
-          </button>
-          <button
-            className="panel-toggle-btn"
-            onClick={() => setRightPanelOpen(!rightPanelOpen)}
-            title={rightPanelOpen ? t("ui.close-workspace-panel", lang) : t("ui.open-right-panel", lang)}
-            aria-expanded={rightPanelOpen}
-          >
-            {rightPanelOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-          </button>
-          <button
-            className={`panel-toggle-btn ${alwaysOnTop ? "active" : ""}`}
-            aria-pressed={alwaysOnTop}
-            onClick={async () => {
-              const result = await invoke<boolean>("toggle_always_on_top");
-              setAlwaysOnTop(result);
-            }}
-            title={alwaysOnTop ? t("window.unpin", lang) : t("window.pin", lang)}
-          >
-            <Pin size={14} />
-          </button>
-        </div>
-      </div>
-    </header>
-  );
+  return <header className="task-header">
+    <div className="task-title-row">
+      {!navigationOpen && <button className="panel-toggle-btn" onClick={onToggleNavigation} aria-label={zh ? "展开侧栏" : "Expand sidebar"} title={zh ? "展开侧栏" : "Expand sidebar"}><PanelLeftOpen size={17} /></button>}
+      {editing ? <input className="session-title-editable" aria-label={t("session.name", lang)} value={title} onChange={event => setTitle(event.target.value)} onBlur={saveTitle} onKeyDown={event => {
+        if (event.key === "Enter") saveTitle();
+        if (event.key === "Escape") { setTitle(currentSession.title); setEditing(false); }
+      }} autoFocus /> : <h1 onDoubleClick={() => { setTitle(currentSession.title); setEditing(true); }}>{currentSession.title || (coding ? (zh ? "新任务" : "New task") : t("session.new", lang))}</h1>}
+      <button className="panel-toggle-btn task-rename" title={t("ui.rename-session", lang)} aria-label={t("ui.rename-session", lang)} onClick={() => { setTitle(currentSession.title); setEditing(true); }}><Pencil size={13} /></button>
+    </div>
+    <div className="workbench-modes" role="group" aria-label={zh ? "工作模式" : "Workspace mode"}>
+      <button disabled={disabled} aria-pressed={!coding} onClick={() => onModeChange("chat")}>{zh ? "聊天" : "Chat"}</button>
+      <button disabled={disabled} aria-pressed={coding} onClick={() => onModeChange("code")}>{zh ? "工作" : "Work"}</button>
+    </div>
+    <div className="task-header-actions">
+        <span className={`task-save-state ${sessionSaveStatus}`} role="status">{sessionSaveStatus === "saving" ? t("ui.saving", lang) : sessionSaveStatus === "error" ? t("ui.save-failed", lang) : ""}</span>
+        {coding && currentSession.messages.length > 0 && <button className={`panel-toggle-btn task-run-state state-${status}`} onClick={onShowRun} title={`${taskStateLabel(status, lang)} · ${zh ? "运行记录" : "Run history"}`} aria-label={zh ? "运行记录" : "Run history"}>{runtime || preparing ? <Loader2 size={15} className="spin" /> : <CircleCheck size={15} />}</button>}
+        <button ref={sessionSettingsToggleRef} className="panel-toggle-btn" onClick={() => setSessionSettingsOpen(!sessionSettingsOpen)} title={t("session.settings", lang)} aria-label={t("session.settings", lang)} aria-haspopup="dialog" aria-expanded={sessionSettingsOpen}><Settings2 size={16} /></button>
+        <button className="panel-toggle-btn task-panel-toggle" onClick={() => setRightPanelOpen(!rightPanelOpen)} title={rightPanelOpen ? t("ui.close-workspace-panel", lang) : t("ui.open-right-panel", lang)} aria-label={rightPanelOpen ? t("ui.close-workspace-panel", lang) : t("ui.open-right-panel", lang)} aria-expanded={rightPanelOpen}>
+          {rightPanelOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+        </button>
+    </div>
+  </header>;
 }

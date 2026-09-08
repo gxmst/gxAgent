@@ -1,329 +1,74 @@
-/**
- * Right workspace panel: terminal log / activity / files / preview tabs,
- * run-checkpoint controls, git changes and diff viewer.
- *
- * Extracted verbatim from App.tsx; state stays in App and flows in
- * through props.
- */
-import {
-  Eye,
-  FileText,
-  FolderOpen,
-  Globe,
-  Monitor,
-  RefreshCw,
-  Smartphone,
-  Terminal as TerminalIcon,
-  Trash2,
-  Zap,
-} from "lucide-react";
-import { t } from "../../i18n";
-import { X } from "lucide-react";
-import type { AppConfig, ChatSession, ToolAction } from "../../types";
-import type { WorkspaceViewState, RunCheckpoint } from "../../appDefaults";
-import { WorkspaceTree, type DirectoryNode } from "./WorkspaceTree";
-import { WorkspaceChanges, type GitStatusEntry } from "./WorkspaceChanges";
-import { DiffView } from "../shared/DiffView";
+import { FileCode2, RefreshCw, X } from "lucide-react";
+import type { AppConfig, ChatSession } from "../../types";
+import type { WorkspaceViewState } from "../../appDefaults";
+import { useAppStore } from "../../store/appStore";
+import { EMPTY_FILE_VIEW, useWorkspaceViewStore, type WorkspaceTab } from "../../store/workspaceViewStore";
+import type { useWorkspaceActions } from "../../hooks/useWorkspaceActions";
+import { WorkspaceTree } from "./WorkspaceTree";
+import { RunReviewPanel } from "./RunReviewPanel";
+import { RunActivity } from "./RunActivity";
+import { HtmlPreview } from "./HtmlPreview";
+import { ContextInspector } from "./ContextInspector";
 
-type PreviewConsoleLog = { text: string; type: "log" | "error" | "warn" | "info" };
-
+const EMPTY_LOGS: never[] = [];
+const EMPTY_CHANGES = {};
 export interface WorkspacePanelProps {
   lang: string;
   config: AppConfig;
-  currentSession: ChatSession;
-  currentSessionId: string;
-  rightPanelOpen: boolean;
-  rightPanelWidth: number;
-  setRightPanelOpen: (open: boolean) => void;
-  activeTab: "activity" | "files" | "preview";
-  setActiveTab: React.Dispatch<React.SetStateAction<"activity" | "files" | "preview">>;
-  terminalLogs: { text: string; type: string; timestamp?: number }[];
-  statusLabel: (status: ToolAction["status"]) => string;
-  currentWorkspace: WorkspaceViewState;
-  refreshWorkspace: () => void;
-  selectWorkspaceFile: (node: DirectoryNode) => void;
-  attachWorkspaceFile: (node: DirectoryNode) => void;
-  isAttachmentLoading: boolean;
-  selectGitEntry: (entry: GitStatusEntry) => void;
-  restoreGitEntry: (entry: GitStatusEntry) => void;
-  checkpointBySession: Record<string, RunCheckpoint | null>;
-  acceptRunCheckpoint: () => void;
-  restoreRunCheckpoint: () => void;
-  sessionMutationLocked: boolean;
-  selectedFile: string | null;
-  fileContent: string | null;
-  modifiedFiles: Record<string, { old: string; new: string }>;
-  diffView: boolean;
-  setDiffView: React.Dispatch<React.SetStateAction<boolean>>;
-  previewSrc: string;
-  setPreviewSrc: (next: string | ((previous: string) => string)) => void;
-  previewDevice: "desktop" | "mobile";
-  setPreviewDevice: React.Dispatch<React.SetStateAction<"desktop" | "mobile">>;
-  previewConsoleLogs: PreviewConsoleLog[];
-  setPreviewConsoleLogs: (next: PreviewConsoleLog[] | ((previous: PreviewConsoleLog[]) => PreviewConsoleLog[])) => void;
+  session: ChatSession;
+  open: boolean;
+  width: number;
+  onClose: () => void;
+  workspace: WorkspaceViewState;
+  onRefresh: () => void;
+  actions: ReturnType<typeof useWorkspaceActions>;
+  attachmentsLoading: boolean;
+  disabled: boolean;
+  selectedRunId?: string;
 }
 
-export function WorkspacePanel(props: WorkspacePanelProps) {
-  const {
-    lang, config, currentSession, currentSessionId,
-    rightPanelOpen, rightPanelWidth, setRightPanelOpen,
-    activeTab, setActiveTab, terminalLogs, statusLabel,
-    currentWorkspace, refreshWorkspace, selectWorkspaceFile,
-    attachWorkspaceFile, isAttachmentLoading, selectGitEntry,
-    restoreGitEntry, checkpointBySession, acceptRunCheckpoint,
-    restoreRunCheckpoint, sessionMutationLocked,
-    selectedFile, fileContent, modifiedFiles, diffView, setDiffView,
-    previewSrc, setPreviewSrc, previewDevice, setPreviewDevice,
-    previewConsoleLogs, setPreviewConsoleLogs,
-  } = props;
-  return (
-    <section
-      className={`canvas-panel ${rightPanelOpen ? "" : "collapsed"}`}
-      style={{ width: rightPanelWidth }}
-    >
-      <div className="canvas-tab-bar" role="tablist" aria-label={t("ui.workspace-panel", lang)}>
-        <button
-          role="tab"
-          aria-selected={activeTab === "activity"}
-          className={`canvas-tab ${activeTab === "activity" ? "active" : ""}`}
-          onClick={() => setActiveTab("activity")}
-        >
-          <Zap size={12} /> {t("activity", lang)}
-        </button>
-        <button
-          role="tab"
-          aria-selected={activeTab === "files"}
-          className={`canvas-tab ${activeTab === "files" ? "active" : ""}`}
-          onClick={() => setActiveTab("files")}
-        >
-          <FolderOpen size={12} /> {t("files", lang)}
-        </button>
-        <button
-          role="tab"
-          aria-selected={activeTab === "preview"}
-          className={`canvas-tab ${activeTab === "preview" ? "active" : ""}`}
-          onClick={() => setActiveTab("preview")}
-        >
-          <Eye size={12} /> {t("preview", lang)}
-        </button>
-        <button
-          type="button"
-          className="canvas-close-btn"
-          title={t("ui.close-workspace-panel", lang)}
-          aria-label={t("ui.close-workspace-panel", lang)}
-          onClick={() => setRightPanelOpen(false)}
-        >
-          <X size={14} />
-        </button>
+export function WorkspacePanel({ lang, config, session, open, width, onClose, workspace, onRefresh, actions, attachmentsLoading, disabled, selectedRunId }: WorkspacePanelProps) {
+  const zh = lang === "zh";
+  const sessionId = session.id;
+  const activeTab = useWorkspaceViewStore(state => state.tabs[sessionId] || "changes");
+  const setTab = useWorkspaceViewStore(state => state.setTab);
+  const file = useWorkspaceViewStore(state => state.files[sessionId] || EMPTY_FILE_VIEW);
+  const checkpoint = useAppStore(state => state.checkpointBySession[sessionId] || null);
+  const modified = useAppStore(state => state.modifiedFilesBySession[sessionId] || EMPTY_CHANGES);
+  const logs = useAppStore(state => state.terminalLogsBySession[sessionId] || EMPTY_LOGS);
+  const tabs: { id: WorkspaceTab; label: string }[] = [
+    { id: "changes", label: zh ? "改动" : "Changes" },
+    { id: "files", label: zh ? "文件" : "Files" },
+    { id: "activity", label: zh ? "运行" : "Runs" },
+    { id: "context", label: zh ? "上下文" : "Context" },
+    { id: "preview", label: zh ? "预览" : "Preview" },
+  ];
+  return <section className={`review-panel ${open ? "" : "collapsed"}`} style={{ width }} aria-label={zh ? "任务工作区" : "Task workspace"}>
+    <div className="review-tabs" role="tablist" aria-label={zh ? "工作区视图" : "Workspace view"}>
+      {tabs.map((tab, index) => <button type="button" key={tab.id} id={`workspace-tab-${tab.id}`} role="tab" aria-selected={activeTab === tab.id} aria-controls={`workspace-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => setTab(sessionId, tab.id)} onKeyDown={event => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        setTab(sessionId, tabs[next].id);
+        document.getElementById(`workspace-tab-${tabs[next].id}`)?.focus();
+      }}>{tab.label}</button>)}
+      <button className="panel-toggle-btn review-close" type="button" onClick={onClose} aria-label={zh ? "关闭工作区" : "Close workspace"} title={zh ? "关闭工作区" : "Close workspace"}><X size={15} /></button>
+    </div>
+    <div className="review-panel-body">
+      <div role="tabpanel" id="workspace-panel-changes" aria-labelledby="workspace-tab-changes" hidden={activeTab !== "changes"}>
+        <RunReviewPanel lang={lang} checkpoint={checkpoint} workspace={workspace} modifiedFiles={modified} disabled={disabled} onRefresh={onRefresh} onSelectGit={actions.selectGitEntry} onRestoreGit={actions.restoreGitEntry} onKeep={actions.acceptRunCheckpoint} onRestore={actions.restoreRunCheckpoint} />
       </div>
-
-      <div className="canvas-body">
-        <div className={`canvas-content-pane ${activeTab === "activity" ? "active" : ""}`}>
-          <div className="activity-panel">
-            {/* Tool Calls from current session */}
-            <div className="activity-section">
-              <div className="activity-section-header">
-                <Zap size={11} /> {t("activity.toolCalls", lang)}
-              </div>
-              {(() => {
-                const allActions = currentSession.messages
-                  .filter(m => m.role === "assistant" && m.actions && m.actions.length > 0)
-                  .flatMap(m => m.actions || []);
-                if (allActions.length === 0) {
-                  return <div className="activity-empty">{t("activity.empty", lang)}</div>;
-                }
-                return (
-                  <div className="activity-list">
-                    {allActions.slice(-20).reverse().map((act, idx) => (
-                      <div key={idx} className={`activity-item ${act.status}`}>
-                        <div className="activity-item-header">
-                          <span className="activity-item-name">{act.name}</span>
-                          <span className={`activity-item-badge ${act.status}`}>{statusLabel(act.status)}</span>
-                        </div>
-                        {act.output && (
-                          <div className="activity-item-output">
-                            {act.output.length > 120 ? act.output.slice(0, 120) + "..." : act.output}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Search Sources from current session */}
-            <div className="activity-section">
-              <div className="activity-section-header">
-                <Globe size={11} /> {t("activity.searchSources", lang)}
-              </div>
-              {(() => {
-                const allSearchStatus = currentSession.messages
-                  .filter(m => m.searchStatus && m.searchStatus.length > 0)
-                  .flatMap(m => m.searchStatus || []);
-                const resultsWithSources = allSearchStatus.filter(s => s.type === "results" && s.sources && s.sources.length > 0);
-                if (resultsWithSources.length === 0) {
-                  return <div className="activity-empty">{t("ui.no-search-sources-yet", lang)}</div>;
-                }
-                // Deduplicate sources by link
-                const allSources = resultsWithSources.flatMap(ss => ss.sources || []);
-                const seenLinks = new Set<string>();
-                const uniqueSources = allSources.filter(src => {
-                  if (!src.link || seenLinks.has(src.link)) return false;
-                  seenLinks.add(src.link);
-                  return true;
-                });
-                return (
-                  <div className="activity-list">
-                    {uniqueSources.slice(0, 15).map((src, idx) => (
-                      <div key={idx} className="activity-source-item">
-                        <div className="activity-source-title">
-                          {src.link ? <a href={src.link} target="_blank" rel="noopener noreferrer">{src.title || src.link}</a> : src.title}
-                        </div>
-                        {src.snippet && <div className="activity-source-snippet">{src.snippet}</div>}
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Recent Logs (collapsed by default) */}
-            <details className="activity-section activity-logs-section">
-              <summary className="activity-section-header">
-                <TerminalIcon size={11} /> {t("terminal", lang)}
-              </summary>
-              <div className="console-container">
-                {terminalLogs.slice(-50).map((log, idx) => (
-                  <div key={idx} className={`console-line ${log.type}`}>
-                    {log.type === "cmd" ? "> " : ""}
-                    {log.text}
-                  </div>
-                ))}
-              </div>
-            </details>
-          </div>
+      <div className="workspace-files" role="tabpanel" id="workspace-panel-files" aria-labelledby="workspace-tab-files" hidden={activeTab !== "files"}>
+        <div className="workspace-file-tree"><div className="workspace-files-heading"><span title={workspace.workDir}>{workspace.workDir || (zh ? "未关联项目" : "No project")}</span><button className="panel-toggle-btn" onClick={onRefresh} disabled={workspace.loading} title={zh ? "刷新文件" : "Refresh files"} aria-label={zh ? "刷新文件" : "Refresh files"}><RefreshCw size={13} /></button></div>
+          <WorkspaceTree root={workspace.root} lang={lang} loading={workspace.loading} error={workspace.treeError} onSelect={actions.selectWorkspaceFile} onAttach={actions.attachWorkspaceFile} attachDisabled={attachmentsLoading || disabled} onRefresh={onRefresh} />
         </div>
-
-        <div className={`canvas-content-pane ${activeTab === "files" ? "active" : ""}`}>
-          <div className="files-panel">
-            <div className="files-header">
-              <span style={{ fontSize: "var(--font-caption)", color: "var(--accent)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                {t("files.workspace", lang)}
-              </span>
-              <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={() => { void refreshWorkspace(); }}>
-                <RefreshCw size={11} /> {t("files.refresh", lang)}
-              </button>
-            </div>
-            <WorkspaceTree
-              root={currentWorkspace.root}
-              lang={lang}
-              loading={currentWorkspace.loading}
-              error={currentWorkspace.treeError}
-              onSelect={(node) => { void selectWorkspaceFile(node); }}
-              onAttach={(node) => { void attachWorkspaceFile(node); }}
-              attachDisabled={isAttachmentLoading || sessionMutationLocked}
-              onRefresh={() => { void refreshWorkspace(); }}
-            />
-            <WorkspaceChanges
-              lang={lang}
-              branch={currentWorkspace.branch}
-              entries={currentWorkspace.entries}
-              selectedPath={currentWorkspace.selectedPath}
-              diff={currentWorkspace.diff}
-              loading={currentWorkspace.loading}
-              error={currentWorkspace.changesError}
-              checkpointAvailable={Boolean(checkpointBySession[currentSessionId])}
-              actionsDisabled={sessionMutationLocked}
-              onSelect={(entry) => { void selectGitEntry(entry); }}
-              onRefresh={() => { void refreshWorkspace(); }}
-              onRestorePath={(entry) => { void restoreGitEntry(entry); }}
-              onRestoreCheckpoint={() => { void restoreRunCheckpoint(); }}
-              onAcceptCheckpoint={() => { void acceptRunCheckpoint(); }}
-            />
-            {fileContent !== null && (
-              <div className="file-preview">
-                <div className="file-preview-header">
-                  <FileText size={12} />
-                  <span title={selectedFile || undefined}>{selectedFile}</span>
-                  {selectedFile && modifiedFiles[selectedFile] && (
-                    <button className="btn" style={{ padding: "2px 8px", fontSize: "var(--font-caption)", marginLeft: "auto" }} onClick={() => setDiffView(!diffView)}>
-                      {diffView ? t("files.current", lang) : t("files.diff", lang)}
-                    </button>
-                  )}
-                </div>
-                {diffView && selectedFile && modifiedFiles[selectedFile] ? (
-                  <DiffView
-                    oldContent={modifiedFiles[selectedFile].old}
-                    newContent={modifiedFiles[selectedFile].new}
-                  />
-                ) : (
-                  <pre className="file-preview-body">
-                    <code>{fileContent}</code>
-                  </pre>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className={`canvas-content-pane ${activeTab === "preview" ? "active" : ""}`}>
-          <div className="preview-panel">
-            <div className="preview-toolbar">
-              <button
-                className={`preview-device-btn ${previewDevice === "desktop" ? "active" : ""}`}
-                onClick={() => setPreviewDevice("desktop")}
-                title="Desktop"
-              >
-                <Monitor size={14} />
-              </button>
-              <button
-                className={`preview-device-btn ${previewDevice === "mobile" ? "active" : ""}`}
-                onClick={() => setPreviewDevice("mobile")}
-                title="Mobile"
-              >
-                <Smartphone size={14} />
-              </button>
-              <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={() => setPreviewSrc(previewSrc + " ")} title={t("files.refresh", lang)}>
-                <RefreshCw size={11} />
-              </button>
-              <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)", marginLeft: "auto" }} onClick={() => setPreviewConsoleLogs([])} title="Clear console">
-                <Trash2 size={11} />
-              </button>
-            </div>
-            <div className="preview-frame-wrapper">
-              {previewSrc ? (
-                <iframe
-                  className={`preview-iframe ${previewDevice === "mobile" ? "mobile" : ""}`}
-                  sandbox={config.preview_sandbox ? "allow-scripts" : undefined}
-                  srcDoc={(() => {
-                    const consoleHijack = `<script>(function(){var o={log:console.log,error:console.error,warn:console.warn,info:console.info};function c(t){return function(){var a=[].slice.call(arguments);o[t].apply(console,a);window.parent.postMessage({type:'iframe-console-log',logType:t,text:a.map(function(x){return typeof x==='object'?JSON.stringify(x):String(x)}).join(' ')},'*')}};console.log=c('log');console.error=c('error');console.warn=c('warn');console.info=c('info');window.addEventListener('error',function(e){window.parent.postMessage({type:'iframe-console-log',logType:'error',text:'Runtime Error: '+e.message+' at '+e.filename+':'+e.lineno},'*')})})()</script>`;
-                    if (previewSrc.toLowerCase().includes("<head>")) {
-                      return previewSrc.replace(/<head>/i, "<head>" + consoleHijack);
-                    }
-                    return consoleHijack + previewSrc;
-                  })()}
-                  title="Preview"
-                />
-              ) : (
-                <div className="preview-empty">
-                  <Eye size={24} style={{ opacity: 0.3 }} />
-                  <span>{t("preview.empty", lang)}</span>
-                </div>
-              )}
-            </div>
-            {previewConsoleLogs.length > 0 && (
-              <div className="preview-console">
-                {previewConsoleLogs.map((log, i) => (
-                  <div key={i} className={`preview-console-line ${log.type}`}>
-                    [{log.type}] {log.text}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+        <div className="workspace-file-view">
+          {file.path ? <><div className="workspace-file-title" title={file.path}><FileCode2 size={14} /><span>{file.path}</span></div>{file.error ? <div className="workspace-inline-state error" role="alert">{file.error}<button className="btn" onClick={() => { void actions.selectWorkspaceFile({ path: file.path! }); }}><RefreshCw size={13} />{zh ? "重试" : "Retry"}</button></div> : file.loading ? <div className="workspace-inline-state" role="status">{zh ? "读取文件中..." : "Loading file..."}</div> : <pre><code>{file.content}</code></pre>}</> : <div className="workspace-empty-state"><FileCode2 size={25} /><span>{zh ? "未选择文件" : "No file selected"}</span></div>}
         </div>
       </div>
-    </section>
-  );
+      <div role="tabpanel" id="workspace-panel-activity" aria-labelledby="workspace-tab-activity" hidden={activeTab !== "activity"}><RunActivity key={`${sessionId}:${selectedRunId || "latest"}`} session={session} lang={lang} logs={logs} selectedMessageId={selectedRunId} /></div>
+      <div role="tabpanel" id="workspace-panel-preview" aria-labelledby="workspace-tab-preview" hidden={activeTab !== "preview"}><HtmlPreview sessionId={sessionId} lang={lang} sandbox={config.preview_sandbox} /></div>
+      <div role="tabpanel" id="workspace-panel-context" aria-labelledby="workspace-tab-context" hidden={activeTab !== "context"}><ContextInspector key={`${sessionId}:${selectedRunId || "latest"}`} session={session} lang={lang} selectedMessageId={selectedRunId} /></div>
+    </div>
+  </section>;
 }

@@ -1,13 +1,28 @@
 use crate::config::McpServerConfig;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 
 type PendingMap = std::sync::Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 const MCP_REQUEST_TIMEOUT_SECS: u64 = 20;
+const MCP_MAX_FRAME_BYTES: u64 = 8 * 1024 * 1024;
+
+async fn read_frame(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<String>, String> {
+    let mut line = String::new();
+    let bytes = reader
+        .take(MCP_MAX_FRAME_BYTES + 1)
+        .read_line(&mut line)
+        .await
+        .map_err(|e| e.to_string())?;
+    if bytes as u64 > MCP_MAX_FRAME_BYTES {
+        return Err("MCP message exceeds the 8 MB limit".into());
+    }
+    Ok((bytes > 0).then_some(line))
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +48,14 @@ pub struct McpServer {
     pending: PendingMap,
     _reader_handle: tokio::task::JoinHandle<()>,
     _stderr_handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        // Descendant processes may keep pipes open after the server exits.
+        self._reader_handle.abort();
+        self._stderr_handle.abort();
+    }
 }
 
 /// Validate MCP server command before starting
@@ -131,9 +154,13 @@ impl McpServer {
 
         let reader_pending = pending.clone();
         let reader_handle = tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            let failure = loop {
+                let line = match read_frame(&mut reader).await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break "MCP server closed its output stream".to_string(),
+                    Err(error) => break error,
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -149,17 +176,16 @@ impl McpServer {
                         }
                     }
                 }
-            }
+            };
             let mut map = reader_pending.lock().await;
             for (_, sender) in map.drain() {
-                let _ = sender.send(Err("MCP server closed its output stream".to_string()));
+                let _ = sender.send(Err(failure.clone()));
             }
         });
 
         let stderr_handle = tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_frame(&mut reader).await {
                 if !line.trim().is_empty() {
                     eprintln!("[MCP stderr] {}", line);
                 }
@@ -178,7 +204,7 @@ impl McpServer {
         };
 
         // Send initialize request
-        let _init_result = server
+        let init_result = server
             .send_request(
                 "initialize",
                 json!({
@@ -191,6 +217,15 @@ impl McpServer {
                 }),
             )
             .await?;
+        let version = init_result["result"]["protocolVersion"]
+            .as_str()
+            .ok_or("MCP initialize omitted protocolVersion")?;
+        if !["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"].contains(&version) {
+            return Err(format!("Unsupported MCP protocol version: {version}"));
+        }
+        if !init_result["result"]["capabilities"]["tools"].is_object() {
+            return Err("MCP server does not advertise tools capability".into());
+        }
 
         // Send initialized notification
         server
@@ -198,9 +233,41 @@ impl McpServer {
             .await?;
 
         // Fetch tool definitions
-        let tools_result = server.send_request("tools/list", json!({})).await?;
-        if let Some(tools) = tools_result["result"]["tools"].as_array() {
-            server.tool_definitions = tools.clone();
+        let mut cursor = None;
+        let mut cursors = std::collections::HashSet::new();
+        let mut names = std::collections::HashSet::new();
+        loop {
+            let params = cursor
+                .as_ref()
+                .map(|c| json!({"cursor":c}))
+                .unwrap_or(json!({}));
+            let tools_result = server.send_request("tools/list", params).await?;
+            let tools = tools_result["result"]["tools"]
+                .as_array()
+                .ok_or("Invalid MCP tools/list response")?;
+            for tool in tools {
+                let name = tool["name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("Invalid MCP tool name")?;
+                if !names.insert(name.to_owned()) {
+                    return Err(format!("Duplicate MCP tool: {name}"));
+                }
+                server.tool_definitions.push(tool.clone());
+            }
+            if server.tool_definitions.len() > 1000 {
+                return Err("MCP tool catalog exceeds 1000 tools".into());
+            }
+            cursor = tools_result["result"]["nextCursor"]
+                .as_str()
+                .map(str::to_string);
+            match &cursor {
+                Some(c) if !cursors.insert(c.clone()) || cursors.len() > 32 => {
+                    return Err("Invalid MCP pagination cursor".into())
+                }
+                Some(_) => {}
+                None => break,
+            }
         }
 
         Ok(server)
@@ -229,25 +296,18 @@ impl McpServer {
             map.insert(id, tx);
         }
 
-        self.write_message(&request).await.inspect_err(|_e| {
-            if let Ok(mut map) = self.pending.try_lock() {
-                map.remove(&id);
-            }
-        })?;
-
-        // Wait for the reader task to deliver the response
-        match tokio::time::timeout(std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS), rx)
-            .await
-        {
-            Ok(result) => result.map_err(|_| "MCP server closed connection".to_string())?,
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(format!(
-                    "MCP request '{}' timed out after {}s",
-                    method, MCP_REQUEST_TIMEOUT_SECS
-                ))
-            }
-        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS),
+            async {
+                self.write_message(&request).await?;
+                rx.await
+                    .map_err(|_| "MCP server closed connection".to_string())?
+            },
+        )
+        .await
+        .map_err(|_| format!("MCP request '{method}' timed out after {MCP_REQUEST_TIMEOUT_SECS}s"));
+        self.pending.lock().await.remove(&id);
+        result?
     }
 
     /// Send a JSON-RPC notification (no response expected)
@@ -258,11 +318,41 @@ impl McpServer {
             "params": params
         });
 
-        self.write_message(&notification).await
+        tokio::time::timeout(
+            std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS),
+            self.write_message(&notification),
+        )
+        .await
+        .map_err(|_| "MCP notification timed out".to_string())?
     }
 
     /// Call a tool on this MCP server
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
+        let result = self.call_tool_raw(name, arguments).await?;
+        let output = serde_json::to_string(&result).map_err(|e| e.to_string())?;
+        if result["isError"].as_bool() == Some(true) {
+            Err(format!("MCP tool failed: {output}"))
+        } else {
+            Ok(output)
+        }
+    }
+
+    pub async fn call_tool_raw(&self, name: &str, arguments: Value) -> Result<Value, String> {
+        let tool = self
+            .tool_definitions
+            .iter()
+            .find(|t| t["name"].as_str() == Some(name))
+            .ok_or("Unknown MCP tool")?;
+        if !arguments.is_object() {
+            return Err("Tool arguments must be a JSON object".into());
+        }
+        if let Some(schema) = tool.get("inputSchema") {
+            let validator = jsonschema::validator_for(schema)
+                .map_err(|e| format!("Invalid tool schema: {e}"))?;
+            if let Err(error) = validator.validate(&arguments) {
+                return Err(format!("Invalid tool arguments: {error}"));
+            }
+        }
         let result = self
             .send_request(
                 "tools/call",
@@ -272,23 +362,11 @@ impl McpServer {
                 }),
             )
             .await?;
-
-        // Extract text content from the result
-        if let Some(content) = result["result"]["content"].as_array() {
-            let texts: Vec<String> = content
-                .iter()
-                .filter_map(|c| {
-                    if c["type"] == "text" {
-                        c["text"].as_str().map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            return Ok(texts.join("\n"));
-        }
-
-        Ok(result.to_string())
+        result
+            .get("result")
+            .filter(|v| v.is_object())
+            .cloned()
+            .ok_or("Invalid MCP tools/call response".into())
     }
 
     /// Get the tool definitions from this server
@@ -301,6 +379,9 @@ impl McpServer {
         let mut stdin = self.stdin.lock().await;
         let mut content = serde_json::to_string(message).map_err(|e| e.to_string())?;
         content.push('\n');
+        if content.len() as u64 > MCP_MAX_FRAME_BYTES {
+            return Err("MCP message exceeds the 8 MB limit".into());
+        }
         stdin
             .write_all(content.as_bytes())
             .await
@@ -315,6 +396,11 @@ impl McpServer {
     /// Kill the server process
     pub async fn kill(&mut self) {
         let _ = self.child.kill().await;
+        self._reader_handle.abort();
+        self._stderr_handle.abort();
+        for (_, sender) in self.pending.lock().await.drain() {
+            let _ = sender.send(Err("MCP server stopped".into()));
+        }
     }
 }
 
@@ -378,7 +464,18 @@ impl McpManager {
                         tool_names,
                         error: None,
                     });
-                    all_tools.extend(tools.iter().map(mcp_tool_to_openai));
+                    all_tools.extend(tools.iter().map(|tool| {
+                        let mut definition = mcp_tool_to_openai(tool);
+                        definition["function"]["name"] =
+                            json!(tool_alias(name, tool["name"].as_str().unwrap_or_default()));
+                        definition["function"]["description"] = json!(format!(
+                            "[{} / {}] {}",
+                            name,
+                            tool["name"].as_str().unwrap_or_default(),
+                            tool["description"].as_str().unwrap_or_default()
+                        ));
+                        definition
+                    }));
                     self.servers.insert(name.clone(), server);
                 }
                 Err(e) => {
@@ -408,9 +505,10 @@ impl McpManager {
     ) -> Result<String, String> {
         for (server_name, server) in self.servers.iter() {
             for tool_def in server.tool_definitions() {
-                if tool_def["name"].as_str() == Some(tool_name) {
+                let original = tool_def["name"].as_str().unwrap_or_default();
+                if tool_alias(server_name, original) == tool_name {
                     return server
-                        .call_tool(tool_name, arguments)
+                        .call_tool(original, arguments)
                         .await
                         .map_err(|e| format!("MCP server '{}': {}", server_name, e));
                 }
@@ -426,6 +524,43 @@ impl McpManager {
         }
         self.servers.clear();
     }
+}
+
+fn tool_alias(server: &str, tool: &str) -> String {
+    let digest = Sha256::digest(format!("{server}\0{tool}").as_bytes());
+    let readable: String = tool
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(30)
+        .collect();
+    format!("mcp_{}_{readable}", hex::encode(&digest[..10]))
+}
+
+#[tauri::command]
+pub async fn inspect_mcp_tools(config: McpServerConfig) -> Result<Vec<Value>, String> {
+    let mut server = McpServer::start(&config).await?;
+    let tools = server.tool_definitions().to_vec();
+    server.kill().await;
+    Ok(tools)
+}
+
+#[tauri::command]
+pub async fn call_mcp_debug(
+    config: McpServerConfig,
+    tool: String,
+    arguments: Value,
+) -> Result<Value, String> {
+    let started = std::time::Instant::now();
+    let mut server = McpServer::start(&config).await?;
+    let result = server.call_tool_raw(&tool, arguments).await;
+    server.kill().await;
+    result.map(|result| json!({"result": result, "durationMs": started.elapsed().as_millis()}))
 }
 
 pub async fn test_server(name: String, config: McpServerConfig) -> McpServerStatus {
@@ -499,6 +634,102 @@ pub async fn fetch_ollama_models(base_url: &str) -> Result<Vec<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn framing_preserves_messages_and_rejects_oversize_input() {
+        let mut reader = BufReader::new(&b"one\ntwo\n"[..]);
+        assert_eq!(
+            read_frame(&mut reader).await.unwrap().as_deref(),
+            Some("one\n")
+        );
+        assert_eq!(
+            read_frame(&mut reader).await.unwrap().as_deref(),
+            Some("two\n")
+        );
+        assert!(read_frame(&mut reader).await.unwrap().is_none());
+        let input = vec![b'x'; MCP_MAX_FRAME_BYTES as usize + 1];
+        assert!(read_frame(&mut BufReader::new(input.as_slice()))
+            .await
+            .unwrap_err()
+            .contains("8 MB"));
+    }
+
+    #[test]
+    fn aliases_isolate_servers_and_fit_model_tool_name_limits() {
+        assert_ne!(
+            tool_alias("first", "read_file"),
+            tool_alias("second", "read_file")
+        );
+        let alias = tool_alias("docs/server", &"tool!".repeat(100));
+        assert!(alias.len() <= 64);
+        assert!(alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture, launched by the stdio integration test"]
+    fn protocol_fixture() {
+        use std::io::{BufRead, Write};
+        if std::env::var("GX_MCP_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        for line in std::io::stdin().lock().lines() {
+            let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            let Some(id) = request.get("id") else {
+                continue;
+            };
+            let result = match request["method"].as_str().unwrap_or("") {
+                "initialize" => json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}}}),
+                "tools/list" => {
+                    if request["params"]["cursor"].is_string() {
+                        json!({"tools":[{"name":"second","inputSchema":{"type":"object"}}]})
+                    } else {
+                        json!({"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}],"nextCursor":"page2"})
+                    }
+                }
+                "tools/call" => {
+                    json!({"content":[{"type":"text","text":"response"}],"structuredContent":{"value":request["params"]["arguments"]["value"]},"isError":request["params"]["arguments"]["value"]=="fail"})
+                }
+                _ => json!({}),
+            };
+            println!("{}", json!({"jsonrpc":"2.0","id":id,"result":result}));
+            std::io::stdout().flush().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_catalog_pagination_validation_and_errors() {
+        let config = McpServerConfig {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--ignored".into(),
+                "--exact".into(),
+                "mcp::tests::protocol_fixture".into(),
+                "--nocapture".into(),
+            ],
+            env: HashMap::from([("GX_MCP_FIXTURE".into(), "1".into())]),
+        };
+        let mut server = McpServer::start(&config).await.unwrap();
+        assert_eq!(server.tool_definitions().len(), 2);
+        assert!(server
+            .call_tool("echo", json!({"value":42}))
+            .await
+            .unwrap_err()
+            .contains("Invalid tool arguments"));
+        let raw = server
+            .call_tool_raw("echo", json!({"value":"hello"}))
+            .await
+            .unwrap();
+        assert_eq!(raw["structuredContent"]["value"], "hello");
+        assert!(server
+            .call_tool("echo", json!({"value":"fail"}))
+            .await
+            .unwrap_err()
+            .contains("MCP tool failed"));
+        server.kill().await;
+    }
 
     #[test]
     fn mcp_tool_definitions_convert_to_openai_function_shape() {

@@ -1,6 +1,7 @@
 use crate::text::{utf8_prefix, IncrementalUtf8Decoder};
 use crate::workspace;
 use chrono::{Local, Utc};
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -289,6 +290,36 @@ pub async fn execute_tool_with_timeout(
     .await
 }
 
+#[derive(Deserialize)]
+struct WriteFileArgs {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct EditFileArgs {
+    path: String,
+    old_string: String,
+    new_string: String,
+    #[serde(default)]
+    replace_all: bool,
+}
+
+#[derive(Deserialize)]
+struct CommandArgs {
+    command: String,
+}
+
+#[derive(Deserialize)]
+struct PythonArgs {
+    code: String,
+}
+
+fn parse_tool_args<T: DeserializeOwned>(name: &str, args: &str) -> Result<T, String> {
+    serde_json::from_str(args)
+        .map_err(|error| format!("Error: Invalid arguments for {name}: {error}"))
+}
+
 /// Execute a tool with cooperative cancellation and optional stdout/stderr
 /// streaming. Process-backed tools additionally terminate their complete
 /// process tree before returning on cancellation or timeout.
@@ -311,11 +342,20 @@ pub async fn execute_tool_with_control(
         return TOOL_CANCELLED_ERROR.to_string();
     }
 
-    let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
+    let args: Value = match parse_tool_args(name, args_str) {
+        Ok(Value::Object(args)) => Value::Object(args),
+        Ok(_) => return format!("Error: Invalid arguments for {name}: expected an object"),
+        Err(error) => return error,
+    };
     match name {
         "execute_command" => {
-            let cmd = args["command"].as_str().unwrap_or("");
-            match run_execute_command(cmd, work_dir, timeout_secs, cancel_rx, output_tx).await {
+            let args: CommandArgs = match parse_tool_args(name, args_str) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
+            match run_execute_command(&args.command, work_dir, timeout_secs, cancel_rx, output_tx)
+                .await
+            {
                 Ok(out) => out,
                 Err(e) if e == TOOL_CANCELLED_ERROR => e,
                 Err(e) => format!("Error: {}", e),
@@ -329,9 +369,11 @@ pub async fn execute_tool_with_control(
             }
         }
         "write_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            match run_write_file(path, content, work_dir).await {
+            let args: WriteFileArgs = match parse_tool_args(name, args_str) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
+            match run_write_file(&args.path, &args.content, work_dir).await {
                 Ok(_) => "File written successfully.".to_string(),
                 Err(e) => format!("Error: {}", e),
             }
@@ -344,8 +386,11 @@ pub async fn execute_tool_with_control(
             }
         }
         "run_python" => {
-            let code = args["code"].as_str().unwrap_or("");
-            match run_python(code, work_dir, timeout_secs, cancel_rx, output_tx).await {
+            let args: PythonArgs = match parse_tool_args(name, args_str) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
+            match run_python(&args.code, work_dir, timeout_secs, cancel_rx, output_tx).await {
                 Ok(out) => out,
                 Err(e) if e == TOOL_CANCELLED_ERROR => e,
                 Err(e) => format!("Error: {}", e),
@@ -375,11 +420,19 @@ pub async fn execute_tool_with_control(
         }
         "get_current_time" => run_current_time(&args),
         "edit_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let old_string = args["old_string"].as_str().unwrap_or("");
-            let new_string = args["new_string"].as_str().unwrap_or("");
-            let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-            match run_edit_file(path, old_string, new_string, replace_all, work_dir).await {
+            let args: EditFileArgs = match parse_tool_args(name, args_str) {
+                Ok(args) => args,
+                Err(error) => return error,
+            };
+            match run_edit_file(
+                &args.path,
+                &args.old_string,
+                &args.new_string,
+                args.replace_all,
+                work_dir,
+            )
+            .await
+            {
                 Ok(out) => out,
                 Err(e) => format!("Error: {}", e),
             }
@@ -2006,6 +2059,62 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn invalid_write_arguments_leave_existing_file_untouched() {
+        let dir = std::env::temp_dir().join(format!("gx-tool-args-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("example.txt");
+        std::fs::write(&file, "original text").unwrap();
+        for (tool, args) in [
+            ("write_file", r#"{"path":"example.txt"}"#),
+            ("write_file", r#"{"path":"example.txt","content":null}"#),
+            ("write_file", r#"{"path":"example.txt","content":123}"#),
+            ("write_file", r#"{"path":"example.txt","content":"""#),
+            (
+                "edit_file",
+                r#"{"path":"example.txt","old_string":"original"}"#,
+            ),
+            (
+                "edit_file",
+                r#"{"path":"example.txt","old_string":"original","new_string":false}"#,
+            ),
+            (
+                "edit_file",
+                r#"{"path":"example.txt","old_string":"original","new_string":"","replace_all":"yes"}"#,
+            ),
+            ("execute_command", "{}"),
+            ("run_python", "{}"),
+        ] {
+            let result = super::execute_tool(tool, args, dir.to_str().unwrap(), "", "").await;
+            assert!(
+                result.starts_with("Error: Invalid arguments"),
+                "{tool}: {result}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "original text");
+        }
+        let result = super::execute_tool(
+            "edit_file",
+            r#"{"path":"example.txt","old_string":"original","new_string":""}"#,
+            dir.to_str().unwrap(),
+            "",
+            "",
+        )
+        .await;
+        assert!(!result.starts_with("Error:"), "{result}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), " text");
+        let result = super::execute_tool(
+            "write_file",
+            r#"{"path":"example.txt","content":""}"#,
+            dir.to_str().unwrap(),
+            "",
+            "",
+        )
+        .await;
+        assert!(!result.starts_with("Error:"), "{result}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// Apply a located edit the same way `run_edit_file` does, so the tests
     /// exercise the real offset arithmetic rather than a reimplementation.
