@@ -46,6 +46,7 @@ import { useOnboarding } from "./hooks/useOnboarding";
 import { useConfigActions } from "./hooks/useConfigActions";
 import { useAgentRequest } from "./hooks/useAgentRequest";
 import { useSessionLifecycle } from "./hooks/useSessionLifecycle";
+import { workbenchLayout } from "./utils/workbenchLayout";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 
 import { SETTINGS_TAB_ORDER, settingsTabLabel, type SettingsTab } from "./components/settings/settingsNavigation";
@@ -233,19 +234,9 @@ function App() {
   });
   const [draggingSidebar, setDraggingSidebar] = useState(false);
   const [draggingRight, setDraggingRight] = useState(false);
-
-  const minChatWidthForViewport = () => window.innerWidth <= 800 ? 280 : 360;
-  const maxSidebarWidthForViewport = () => {
-    const rightReservation = rightPanelOpen && window.innerWidth >= 1180 ? rightPanelWidth + 5 : 0;
-    return Math.min(
-      400,
-      Math.max(180, window.innerWidth - rightReservation - 4 - minChatWidthForViewport()),
-    );
-  };
-  const maxRightPanelWidthForViewport = () => Math.min(
-    900,
-    Math.max(320, window.innerWidth - (window.innerWidth >= 1180 && navigationOpen ? sidebarWidth : 0) - 8 - minChatWidthForViewport()),
-  );
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const layout = workbenchLayout(viewportWidth, sidebarWidth, rightPanelWidth, navigationOpen, rightPanelOpen);
+  const { maxSidebarWidth, maxReviewWidth } = layout;
 
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
   const historyListRef = useRef<HTMLDivElement>(null);
@@ -253,10 +244,9 @@ function App() {
   const sessionSettingsPanelRef = useRef<HTMLDivElement>(null);
   const sessionSettingsToggleRef = useRef<HTMLButtonElement>(null);
   const sidebarNavRef = useRef(sidebarNav);
-  const lastSessionByModeRef = useRef<Partial<Record<SessionConfig["mode"], string>>>({});
   const requestStartingRef = useRef(false);
-  const switchSidebarModeRef = useRef<(mode: SessionConfig["mode"]) => void>(() => {});
-  // Same latest-value pattern as switchSidebarModeRef: the window keydown
+  const switchSessionModeRef = useRef<(mode: SessionConfig["mode"]) => void>(() => {});
+  // Same latest-value pattern as switchSessionModeRef: the window keydown
   // effect's dependency array only tracks modal state, so calling
   // createNewSession directly there captures a stale sidebarNav/session list.
   const createNewSessionRef = useRef<() => void>(() => {});
@@ -303,9 +293,6 @@ function App() {
     [sessions, currentSessionId]
   );
   const currentMode = currentSession.sessionConfig.mode || "chat";
-  useEffect(() => {
-    lastSessionByModeRef.current[currentMode] = currentSession.id;
-  }, [currentMode, currentSession.id]);
 
   // Sidebar list state. Without a query: the normal list plus the collapsed
   // archived section. With a query: full-text matches across ALL messages of
@@ -415,7 +402,7 @@ function App() {
       const ctrl = e.ctrlKey || e.metaKey;
       if (ctrl && e.shiftKey && (e.key === "N" || e.key === "n")) {
         e.preventDefault();
-        switchSidebarModeRef.current(sidebarNavRef.current === "chat" ? "code" : "chat");
+        switchSessionModeRef.current(sidebarNavRef.current === "chat" ? "code" : "chat");
         return;
       }
       if (ctrl && !e.shiftKey && e.key === "n") {
@@ -500,12 +487,12 @@ function App() {
     e.preventDefault();
     setDraggingSidebar(true);
     const startX = e.clientX;
-    const startWidth = sidebarWidth;
+    const startWidth = layout.sidebarWidth;
     let latestWidth = startWidth;
 
     const onMouseMove = (ev: MouseEvent) => {
       const delta = ev.clientX - startX;
-      const newWidth = Math.max(180, Math.min(maxSidebarWidthForViewport(), startWidth + delta));
+      const newWidth = Math.max(180, Math.min(maxSidebarWidth, startWidth + delta));
       latestWidth = newWidth;
       setSidebarWidth(newWidth);
     };
@@ -517,18 +504,18 @@ function App() {
     };
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-  }, [rightPanelOpen, rightPanelWidth, sidebarWidth]);
+  }, [layout.sidebarWidth, maxSidebarWidth]);
 
   const handleRightDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     setDraggingRight(true);
     const startX = e.clientX;
-    const startWidth = rightPanelWidth;
+    const startWidth = layout.reviewWidth;
     let latestWidth = startWidth;
 
     const onMouseMove = (ev: MouseEvent) => {
       const delta = startX - ev.clientX;
-      const newWidth = Math.max(320, Math.min(maxRightPanelWidthForViewport(), startWidth + delta));
+      const newWidth = Math.max(320, Math.min(maxReviewWidth, startWidth + delta));
       latestWidth = newWidth;
       setRightPanelWidth(newWidth);
     };
@@ -540,31 +527,14 @@ function App() {
     };
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-  }, [rightPanelWidth, sidebarWidth, navigationOpen]);
+  }, [layout.reviewWidth, maxReviewWidth]);
 
-  // Keep persisted panel widths from squeezing the conversation into an
-  // unusable sliver after a window resize or a monitor change.
+  // Fit the viewport without overwriting the user's preferred panel widths.
   useEffect(() => {
-    const clampLayoutWidths = () => {
-      setSidebarWidth((previous) => {
-        const next = Math.max(180, Math.min(maxSidebarWidthForViewport(), previous));
-        if (next !== previous) {
-          try { localStorage.setItem("gx_sidebar_width", String(next)); } catch { /* ignore */ }
-        }
-        return next;
-      });
-      setRightPanelWidth((previous) => {
-        const next = Math.max(320, Math.min(maxRightPanelWidthForViewport(), previous));
-        if (next !== previous) {
-          try { localStorage.setItem("gx_right_panel_width", String(next)); } catch { /* ignore */ }
-        }
-        return next;
-      });
-    };
-    clampLayoutWidths();
-    window.addEventListener("resize", clampLayoutWidths);
-    return () => window.removeEventListener("resize", clampLayoutWidths);
-  }, [rightPanelOpen, rightPanelWidth, sidebarWidth, navigationOpen]);
+    const resize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
 
   // ==========================================
   // Init: Load config & presets
@@ -922,17 +892,15 @@ function App() {
   const {
     createNewSessionInMode,
     createNewSession,
-    switchSidebarMode,
+    switchSessionMode,
     replaceAllSessions,
     deleteSession,
     setSessionArchived,
   } = useSessionLifecycle({
     lang,
     sessionStorageReady,
-    currentSession,
     sidebarNav,
     setSidebarNav,
-    lastSessionByModeRef,
     requestStartingRef,
     sessionPersistenceEpochRef,
     lastPersistedSessionsRef,
@@ -950,7 +918,7 @@ function App() {
     setExpandedActions,
   });
   createNewSessionRef.current = createNewSession;
-  switchSidebarModeRef.current = switchSidebarMode;
+  switchSessionModeRef.current = switchSessionMode;
 
   const toggleActionExpanded = (id: string) => {
     setExpandedActions((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -1111,7 +1079,7 @@ function App() {
 
       {/* ====== Sidebar ====== */}
       <div className="workbench-body">
-      <div id="workbench-navigation" className="workbench-navigation" style={{ width: sidebarWidth }}>
+      <div id="workbench-navigation" className="workbench-navigation" style={{ "--sidebar-width": `${layout.sidebarWidth}px` } as React.CSSProperties}>
       <WorkbenchHeader lang={lang} config={config} setConfig={setConfig} navigationOpen={navigationOpen} onToggleNavigation={() => setNavigationOpen(open => !open)} onSettings={() => setSettingsOpen(true)} />
       <Sidebar
         lang={lang}
@@ -1123,7 +1091,7 @@ function App() {
         currentSessionId={currentSessionId}
         tabbableSessionId={tabbableSessionId}
         sidebarNav={sidebarNav}
-        sidebarWidth={sidebarWidth}
+        sidebarWidth={layout.sidebarWidth}
         sessionSearch={sessionSearch}
         setSessionSearch={setSessionSearch}
         debouncedSearch={debouncedSearch}
@@ -1158,13 +1126,13 @@ function App() {
         aria-orientation="vertical"
         aria-label={t("ui.resize-conversation-sidebar", lang)}
         aria-valuemin={180}
-        aria-valuemax={400}
-        aria-valuenow={sidebarWidth}
+        aria-valuemax={maxSidebarWidth}
+        aria-valuenow={layout.sidebarWidth}
         tabIndex={0}
         onKeyDown={(event) => {
           if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
           event.preventDefault();
-          const nextWidth = Math.max(180, Math.min(maxSidebarWidthForViewport(), sidebarWidth + (event.key === "ArrowRight" ? 12 : -12)));
+          const nextWidth = Math.max(180, Math.min(maxSidebarWidth, layout.sidebarWidth + (event.key === "ArrowRight" ? 12 : -12)));
           setSidebarWidth(nextWidth);
           try { localStorage.setItem("gx_sidebar_width", String(nextWidth)); } catch { /* ignore */ }
         }}
@@ -1184,8 +1152,8 @@ function App() {
             currentSession={currentSession}
             navigationOpen={navigationOpen}
             onToggleNavigation={() => setNavigationOpen(open => !open)}
-            onModeChange={switchSidebarMode}
-            disabled={!sessionStorageReady}
+            onModeChange={switchSessionMode}
+            disabled={sessionMutationLocked}
             sessionSaveStatus={sessionSaveStatus}
             sessionSettingsOpen={sessionSettingsOpen}
             setSessionSettingsOpen={setSessionSettingsOpen}
@@ -1287,13 +1255,13 @@ function App() {
             aria-orientation="vertical"
             aria-label={t("ui.resize-workspace-panel", lang)}
             aria-valuemin={320}
-            aria-valuemax={maxRightPanelWidthForViewport()}
-            aria-valuenow={rightPanelWidth}
+            aria-valuemax={maxReviewWidth}
+            aria-valuenow={layout.reviewWidth}
             tabIndex={0}
             onKeyDown={(event) => {
               if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
               event.preventDefault();
-              const nextWidth = Math.max(320, Math.min(maxRightPanelWidthForViewport(), rightPanelWidth + (event.key === "ArrowLeft" ? 12 : -12)));
+              const nextWidth = Math.max(320, Math.min(maxReviewWidth, layout.reviewWidth + (event.key === "ArrowLeft" ? 12 : -12)));
               setRightPanelWidth(nextWidth);
               try { localStorage.setItem("gx_right_panel_width", String(nextWidth)); } catch { /* ignore */ }
             }}
@@ -1307,7 +1275,7 @@ function App() {
           config={config}
           session={currentSession}
           open={rightPanelOpen}
-          width={rightPanelWidth}
+          width={layout.reviewWidth}
           onClose={() => { setRightPanelOpen(false); setMobilePane("conversation"); }}
           workspace={currentWorkspace}
           onRefresh={() => { void refreshWorkspace(currentSessionId, effectiveWorkDir); }}

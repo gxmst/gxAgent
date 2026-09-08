@@ -851,6 +851,7 @@ pub async fn start_agent_loop(
                 request_id.clone(),
                 client,
                 user_prompt,
+                retrieval_query,
                 config,
                 session_messages,
                 search_mode,
@@ -1447,12 +1448,42 @@ async fn run_chat_tools(
     Ok(ran_search || has_observations)
 }
 
+// External search receives only explicit query text, never enriched model input.
+fn forced_search_query<'a>(
+    mode: &str,
+    enabled: bool,
+    is_ollama: bool,
+    query: &'a str,
+) -> Option<&'a str> {
+    let query = query.trim();
+    (mode == "force" && enabled && !is_ollama && !query.is_empty()).then_some(query)
+}
+
+#[cfg(test)]
+mod forced_search_tests {
+    use super::forced_search_query;
+
+    #[test]
+    fn search_keeps_the_explicit_query_and_skips_attachment_only_turns() {
+        assert_eq!(
+            forced_search_query("force", true, false, "  compare release dates  "),
+            Some("compare release dates")
+        );
+        for query in ["", " \n\t "] {
+            assert_eq!(forced_search_query("force", true, false, query), None);
+        }
+        assert_eq!(forced_search_query("auto", true, false, "query"), None);
+        assert_eq!(forced_search_query("force", false, false, "query"), None);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_chat_mode(
     window: Window,
     request_id: String,
     client: reqwest::Client,
     user_prompt: String,
+    search_query: String,
     config: AppConfig,
     session_messages: Vec<Value>,
     search_mode: String,
@@ -1490,9 +1521,10 @@ async fn run_chat_mode(
     let mut tool_call_count: u32 = 0;
 
     // Force search mode: execute search before sending to model
-    if search_mode == "force" && has_web_search && !is_ollama {
+    if let Some(search_query) =
+        forced_search_query(&search_mode, has_web_search, is_ollama, &search_query)
+    {
         ensure_not_cancelled(&cancel_rx)?;
-        let search_query = user_prompt.clone();
         emit_request_event(
             &window,
             "agent-search-status",

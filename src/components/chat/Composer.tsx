@@ -85,7 +85,7 @@ export function Composer({ lang, config, setConfig, currentSession, resolvedCurr
     event.preventDefault();
     if (!locked) await addFilesAsAttachments(files);
   };
-  const permissionLabel = resolvedCurrentConfig.plan_mode ? (zh ? "只读规划" : "Read-only planning") : currentSession.sessionConfig.trustAllOperations ? (zh ? "信任所有操作" : "All operations trusted") : resolvedCurrentConfig.approval_policy === "strict" ? (codex ? (zh ? "谨慎审批" : "Cautious approvals") : (zh ? "逐次确认" : "Ask each time")) : (zh ? "按策略确认" : "Policy approvals");
+  const permissionLabel = resolvedCurrentConfig.plan_mode ? (zh ? "只读规划" : "Read-only planning") : resolvedCurrentConfig.approval_policy === "unrestricted" ? (zh ? "信任所有操作" : "All operations trusted") : resolvedCurrentConfig.approval_policy === "strict" ? (codex ? (zh ? "谨慎审批" : "Cautious approvals") : (zh ? "逐次确认" : "Ask each time")) : (zh ? "按策略确认" : "Policy approvals");
 
   return <div className={`chat-input-wrapper ${dragOver ? "drag-over" : ""}`} onDragOver={event => { event.preventDefault(); if (!locked) setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={async event => { event.preventDefault(); setDragOver(false); if (!locked) await addFilesAsAttachments(Array.from(event.dataTransfer.files)); }}>
     {dragOver && <div className="drag-overlay">{t("attach.drop", lang)}</div>}

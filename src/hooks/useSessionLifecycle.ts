@@ -1,6 +1,6 @@
 /**
  * Session lifecycle: create sessions (with workspace picking in code mode),
- * switch sidebar modes, bulk-replace/import sessions, and delete with undo —
+ * switch the current session's mode, bulk-replace/import sessions, and delete with undo.
  * plus the per-session UI-state reset/drop bookkeeping those flows need.
  *
  * Extracted verbatim from App.tsx. Store-backed state comes from zustand;
@@ -24,10 +24,8 @@ import { addLog, notify, discardStreamBuffer } from "../services/agentEvents";
 export function useSessionLifecycle({
   lang,
   sessionStorageReady,
-  currentSession,
   sidebarNav,
   setSidebarNav,
-  lastSessionByModeRef,
   requestStartingRef,
   sessionPersistenceEpochRef,
   lastPersistedSessionsRef,
@@ -46,10 +44,8 @@ export function useSessionLifecycle({
 }: {
   lang: string;
   sessionStorageReady: boolean;
-  currentSession: ChatSession;
   sidebarNav: "chat" | "code";
   setSidebarNav: React.Dispatch<React.SetStateAction<"chat" | "code">>;
-  lastSessionByModeRef: React.MutableRefObject<Partial<Record<SessionConfig["mode"], string>>>;
   requestStartingRef: React.MutableRefObject<boolean>;
   sessionPersistenceEpochRef: React.MutableRefObject<number>;
   lastPersistedSessionsRef: React.MutableRefObject<Record<string, string>>;
@@ -67,6 +63,7 @@ export function useSessionLifecycle({
   setExpandedActions: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
 }) {
   const deletingSessionIdsRef = useRef(new Set<string>());
+  const switchingModeRef = useRef(false);
   const sessions = useAppStore((s) => s.sessions);
   const setSessions = useAppStore((s) => s.setSessions);
   const currentSessionId = useAppStore((s) => s.currentSessionId);
@@ -109,24 +106,30 @@ export function useSessionLifecycle({
     void createNewSessionInMode(sidebarNav);
   };
 
-  const switchSidebarMode = (mode: SessionConfig["mode"]) => {
-    if (currentSession.sessionConfig.mode === mode) {
+  const switchSessionMode = async (mode: SessionConfig["mode"]) => {
+    const state = useAppStore.getState();
+    if (!sessionStorageReady || switchingModeRef.current || requestStartingRef.current
+      || state.activeRunSessionId || state.preparingRequestSessionId) return;
+    const target = state.sessions.find(session => session.id === state.currentSessionId);
+    if (!target || target.sessionConfig.mode === mode) return;
+    switchingModeRef.current = true;
+    try {
+      let workDir = target.sessionConfig.workDir;
+      if (mode === "code" && !workDir?.trim()) {
+        workDir = await invoke<string | null>("pick_workspace_directory");
+        if (!workDir) return;
+      }
+      const latest = useAppStore.getState();
+      if (latest.currentSessionId !== target.id || latest.activeRunSessionId
+        || latest.preparingRequestSessionId || requestStartingRef.current) return;
+      setSessions(previous => previous.map(session => session.id === target.id
+        ? { ...session, sessionConfig: { ...session.sessionConfig, mode, workDir }, updatedAt: Date.now() }
+        : session));
       setSidebarNav(mode);
-      return;
-    }
-    const rememberedSessionId = lastSessionByModeRef.current[mode];
-    const target = sessions.find((session) => (
-      session.id === rememberedSessionId
-      && session.sessionConfig.mode === mode
-      && !session.archived
-    )) || sessions
-      .filter((session) => session.sessionConfig.mode === mode && !session.archived)
-      .sort(compareSidebarSessions)[0];
-    if (target) {
-      setSidebarNav(mode);
-      setCurrentSessionId(target.id);
-    } else {
-      void createNewSessionInMode(mode);
+    } catch (error) {
+      notify(t("ui.could-not-open-the-folder-2", lang) + error, "error");
+    } finally {
+      switchingModeRef.current = false;
     }
   };
 
@@ -360,7 +363,7 @@ export function useSessionLifecycle({
   return {
     createNewSessionInMode,
     createNewSession,
-    switchSidebarMode,
+    switchSessionMode,
     replaceAllSessions,
     deleteSession,
     setSessionArchived,

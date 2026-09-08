@@ -403,6 +403,7 @@ export function useAgentRequest({
     runtime.activeRequestSessionId = targetSessionId;
     runtime.activeRequestEngine = requestConfig.code_engine || "native";
     runtime.activeCodexTurnStarted = false;
+    runtime.activeCodexHistoryComplete = !assistantMessageId || targetSession?.messages.at(-1)?.id === assistantMessageId;
     if (assistantMessageId) {
       runtime.assistantMessageIdByRequest[requestId] = assistantMessageId;
     }

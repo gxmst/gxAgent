@@ -22,13 +22,13 @@ function setup() {
   vi.useFakeTimers();
   const a = createSession('chat');
   const b = createSession('chat');
-  useAppStore.setState({ sessions: [a, b], currentSessionId: a.id, runtimeBySession: {}, checkpointBySession: {} });
+  useAppStore.setState({ sessions: [a, b], currentSessionId: a.id, runtimeBySession: {}, checkpointBySession: {}, activeRunSessionId: null, preparingRequestSessionId: null });
   let resolve!: () => void;
   let reject!: (error: Error) => void;
   const deletion = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
   const params: Parameters<typeof useSessionLifecycle>[0] = {
-    lang: 'en', sessionStorageReady: true, currentSession: a, sidebarNav: 'chat',
-    setSidebarNav: vi.fn(), lastSessionByModeRef: { current: {} }, requestStartingRef: { current: false },
+    lang: 'en', sessionStorageReady: true, sidebarNav: 'chat',
+    setSidebarNav: vi.fn(), requestStartingRef: { current: false },
     sessionPersistenceEpochRef: { current: 0 }, lastPersistedSessionsRef: { current: {} },
     sessionObjCacheRef: { current: {} }, sessionJsonCacheRef: { current: {} },
     saveSession: vi.fn().mockResolvedValue(undefined), saveSessions: vi.fn().mockResolvedValue(undefined),
@@ -99,9 +99,40 @@ it('creates a task in the selected project without opening another directory pic
 it('keeps the current mode and selection when the project picker is cancelled', async () => {
   const { result, a, b, params } = setup();
   vi.mocked(invoke).mockResolvedValueOnce(null);
-  await act(async () => { result.current.switchSidebarMode('code'); });
+  await act(async () => { await result.current.switchSessionMode('code'); });
   expect(invoke).toHaveBeenCalledWith('pick_workspace_directory');
   expect(params.setSidebarNav).not.toHaveBeenCalled();
   expect(useAppStore.getState().currentSessionId).toBe(a.id);
   expect(useAppStore.getState().sessions).toEqual([a, b]);
+});
+
+it('changes mode on the current session while preserving its history and drafts', async () => {
+  const { result, a, b, params } = setup();
+  a.messages = [{ id: 'message', role: 'user', content: 'Keep this requirement' }];
+  b.sessionConfig.mode = 'code';
+  vi.mocked(invoke).mockResolvedValue('C:/projects/current');
+  await act(async () => { await result.current.switchSessionMode('code'); });
+  const state = useAppStore.getState();
+  expect(state.currentSessionId).toBe(a.id);
+  expect(state.sessions).toHaveLength(2);
+  expect(state.sessions[0]).toMatchObject({ id: a.id, messages: a.messages, sessionConfig: { mode: 'code', workDir: 'C:/projects/current' } });
+  expect(state.sessions[1]).toBe(b);
+  expect(params.setDraftsBySession).not.toHaveBeenCalled();
+  await act(async () => { await result.current.switchSessionMode('chat'); });
+  expect(useAppStore.getState().sessions[0].sessionConfig.workDir).toBe('C:/projects/current');
+  expect(invoke).toHaveBeenCalledTimes(1);
+});
+
+it('does not apply a pending project selection to a different task or active run', async () => {
+  const { result, a, b } = setup();
+  let choose!: (path: string) => void;
+  vi.mocked(invoke).mockImplementation(() => new Promise(resolve => { choose = resolve as typeof choose; }));
+  let pending!: Promise<void>;
+  act(() => { pending = result.current.switchSessionMode('code'); });
+  act(() => { useAppStore.setState({ currentSessionId: b.id }); });
+  await act(async () => { choose('C:/projects/stale'); await pending; });
+  expect(useAppStore.getState().sessions).toEqual([a, b]);
+  useAppStore.setState({ activeRunSessionId: b.id });
+  await act(async () => { await result.current.switchSessionMode('code'); });
+  expect(invoke).toHaveBeenCalledTimes(1);
 });

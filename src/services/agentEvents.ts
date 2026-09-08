@@ -248,7 +248,7 @@ export const finishStreamingLocally = (
       } };
       return { ...session, messages, updatedAt: Date.now() };
     }));
-    if (runtime.activeRequestEngine === "codex" && runtime.activeCodexTurnStarted && (finalStatus === "completed" || finalStatus === "stopped")) rememberCodexHistory(sessionId);
+    if (runtime.activeRequestEngine === "codex" && runtime.activeCodexTurnStarted && (finalStatus === "completed" || finalStatus === "stopped")) rememberCodexHistory(sessionId, runtime.activeCodexHistoryComplete);
   }
   if (expectedRequestId) {
     delete runtime.requestSessionById[expectedRequestId];
@@ -256,6 +256,7 @@ export const finishStreamingLocally = (
   }
   runtime.isStreaming = false;
   runtime.activeCodexTurnStarted = false;
+  runtime.activeCodexHistoryComplete = false;
   runtime.activeRequestEngine = "native";
   runtime.activeRequestId = "";
   runtime.activeRequestSessionId = "";

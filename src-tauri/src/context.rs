@@ -94,6 +94,46 @@ fn snapshot_content(messages: &[Value], tools: &[Value]) -> (Value, Value, bool)
     (entries, definitions, truncated)
 }
 
+fn collect_context(
+    config: &AppConfig,
+    query: &str,
+) -> Result<
+    (
+        Vec<crate::skills::Skill>,
+        Option<crate::knowledge::SearchReport>,
+    ),
+    String,
+> {
+    let catalog = crate::skills::discover(config);
+    let selected: Vec<_> = catalog
+        .skills
+        .into_iter()
+        .filter(|s| config.learning.enabled_skills.contains(&s.id))
+        .collect();
+    for skill in &selected {
+        if !skill.missing_dependencies.is_empty() {
+            return Err(format!(
+                "Skill {} requires MCP servers: {}",
+                skill.name,
+                skill.missing_dependencies.join(", ")
+            ));
+        }
+    }
+    // Attachment-only turns have no explicit query. They still reach the model.
+    let query: String = query.trim().chars().take(2000).collect();
+    let retrieval = if config.learning.knowledge_enabled && !query.is_empty() {
+        Some(crate::knowledge::search_knowledge(
+            query,
+            config.default_work_dir.clone(),
+            config.learning.top_k,
+            config.learning.match_mode.clone(),
+        )?)
+    } else {
+        None
+    };
+    Ok((selected, retrieval))
+}
+
 pub async fn enrich(
     window: &Window,
     request_id: &str,
@@ -105,37 +145,11 @@ pub async fn enrich(
         return Ok(());
     }
     let config_copy = config.clone();
-    let query = query.chars().take(2000).collect::<String>();
-    let (skills, retrieval) = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let catalog = crate::skills::discover(&config_copy);
-        let selected: Vec<_> = catalog
-            .skills
-            .into_iter()
-            .filter(|s| config_copy.learning.enabled_skills.contains(&s.id))
-            .collect();
-        for skill in &selected {
-            if !skill.missing_dependencies.is_empty() {
-                return Err(format!(
-                    "Skill {} requires MCP servers: {}",
-                    skill.name,
-                    skill.missing_dependencies.join(", ")
-                ));
-            }
-        }
-        let retrieval = if config_copy.learning.knowledge_enabled {
-            Some(crate::knowledge::search_knowledge(
-                query,
-                config_copy.default_work_dir.clone(),
-                config_copy.learning.top_k,
-                config_copy.learning.match_mode.clone(),
-            )?)
-        } else {
-            None
-        };
-        Ok((selected, retrieval))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let query = query.to_owned();
+    let (skills, retrieval) =
+        tokio::task::spawn_blocking(move || collect_context(&config_copy, &query))
+            .await
+            .map_err(|e| e.to_string())??;
     let original_bytes = config.system_prompt.len() + prompt.len();
     for skill in &skills {
         config.system_prompt.push_str(&format!(
@@ -171,6 +185,21 @@ pub async fn enrich(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_only_turns_skip_retrieval_even_when_enabled() {
+        let mut config = AppConfig::default();
+        config.learning.knowledge_enabled = true;
+        config.default_work_dir = std::env::temp_dir()
+            .join(uuid::Uuid::new_v4().to_string())
+            .to_string_lossy()
+            .into_owned();
+        for query in ["", " \n\t "] {
+            let (skills, retrieval) = collect_context(&config, query).unwrap();
+            assert!(skills.is_empty());
+            assert!(retrieval.is_none());
+        }
+    }
 
     #[test]
     fn snapshots_omit_images_and_known_secret_fields_without_changing_requests() {

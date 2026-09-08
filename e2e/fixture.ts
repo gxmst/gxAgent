@@ -1,7 +1,13 @@
 import type { Page } from '@playwright/test';
 
-export async function installFixture(page: Page) {
-  await page.addInitScript(() => {
+interface FixtureOptions {
+  config?: Record<string, unknown>;
+  extraReviewMessages?: Record<string, unknown>[];
+  parsedFiles?: Record<string, unknown>[];
+}
+
+export async function installFixture(page: Page, options: FixtureOptions = {}) {
+  await page.addInitScript(options => {
     const bridge = window as typeof window & Record<string, any>;
     localStorage.setItem('gx_current_session', 'review');
     localStorage.setItem('gx_onboarding_v1', 'complete');
@@ -17,6 +23,7 @@ export async function installFixture(page: Page) {
       { id: 'another', title: 'Document generation', createdAt: 1, updatedAt: 2, sessionConfig: { ...config, workDir: 'C:/projects/document-tools' }, messages: [] },
       { id: 'chat', title: 'Discuss the roadmap', createdAt: 1, updatedAt: 1, sessionConfig: { mode: 'chat' }, messages: [] },
     ];
+    bridge.__sessions[0].messages.push(...(options.extraReviewMessages || []));
     bridge.__events = {};
     bridge.__calls = [];
     bridge.__fileFailure = false;
@@ -41,7 +48,12 @@ export async function installFixture(page: Page) {
           bridge.__events[args.event] = (payload: unknown) => callbacks[args.handler]?.({ event: args.event, payload, id: sequence });
           return ++sequence;
         }
-        if (command === 'load_config') return { provider: 'ollama', wire_format: 'ollama', model: 'qwen3-coder', base_url: 'http://localhost:11434', language: localStorage.getItem('fixture_language') || 'en', theme: 'light', default_work_dir: config.workDir, mcp_servers: { docs: { command: 'fixture', args: [], env: {} } } };
+        if (command === 'load_config') return {
+          provider: 'ollama', wire_format: 'ollama', model: 'qwen3-coder', base_url: 'http://localhost:11434',
+          language: localStorage.getItem('fixture_language') || 'en', theme: 'light', default_work_dir: config.workDir,
+          mcp_servers: { docs: { command: 'fixture', args: [], env: {} } }, ...options.config,
+        };
+        if (command === 'pick_and_parse_files') return options.parsedFiles || [];
         if (command === 'list_skills') return { skills: [skill], errors: [] };
         if (command === 'read_skill_resource') return 'Reference document content.';
         if (command === 'list_session_backups') return bridge.__backups;
@@ -92,7 +104,7 @@ export async function installFixture(page: Page) {
       },
     };
     bridge.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
-  });
+  }, options);
 }
 
 export async function emit(page: Page, event: string, payload: Record<string, unknown>) {

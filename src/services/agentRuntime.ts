@@ -23,6 +23,7 @@ export const runtime = {
   activeRequestModel: "",
   activeRequestEngine: "native" as "native" | "codex",
   activeCodexTurnStarted: false,
+  activeCodexHistoryComplete: false,
   activeRequestContextTokens: 0,
   activeRequestWorkDir: "",
   /** Mirrors hasActiveRequest; also flipped synchronously around request start/stop. */

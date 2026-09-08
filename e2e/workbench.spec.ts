@@ -162,6 +162,13 @@ test('settings and review remain contained on desktop and narrow Chinese layouts
       await page.locator(`#workspace-tab-${id}`).click();
       await expect(page.locator(`#workspace-panel-${id}`)).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+      expect(await page.locator(`#workspace-tab-${id}`).evaluate(element => {
+        const text = document.createRange();
+        text.selectNodeContents(element);
+        const bounds = text.getBoundingClientRect();
+        const tab = element.getBoundingClientRect();
+        return bounds.x >= tab.x && bounds.right <= tab.right && bounds.height < 24;
+      })).toBe(true);
     }
     await page.locator('#workspace-tab-changes').click();
     await page.screenshot({ path: testInfo.outputPath(`review-${language}-320.png`) });

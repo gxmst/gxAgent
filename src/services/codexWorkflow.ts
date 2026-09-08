@@ -8,9 +8,16 @@ export async function codexHistoryKey(messages: Message[]): Promise<string> {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export function rememberCodexHistory(sessionId: string) {
+export function rememberCodexHistory(sessionId: string, historyComplete: boolean) {
   const snapshot = useAppStore.getState().sessions.find(session => session.id === sessionId);
   if (!snapshot?.codexThread) return;
+  // Retrying an earlier answer leaves later visible turns outside this thread.
+  if (!historyComplete) {
+    useAppStore.getState().setSessions(sessions => sessions.map(session => session.id === sessionId
+      ? { ...session, codexThread: undefined }
+      : session));
+    return;
+  }
   const threadId = snapshot.codexThread.id;
   void codexHistoryKey(snapshot.messages).then(historyKey => {
     useAppStore.getState().setSessions(sessions => sessions.map(session => session.id === sessionId
