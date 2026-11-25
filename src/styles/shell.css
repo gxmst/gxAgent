@@ -1,82 +1,8 @@
 /* ========================================================
-   App shell — layout, scrollbars, panel headers, buttons, inputs, sidebar.
+   Shared UI primitives — scrollbars, buttons, inputs, sidebar list primitives.
+   Shell layout and chrome live in workbench.css.
    ======================================================== */
 
-/* ========================================================
-   Layout
-   ======================================================== */
-
-.app-container {
-  display: flex;
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
-}
-
-.sidebar {
-  width: 240px;
-  min-width: 180px;
-  background-color: var(--bg-sidebar);
-  border-right: 1px solid var(--border-default);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  z-index: 10;
-}
-
-.workspace-container {
-  display: flex;
-  flex-grow: 1;
-  height: 100%;
-  overflow: hidden;
-}
-
-.chat-panel {
-  flex: 1;
-  min-width: 280px;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  position: relative;
-  background-color: var(--bg-main);
-}
-
-/* Draggable divider */
-.resize-divider {
-  width: 4px;
-  cursor: col-resize;
-  background: transparent;
-  flex-shrink: 0;
-  position: relative;
-  z-index: 5;
-  transition: background var(--transition-fast);
-}
-.resize-divider:hover,
-.resize-divider.dragging {
-  background: var(--accent);
-}
-
-.resize-divider:focus-visible {
-  outline: none;
-  background: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-subtle);
-}
-
-.canvas-panel {
-  width: 360px;
-  min-width: 200px;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  background-color: var(--bg-sidebar);
-  border-left: 1px solid var(--border-default);
-}
-
-.canvas-panel.collapsed {
-  display: none;
-}
-
-/* Toggle button for right panel */
 .panel-toggle-btn {
   display: flex;
   align-items: center;
@@ -88,94 +14,26 @@
   color: var(--text-secondary);
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
+
 .panel-toggle-btn:hover {
-  background: var(--bg-card);
+  background: var(--bg-card-hover);
   color: var(--text-primary);
-  box-shadow: var(--shadow-card);
 }
+
 .panel-toggle-btn.active {
   color: var(--accent);
   background: var(--bg-card);
-  box-shadow: var(--shadow-card);
 }
 
-/* ========================================================
-   Scrollbars
-   ======================================================== */
-
+/* Scrollbars */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: var(--radius-full); }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
-/* ========================================================
-   Panel Header — Borderless, minimal
-   ======================================================== */
-
-.panel-header {
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border-default);
-  background-color: var(--bg-main);
-  flex-shrink: 0;
-  box-sizing: border-box;
-}
-
-.panel-header-controls {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: 0;
-  flex: 0 0 auto;
-}
-
-.panel-heading {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.panel-status-cluster,
-.panel-action-cluster {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-}
-
-.panel-action-cluster {
-  padding-left: 4px;
-  border-left: 1px solid var(--border-default);
-}
-
-.panel-title {
-  font-size: var(--font-ui);
-  font-weight: 600;
-  letter-spacing: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-primary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.panel-title .accent-icon {
-  color: var(--text-secondary);
-}
-
-/* ========================================================
-   Buttons
-   ======================================================== */
-
+/* Buttons */
 button.btn {
   display: inline-flex;
   align-items: center;
@@ -232,6 +90,7 @@ button.btn-approve {
   border-color: var(--success-border);
   color: var(--success);
 }
+
 button.btn-approve:hover:not(:disabled) {
   background: var(--success-border);
 }
@@ -241,14 +100,12 @@ button.btn-reject {
   border-color: var(--error-border);
   color: var(--error);
 }
+
 button.btn-reject:hover:not(:disabled) {
   background: var(--error-border);
 }
 
-/* ========================================================
-   Inputs
-   ======================================================== */
-
+/* Inputs */
 .input-text {
   width: 100%;
   padding: 7px 11px;
@@ -256,7 +113,7 @@ button.btn-reject:hover:not(:disabled) {
   border: 1px solid var(--border-default);
   background: var(--bg-card);
   color: var(--text-primary);
-  transition: all var(--transition-fast);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
   outline: none;
   font-family: inherit;
   font-size: var(--font-ui);
@@ -267,7 +124,6 @@ button.btn-reject:hover:not(:disabled) {
   box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 
-/* Give masked values enough rhythm to scan without spreading placeholders. */
 .input-text.is-masked {
   letter-spacing: 0.1em;
   font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
@@ -278,7 +134,6 @@ button.btn-reject:hover:not(:disabled) {
   font-family: inherit;
 }
 
-/* Secret input with a reveal (eye) toggle on the right. */
 .secret-input {
   position: relative;
   display: flex;
@@ -327,78 +182,19 @@ select.input-text {
 }
 
 [data-mode="dark"] select.input-text option {
-  background: #1a1a2e;
-  color: #fff;
-}
-
-/* ========================================================
-   Sidebar — Pill navigation + floating cards
-   ======================================================== */
-
-.sidebar-nav-pills {
-  display: flex;
-  gap: 4px;
-  padding: 0 12px;
-  height: 48px;
-  align-items: center;
-  background: var(--bg-sidebar);
-  border-bottom: 1px solid var(--border-default);
-  box-sizing: border-box;
-  flex: 0 0 auto;
-}
-
-.sidebar-pill {
-  flex: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 5px 0;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: var(--font-caption);
-  font-weight: 600;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  text-align: center;
-}
-
-.sidebar-pill.active {
   background: var(--bg-card);
   color: var(--text-primary);
-  box-shadow: var(--shadow-card);
 }
 
-.sidebar-pill:hover:not(.active) {
-  background: var(--bg-card-hover);
-}
-
+/* Sidebar list shared primitives */
 .history-list {
   flex: 1 1 0;
   min-height: 0;
-  overflow-y: scroll;
+  overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  padding: 6px 8px;
   display: flex;
   flex-direction: column;
-  gap: 0;
-}
-
-.history-list::-webkit-scrollbar {
-  width: 6px;
-}
-
-.history-list::-webkit-scrollbar-track {
-  background: var(--bg-card);
-  border-radius: var(--radius-full);
-}
-
-.history-list::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
-  border-radius: var(--radius-full);
 }
 
 .search-empty-hint {
@@ -417,109 +213,6 @@ select.input-text {
   opacity: 0.55;
 }
 
-.history-item {
-  position: relative;
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid transparent;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  color: var(--text-secondary);
-  transition: background var(--transition-fast), color var(--transition-fast),
-    box-shadow var(--transition-fast), transform var(--transition-fast), border-color var(--transition-fast);
-  font-size: var(--font-small);
-  flex: 0 0 auto;
-  min-height: 50px;
-  box-sizing: border-box;
-}
-
-/* Hairline separator between adjacent conversations. Inset from the edges so
-   it reads as a divider, not a full-width rule. Hidden under the raised card
-   whenever an item (or the one above it) is hovered/active. */
-.history-item::after {
-  content: "";
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: -1px;
-  height: 1px;
-  background: var(--border-light);
-  transition: opacity var(--transition-fast);
-}
-
-.history-item:last-child::after,
-.history-item:hover::after,
-.history-item.active::after,
-.history-item:has(+ .history-item:hover)::after,
-.history-item:has(+ .history-item.active)::after {
-  opacity: 0;
-}
-
-.history-item.pinned {
-  padding-left: 14px;
-}
-
-.history-item.pinned::before {
-  content: "";
-  position: absolute;
-  left: 5px;
-  top: 7px;
-  bottom: 7px;
-  width: 3px;
-  border-radius: var(--radius-full);
-  background: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-subtle);
-}
-
-/* Pin glyph replaces the mode icon on pinned rows. Needs padding + radius +
-   full opacity, otherwise the accent chip reads as a dim bare icon (the base
-   .history-mode-tag is an unpadded 50%-opacity flex box). */
-.history-item.pinned .history-mode-tag {
-  color: var(--accent);
-  background: var(--accent-subtle);
-  opacity: 1;
-  padding: 3px;
-  border-radius: var(--radius-xs);
-}
-
-.history-item:hover {
-  background: var(--bg-card);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-card);
-  transform: translateX(2px);
-}
-
-.history-item.active {
-  background: var(--bg-card);
-  border-color: var(--border-default);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-soft);
-}
-
-/* Accent rail on the active conversation — a clearer "you are here" marker
-   than the card alone. Reuses the pinned rail geometry. */
-.history-item.active::before {
-  content: "";
-  position: absolute;
-  left: 4px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: var(--radius-full);
-  background: var(--accent);
-}
-
-.history-item.active.pinned::before {
-  box-shadow: 0 0 0 1px var(--accent-subtle);
-}
-
-/* Full-text search result extras: one-line snippet with the hit highlighted,
-   and an inline "archived" tag on rows surfaced from the archive. */
-/* Title + optional archived tag on one line. Flex (not inline append) so the
-   long-title ellipsis never pushes the tag outside the row. */
 .history-title-row {
   display: flex;
   align-items: center;
@@ -539,7 +232,7 @@ select.input-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-top: 1px;
+  margin-top: 2px;
   animation: archived-list-in var(--transition-fast);
 }
 
@@ -547,7 +240,7 @@ select.input-text {
   background: var(--accent-subtle);
   color: var(--accent);
   border-radius: var(--radius-xs);
-  padding: 0 1px;
+  padding: 0 2px;
   font-weight: 600;
 }
 
@@ -562,10 +255,6 @@ select.input-text {
   font-weight: 600;
   line-height: 1.5;
 }
-
-/* ========================================================
-   Archived section — collapsed group at the bottom of the list
-   ======================================================== */
 
 .archived-section {
   margin-top: 8px;
@@ -592,7 +281,7 @@ select.input-text {
 }
 
 .archived-section-toggle:hover {
-  background: var(--bg-card);
+  background: var(--bg-card-hover);
   color: var(--text-secondary);
 }
 
@@ -616,7 +305,7 @@ select.input-text {
 .archived-section-list {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 2px;
   animation: archived-list-in var(--transition-normal);
 }
 
@@ -626,7 +315,7 @@ select.input-text {
 }
 
 .archived-section-list .history-item {
-  opacity: 0.75;
+  opacity: 0.78;
 }
 
 .archived-section-list .history-item:hover,
@@ -634,179 +323,25 @@ select.input-text {
   opacity: 1;
 }
 
-.history-delete-btn {
-  padding: 3px;
-  border: none;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  border-radius: var(--radius-xs);
-  display: flex;
-  align-items: center;
-}
-.history-delete-btn:hover {
-  color: var(--error);
-  background: var(--error-subtle);
-}
-
-.sidebar-footer {
-  padding: 10px;
-  border-top: none;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-.sidebar-tools-label {
-  font-size: var(--font-caption);
-  color: var(--text-tertiary);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 0 2px;
-}
-
-.sidebar-tools-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 0 2px;
-  font-size: var(--font-caption);
-  color: var(--text-tertiary);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.sidebar-tools-header span:last-child {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  letter-spacing: 0;
-}
-
-.sidebar-tools-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 3px;
-}
-
-.sidebar-tool-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-height: 24px;
-}
-
-.tool-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 7px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--border-default);
-  background: transparent;
-  color: var(--text-tertiary);
-  font-size: var(--font-caption);
-  font-weight: 700;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.tool-chip.active {
-  color: var(--accent);
-  background: var(--accent-subtle);
-  border-color: var(--accent-border);
-}
-
-.tool-chip:hover {
-  color: var(--text-primary);
-  background: var(--bg-card);
-}
-
-.sidebar-tools-empty {
-  font-size: var(--font-caption);
-  color: var(--text-tertiary);
-  padding: 3px 2px;
-}
-
-.sidebar-tools-summary {
-  width: 100%;
-  min-height: 34px;
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto 14px;
-  align-items: center;
-  gap: 7px;
-  padding: 5px 8px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-lg);
-  background: transparent;
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: var(--font-caption);
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
-}
-
-.sidebar-tools-summary:hover,
-.sidebar-tools-summary:focus-visible {
-  border-color: var(--border-default);
-  background: var(--bg-card);
-  color: var(--text-primary);
-  outline: none;
-}
-
-.sidebar-tools-summary-icon {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  border-radius: var(--radius-md);
-  background: var(--accent-subtle);
-  color: var(--accent);
-}
-
-.sidebar-tools-summary > span:nth-child(2) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-tools-summary strong {
-  min-width: 22px;
-  padding: 2px 6px;
-  border-radius: var(--radius-full);
-  background: var(--bg-surface-hover);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--font-caption);
-  line-height: 1.35;
-  text-align: center;
-}
-
 .tool-toggle {
-  padding: 4px 5px;
+  padding: 4px 8px;
   font-size: var(--font-caption);
   font-weight: 600;
   border-radius: var(--radius-sm);
-  border: 1px solid transparent;
+  border: 1px solid var(--border-default);
   background: transparent;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--transition-fast);
   text-align: center;
 }
 
 .tool-toggle.active {
-  background: var(--bg-card);
+  background: var(--accent-subtle);
   color: var(--accent);
   border-color: var(--accent-border);
-  box-shadow: var(--shadow-card);
 }
 
 .tool-toggle:hover {
-  background: var(--bg-card);
+  background: var(--bg-card-hover);
 }

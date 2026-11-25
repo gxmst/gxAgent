@@ -232,7 +232,7 @@ for (const language of ['en', 'zh']) {
       expect(await page.locator('.session-settings-body').evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
       await page.keyboard.press('Escape');
       if (viewport.width <= 800) await page.locator('.task-title-row .panel-toggle-btn').first().click();
-      await page.locator('.workbench-global-actions').getByRole('button', { name: language === 'zh' ? '\u8bbe\u7f6e' : 'Settings', exact: true }).click();
+      await page.locator('#workbench-navigation').getByRole('button', { name: language === 'zh' ? '\u8bbe\u7f6e' : 'Settings', exact: true }).click();
       for (const id of ['model', 'chat', 'agent', 'tools', 'skills', 'knowledge', 'search', 'data']) {
         await page.locator(`#settings-tab-${id}`).click();
         await expectContained(page.locator('.settings-modal'), page);

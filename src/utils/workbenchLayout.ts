@@ -5,11 +5,14 @@ export function workbenchLayout(viewport: number, sidebar: number, review: numbe
   const navigationOverlay = viewport <= 800 || (reviewOpen && viewport < 1180);
   const desktop = !navigationOverlay;
   const split = viewport > 800;
+  // Reserve the outer shell inset around the floating workspace cards (right edge when
+  // beside the inline sidebar; left + right edges when the sidebar is closed/overlay).
+  const frameInset = split ? (desktop && navigationOpen ? 8 : 16) : 0;
   const sidebarPreference = clamp(sidebar, 180, 400);
   const navigationSpace = desktop && navigationOpen ? sidebarPreference + 5 : 0;
-  const maxReviewWidth = clamp(viewport - navigationSpace - 5 - 360, 320, 900);
+  const maxReviewWidth = clamp(viewport - navigationSpace - 5 - 360 - frameInset, 320, 900);
   const reviewWidth = split ? clamp(review, 320, maxReviewWidth) : viewport;
-  const maxSidebarWidth = clamp(viewport - (reviewOpen && desktop ? reviewWidth + 5 : 0) - 5 - 360, 180, 400);
+  const maxSidebarWidth = clamp(viewport - (reviewOpen && desktop ? reviewWidth + 5 : 0) - 5 - 360 - frameInset, 180, 400);
   return {
     navigationOverlay,
     sidebarWidth: clamp(sidebarPreference, 180, maxSidebarWidth),

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { createSession, normalizeMessage } from "../appDefaults";
-import { groupProjectSessions, taskState } from "./workbench";
+import { formatCompactRelativeTime, groupProjectSessions, taskState } from "./workbench";
 import { useWorkspaceViewStore } from "../store/workspaceViewStore";
 
 describe("project navigation", () => {
@@ -53,4 +53,17 @@ it("keeps file reads and selected tabs isolated when tasks switch", () => {
   view.clear("first");
   expect(useWorkspaceViewStore.getState().files.first).toBeUndefined();
   expect(useWorkspaceViewStore.getState().files.second.path).toBe("/second/b.ts");
+});
+
+it("formats compact relative timestamps cleanly", () => {
+  const now = 1_700_000_000_000;
+  expect(formatCompactRelativeTime(undefined, "en", now)).toBe("");
+  expect(formatCompactRelativeTime(1, "en", now)).toBe("");
+  expect(formatCompactRelativeTime(now - 20_000, "en", now)).toBe("now");
+  expect(formatCompactRelativeTime(now - 20_000, "zh", now)).toBe("刚刚");
+  expect(formatCompactRelativeTime(now - 5 * 60_000, "en", now)).toBe("5m");
+  expect(formatCompactRelativeTime(now - 3 * 3600_000, "en", now)).toBe("3h");
+  expect(formatCompactRelativeTime(now - 21 * 86400_000, "en", now)).toBe("21d");
+  expect(formatCompactRelativeTime(now - 65 * 86400_000, "en", now)).toBe("2mo");
+  expect(formatCompactRelativeTime(now - 400 * 86400_000, "en", now)).toBe("1y");
 });

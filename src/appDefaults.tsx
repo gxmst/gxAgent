@@ -627,22 +627,56 @@ export const FONT_OPTIONS = [
 // generic light/dark component tweaks apply, while `value` drives `data-theme`
 // for the actual palette. `swatch` is the dot shown in the theme picker.
 export const THEME_OPTIONS: {
-  value: string;
+  value: "system" | "light" | "dark";
   mode: "light" | "dark";
   labelZh: string;
   label: string;
   swatch: { bg: string; border: string; accent: string };
 }[] = [
-  { value: "light", mode: "light", labelZh: "浅色", label: "Light", swatch: { bg: "#ffffff", border: "#e1e4e8", accent: "#3b6ef0" } },
-  { value: "dark", mode: "dark", labelZh: "深色", label: "Dark", swatch: { bg: "#1c1f25", border: "#2c313a", accent: "#6c93f7" } },
-  { value: "yuzu", mode: "light", labelZh: "柚木书房", label: "Yuzu Study", swatch: { bg: "#f3e8d6", border: "#d8c4a0", accent: "#a9743f" } },
-  { value: "ember", mode: "dark", labelZh: "炭火终端", label: "Ember Terminal", swatch: { bg: "#1b1d19", border: "#3a3f33", accent: "#9bcf5f" } },
-  { value: "grape", mode: "dark", labelZh: "午夜葡萄", label: "Midnight Grape", swatch: { bg: "#221631", border: "#3e2a52", accent: "#c084fc" } },
-  { value: "amber", mode: "dark", labelZh: "暮光琥珀", label: "Twilight Amber", swatch: { bg: "#221a14", border: "#46352b", accent: "#f0a868" } },
+  {
+    value: "system",
+    mode: "light",
+    labelZh: "跟随系统",
+    label: "System",
+    swatch: {
+      bg: "linear-gradient(135deg, #ffffff 50%, #181a1f 50%)",
+      border: "#d4d8e0",
+      accent: "#2563eb",
+    },
+  },
+  {
+    value: "light",
+    mode: "light",
+    labelZh: "浅色",
+    label: "Light",
+    swatch: { bg: "#ffffff", border: "#e2e5ea", accent: "#2563eb" },
+  },
+  {
+    value: "dark",
+    mode: "dark",
+    labelZh: "深色",
+    label: "Dark",
+    swatch: { bg: "#181a1f", border: "#2b303a", accent: "#4f83f7" },
+  },
 ];
 
-export const themeMode = (theme: string): "light" | "dark" =>
-  THEME_OPTIONS.find((t) => t.value === theme)?.mode ?? "light";
+export const normalizeTheme = (theme: string): "system" | "light" | "dark" => {
+  if (theme === "system") return "system";
+  if (theme === "dark" || theme === "ember" || theme === "grape" || theme === "amber") return "dark";
+  return "light";
+};
+
+export const themeMode = (theme: string): "light" | "dark" => {
+  const normalized = normalizeTheme(theme);
+  if (normalized === "system") {
+    return typeof window !== "undefined"
+      && typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  }
+  return normalized;
+};
 
 // "Assistant is thinking" placeholder bubble, shared by the plain and
 // virtualized message lists.

@@ -4,7 +4,7 @@ import { installFixture } from './fixture';
 const oldProfile = { name: 'Office', provider: 'openai', wire_format: 'openai', base_url: 'https://old.example.invalid/v1', api_key: 'fake-old-key', default_model: 'private-model', models: ['private-model', 'other-model'] };
 async function openSettings(page: import('@playwright/test').Page) {
   await page.goto('/');
-  await page.locator('.workbench-global-actions').getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.locator('#workbench-navigation').getByRole('button', { name: 'Settings', exact: true }).click();
 }
 
 test('adding a provider isolates credentials and cancelling preserves the default', async ({ page }) => {

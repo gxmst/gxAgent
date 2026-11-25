@@ -138,7 +138,7 @@ test('settings and review remain contained on desktop and narrow Chinese layouts
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.evaluate(value => localStorage.setItem('fixture_language', value), language);
     await page.reload();
-    await page.locator('.workbench-global-actions').getByRole('button', { name: language === 'zh' ? '设置' : 'Settings', exact: true }).click();
+    await page.locator('#workbench-navigation').getByRole('button', { name: language === 'zh' ? '设置' : 'Settings', exact: true }).click();
     const dialog = page.locator('.settings-modal');
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 844 });

@@ -57,3 +57,19 @@ export function taskStateLabel(state: TaskState, lang: string): string {
 export function executionMessages(messages: Message[]): Message[] {
   return messages.filter(message => message.role === "assistant" && (message.run || message.actions?.length || message.content));
 }
+
+export function formatCompactRelativeTime(timestamp: number | undefined, lang: string, now = Date.now()): string {
+  // Ignore uninitialized or synthetic low-epoch timestamps (before 2000-01-01).
+  if (!timestamp || !Number.isFinite(timestamp) || timestamp < 946_684_800_000) return "";
+  const elapsedSeconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+  if (elapsedSeconds < 60) return lang === "zh" ? "刚刚" : "now";
+  const minutes = Math.floor(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo`;
+  return `${Math.floor(days / 365)}y`;
+}

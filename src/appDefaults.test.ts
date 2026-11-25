@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from "vitest";
 import {
   modelCatalogForConfig,
   modelCatalogKey,
   modelContextLimitForConfig,
+  normalizeTheme,
+  themeMode,
 } from "./appDefaults";
 
 const connection = {
@@ -41,5 +44,35 @@ describe("provider model catalog provenance", () => {
       wire_format: "anthropic",
       base_url: connection.base_url,
     })).toEqual([]);
+  });
+});
+
+describe("theme normalization and resolution", () => {
+  it("normalizes legacy and core themes into system/light/dark", () => {
+    expect(normalizeTheme("system")).toBe("system");
+    expect(normalizeTheme("light")).toBe("light");
+    expect(normalizeTheme("dark")).toBe("dark");
+    expect(normalizeTheme("yuzu")).toBe("light");
+    expect(normalizeTheme("ember")).toBe("dark");
+    expect(normalizeTheme("grape")).toBe("dark");
+    expect(normalizeTheme("amber")).toBe("dark");
+    expect(normalizeTheme("unknown-theme")).toBe("light");
+  });
+
+  it("resolves themeMode for explicit and system themes", () => {
+    expect(themeMode("light")).toBe("light");
+    expect(themeMode("dark")).toBe("dark");
+    expect(themeMode("yuzu")).toBe("light");
+    expect(themeMode("ember")).toBe("dark");
+
+    const originalMatchMedia = window.matchMedia;
+    try {
+      window.matchMedia = vi.fn().mockReturnValue({ matches: true }) as unknown as typeof window.matchMedia;
+      expect(themeMode("system")).toBe("dark");
+      window.matchMedia = vi.fn().mockReturnValue({ matches: false }) as unknown as typeof window.matchMedia;
+      expect(themeMode("system")).toBe("light");
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
   });
 });

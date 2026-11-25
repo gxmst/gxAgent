@@ -11,15 +11,18 @@
       // re-applies the authoritative value).
       (function () {
         try {
-          var theme = localStorage.getItem("gx_theme") || "light";
-          var mode = localStorage.getItem("gx_theme_mode") || "light";
-          document.documentElement.setAttribute("data-theme", theme);
+          var raw = localStorage.getItem("gx_theme") || "light";
+          var normalized = raw === "system"
+            ? "system"
+            : (raw === "dark" || raw === "ember" || raw === "grape" || raw === "amber")
+              ? "dark"
+              : "light";
+          var mode = normalized === "system"
+            ? (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+            : normalized;
+          document.documentElement.setAttribute("data-theme", mode);
           document.documentElement.setAttribute("data-mode", mode);
-          if (mode === "dark") {
-            // Keep in sync with --bg-main of the dark themes in styles/themes.css.
-            var preloadBg = { ember: "#111210", grape: "#160e20", amber: "#18120e" };
-            document.documentElement.style.backgroundColor = preloadBg[theme] || "#16181d";
-          }
+          document.documentElement.style.backgroundColor = mode === "dark" ? "#111215" : "#f6f7f9";
         } catch (e) { /* first run: defaults are fine */ }
       })();
     </script>

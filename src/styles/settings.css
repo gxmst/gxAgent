@@ -78,7 +78,9 @@
   .settings-modal { width: calc(100vw - 20px); height: calc(100dvh - 30px); max-height: calc(100dvh - 30px); grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto; }
   .settings-modal .settings-tabs { grid-column: 1; grid-row: 2; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-right: 0; border-bottom: 1px solid var(--border-default); padding: 8px; }
   .settings-modal .settings-modal-body { grid-column: 1; grid-row: 3; padding: 16px; }
-  .settings-modal .settings-page { grid-template-columns: minmax(0, 1fr); }
+  .settings-modal .settings-page,
+  .settings-modal #settings-panel-agent { grid-template-columns: minmax(0, 1fr); }
+  .settings-modal .settings-page > * { grid-column: 1; }
   .connection-form-grid { grid-template-columns: minmax(0, 1fr); }
   .connection-card { flex-wrap: wrap; padding: 12px; }
   .connection-card-actions { margin-left: auto; flex-wrap: wrap; }

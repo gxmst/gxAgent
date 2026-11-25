@@ -5,7 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 // and so its utilities stay below the legacy rules in the cascade.
 import "./styles/tokens.css";
 import "./styles/tailwind.css";
-import "./styles/layout.css";
 import "./styles/enhancements.css";
 import "./styles/themes.css";
 import "./styles/shell.css";
@@ -33,7 +32,6 @@ import { WorkspacePanel } from "./components/workspace/WorkspacePanel";
 import "./styles/learning.css";
 import "./styles/settings.css";
 import { WindowTitleBar } from "./components/workspace/WindowTitleBar";
-import { WorkbenchHeader } from "./components/workspace/WorkbenchHeader";
 import { EMPTY_FILE_VIEW, useWorkspaceViewStore } from "./store/workspaceViewStore";
 import { ConfirmDialog, type ConfirmationOptions } from "./components/shared/ConfirmDialog";
 import { t } from "./i18n";
@@ -74,6 +72,7 @@ import {
   createDefaultSession,
   normalizeSessions,
   FONT_OPTIONS,
+  normalizeTheme,
   themeMode,
   modelCatalogForConfig,
   type ToolStatsDialog,
@@ -450,19 +449,27 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const theme = config.theme || "light";
-    const mode = themeMode(theme);
-    document.documentElement.setAttribute("data-theme", theme);
-    // data-mode drives the light/dark component tweaks so any dark-family theme
-    // inherits them without duplicating every override per theme.
-    document.documentElement.setAttribute("data-mode", mode);
-    // Mirror for the pre-paint inline script in index.html: the real config
-    // lives in Rust and loads asynchronously, so without this mirror dark
-    // themes flash a white frame on every cold start.
-    try {
-      localStorage.setItem("gx_theme", theme);
-      localStorage.setItem("gx_theme_mode", mode);
-    } catch { /* ignore */ }
+    const normalized = normalizeTheme(config.theme || "light");
+    const apply = () => {
+      const mode = themeMode(normalized);
+      document.documentElement.setAttribute("data-theme", mode);
+      // data-mode drives the light/dark component tweaks so explicit and system
+      // themes resolve through a single pair of modes.
+      document.documentElement.setAttribute("data-mode", mode);
+      document.documentElement.style.backgroundColor = mode === "dark" ? "#111215" : "#f6f7f9";
+      // Mirror for the pre-paint inline script in index.html: the real config
+      // lives in Rust and loads asynchronously, so without this mirror dark
+      // themes flash a white frame on every cold start.
+      try {
+        localStorage.setItem("gx_theme", normalized);
+        localStorage.setItem("gx_theme_mode", mode);
+      } catch { /* ignore */ }
+    };
+    apply();
+    if (normalized !== "system" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
   }, [config.theme]);
 
   useEffect(() => {
@@ -1084,13 +1091,18 @@ function App() {
       }
     }}>
       <ToastStack />
-      <WindowTitleBar lang={lang} />
+      <WindowTitleBar
+        lang={lang}
+        config={config}
+        setConfig={setConfig}
+        navigationOpen={navigationOpen}
+        onToggleNavigation={() => setNavigationOpen((open) => !open)}
+      />
 
       {/* ====== Sidebar ====== */}
       <div className="workbench-body">
       {navigationOpen && layout.navigationOverlay && <button type="button" className="navigation-backdrop" aria-label={lang === "zh" ? "关闭侧栏" : "Close sidebar"} onClick={() => setNavigationOpen(false)} />}
       <div id="workbench-navigation" className="workbench-navigation" style={{ "--sidebar-width": `${layout.sidebarWidth}px` } as React.CSSProperties}>
-      <WorkbenchHeader lang={lang} config={config} setConfig={setConfig} navigationOpen={navigationOpen} onToggleNavigation={() => setNavigationOpen(open => !open)} onSettings={() => setSettingsOpen(true)} />
       <Sidebar
         lang={lang}
         config={config}

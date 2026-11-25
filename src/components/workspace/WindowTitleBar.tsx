@@ -1,31 +1,125 @@
 import { useEffect, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, Square, Copy, X } from "lucide-react";
+import { Copy, Minus, Moon, PanelLeftClose, PanelLeftOpen, Pin, Square, Sun, X } from "lucide-react";
+import type { AppConfig } from "../../types";
+import { themeMode } from "../../appDefaults";
 import { notify } from "../../services/agentEvents";
 import logo from "../../assets/logo.png";
 
-export function WindowTitleBar({ lang }: { lang: string }) {
+export interface WindowTitleBarProps {
+  lang: string;
+  config: AppConfig;
+  setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
+  navigationOpen: boolean;
+  onToggleNavigation: () => void;
+}
+
+export function WindowTitleBar({
+  lang,
+  config,
+  setConfig,
+  navigationOpen,
+  onToggleNavigation,
+}: WindowTitleBarProps) {
+  const zh = lang === "zh";
   const [maximized, setMaximized] = useState(false);
+  const [pinned, setPinned] = useState(false);
   const desktop = isTauri();
+  const activeMode = themeMode(config.theme);
+
   useEffect(() => {
     if (!desktop) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    const window = getCurrentWindow();
-    const update = async () => { const value = await window.isMaximized(); if (!disposed) setMaximized(value); };
+    const win = getCurrentWindow();
+    const update = async () => {
+      const value = await win.isMaximized();
+      if (!disposed) setMaximized(value);
+    };
     void update().catch(() => {});
-    void window.onResized(() => { void update().catch(() => {}); }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(() => {});
-    return () => { disposed = true; unlisten?.(); };
+    void win.onResized(() => { void update().catch(() => {}); })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [desktop]);
+
   const operate = async (action: "minimize" | "maximize" | "close") => {
-    try { const window = getCurrentWindow(); if (action === "minimize") await window.minimize(); else if (action === "maximize") await window.toggleMaximize(); else await window.close(); }
-    catch (error) { notify(String(error), "error"); }
+    try {
+      const win = getCurrentWindow();
+      if (action === "minimize") await win.minimize();
+      else if (action === "maximize") await win.toggleMaximize();
+      else await win.close();
+    } catch (error) {
+      notify(String(error), "error");
+    }
   };
-  return <div className="window-titlebar">
-    <div className="window-drag-area" data-tauri-drag-region>
-      <img src={logo} alt="" /><span>gxAgent Studio</span>
-    </div>
-    {desktop && <div className="window-controls"><button type="button" aria-label={lang === "zh" ? "最小化" : "Minimize"} onClick={() => void operate("minimize")}><Minus size={15} /></button><button type="button" aria-label={lang === "zh" ? (maximized ? "还原窗口" : "最大化") : (maximized ? "Restore window" : "Maximize")} onClick={() => void operate("maximize")}>{maximized ? <Copy size={13} /> : <Square size={13} />}</button><button type="button" className="window-close" aria-label={lang === "zh" ? "关闭窗口" : "Close window"} onClick={() => void operate("close")}><X size={17} /></button></div>}
-  </div>;
+
+  return (
+    <header className="window-titlebar">
+      <div className="window-chrome-left">
+        <div className="window-brand">
+          <img src={logo} alt="" />
+          <span className="window-brand-name">gxAgent</span>
+        </div>
+        <button
+          type="button"
+          className="panel-toggle-btn navigation-toggle"
+          onClick={onToggleNavigation}
+          aria-expanded={navigationOpen}
+          aria-controls="workbench-navigation"
+          aria-label={zh ? "切换侧栏" : "Toggle sidebar"}
+          title={zh ? (navigationOpen ? "收起侧栏" : "展开侧栏") : (navigationOpen ? "Collapse sidebar" : "Expand sidebar")}
+        >
+          {navigationOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+        </button>
+        <button
+          type="button"
+          className="panel-toggle-btn desktop-action"
+          onClick={() => setConfig((previous) => ({ ...previous, theme: themeMode(previous.theme) === "dark" ? "light" : "dark" }))}
+          aria-label={zh ? "切换主题" : "Toggle theme"}
+          title={zh ? "切换主题" : "Toggle theme"}
+        >
+          {activeMode === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+        </button>
+        <button
+          type="button"
+          className="panel-toggle-btn desktop-action window-pin-btn"
+          onClick={async () => {
+            try { setPinned(await invoke<boolean>("toggle_always_on_top")); }
+            catch (error) { notify(String(error), "error"); }
+          }}
+          aria-pressed={pinned}
+          aria-label={zh ? "窗口置顶" : "Keep on top"}
+          title={zh ? "窗口置顶" : "Keep on top"}
+        >
+          <Pin size={14} />
+        </button>
+      </div>
+      <div className="window-drag-area" data-tauri-drag-region />
+      {desktop && (
+        <div className="window-controls">
+          <button type="button" aria-label={zh ? "最小化" : "Minimize"} onClick={() => void operate("minimize")}>
+            <Minus size={15} />
+          </button>
+          <button
+            type="button"
+            aria-label={zh ? (maximized ? "还原窗口" : "最大化") : (maximized ? "Restore window" : "Maximize")}
+            onClick={() => void operate("maximize")}
+          >
+            {maximized ? <Copy size={13} /> : <Square size={13} />}
+          </button>
+          <button type="button" className="window-close" aria-label={zh ? "关闭窗口" : "Close window"} onClick={() => void operate("close")}>
+            <X size={16} />
+          </button>
+        </div>
+      )}
+    </header>
+  );
 }

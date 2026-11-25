@@ -27,6 +27,7 @@ import {
   THEME_OPTIONS,
   createDefaultSession,
   formatContextBudget,
+  normalizeTheme,
 } from "../../appDefaults";
 import { SecretInput } from "../shared/SecretInput";
 import { ConnectionSettings } from "./ConnectionSettings";
@@ -196,7 +197,7 @@ export function SettingsModal(props: SettingsModalProps) {
                 <button
                   key={th.value}
                   type="button"
-                  className={`theme-chip ${config.theme === th.value ? "active" : ""}`}
+                  className={`theme-chip ${normalizeTheme(config.theme) === th.value ? "active" : ""}`}
                   onClick={() => setConfig((prev) => ({ ...prev, theme: th.value }))}
                   title={lang === "zh" ? th.labelZh : th.label}
                 >
