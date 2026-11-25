@@ -110,20 +110,68 @@ test('attachment-only turns reach the backend with no fabricated retrieval query
   await emit(page, 'agent-complete', { requestId: args.requestId, status: 'completed' });
 });
 
-test('compact navigation fills the viewport and returns to the selected task', async ({ page }, testInfo) => {
+test('compact navigation stays in a drawer and returns to the selected task', async ({ page }, testInfo) => {
   await installFixture(page);
   await page.goto('/');
-  for (const width of [1024, 900, 390, 320]) {
+  for (const width of [800, 390, 320]) {
     await page.setViewportSize({ width, height: 700 });
     await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click();
     const navigation = (await page.locator('.workbench-navigation').boundingBox())!;
     expect(navigation.x).toBe(0);
-    expect(navigation.width).toBe(width);
-    await expect(page.locator('.workspace-container')).toBeHidden();
+    expect(navigation.width).toBeLessThanOrEqual(Math.min(280, width - 44));
+    await expect(page.locator('.workspace-container')).toBeVisible();
+    await expect(page.locator('.navigation-backdrop')).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`navigation-${width}.png`) });
     await page.locator('[data-session-id="review"]').click();
     await expectConversationLayout(page);
   }
+});
+
+test('scaled desktop navigation keeps the conversation visible and drawers dismiss safely', async ({ browser }, testInfo) => {
+  const context = await browser.newContext({ viewport: { width: 1147, height: 716 }, deviceScaleFactor: 5 / 3 });
+  const page = await context.newPage();
+  try {
+    await installFixture(page, { config: { language: 'zh' } });
+    await page.goto(testInfo.project.use.baseURL!);
+    for (const width of [1147, 900, 801, 1179]) {
+      await page.setViewportSize({ width, height: 716 });
+      await expect(page.locator('.workbench-navigation')).toBeVisible();
+      await expectConversationLayout(page);
+      const navigation = (await page.locator('.workbench-navigation').boundingBox())!;
+      const conversation = (await page.locator('.chat-panel').boundingBox())!;
+      expect(navigation.width).toBeLessThanOrEqual(400);
+      expect(navigation.x + navigation.width).toBeLessThanOrEqual(conversation.x);
+      await page.locator('[data-session-id="chat"]').click();
+      await expect(page.locator('.workbench-navigation')).toBeVisible();
+      await page.locator('[data-session-id="review"]').click();
+    }
+    await page.setViewportSize({ width: 1147, height: 716 });
+    await page.screenshot({ path: testInfo.outputPath('scaled-desktop-fixed.png'), animations: 'disabled' });
+    await page.locator('.task-panel-toggle').click();
+    await expect(page.locator('.navigation-backdrop')).toBeHidden();
+    await page.locator('.task-title-row .panel-toggle-btn').first().click();
+    await expect(page.locator('.navigation-backdrop')).toBeVisible();
+    await expectConversationLayout(page);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.navigation-backdrop')).toBeHidden();
+    await expect(page.locator('.review-panel')).toBeVisible();
+    await page.locator('.task-title-row .panel-toggle-btn').first().click();
+    await page.locator('.navigation-backdrop').click({ position: { x: 900, y: 300 } });
+    await expect(page.locator('.navigation-backdrop')).toBeHidden();
+    await page.locator('.review-close').click();
+    await expect(page.locator('.workbench-navigation')).toBeVisible();
+    await page.locator('.navigation-toggle').click();
+    await page.locator('.task-panel-toggle').click();
+    await page.locator('.review-close').click();
+    await expect(page.locator('.workbench-navigation')).toBeHidden();
+    await page.setViewportSize({ width: 390, height: 716 });
+    await page.locator('.task-title-row .panel-toggle-btn').first().click();
+    expect((await page.locator('.workbench-navigation').boundingBox())!.width).toBeLessThan(390);
+    await expect(page.locator('.chat-panel')).toBeVisible();
+    await page.locator('[data-session-id="chat"]').click();
+    await expect(page.locator('.navigation-backdrop')).toBeHidden();
+    await expectConversationLayout(page);
+  } finally { await context.close(); }
 });
 
 test('panel resizing reserves conversation space and restores preferred widths', async ({ page }, testInfo) => {
@@ -183,7 +231,7 @@ for (const language of ['en', 'zh']) {
       await expectContained(page.locator('.session-settings-panel'), page);
       expect(await page.locator('.session-settings-body').evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
       await page.keyboard.press('Escape');
-      if (viewport.width < 1180) await page.locator('.task-title-row .panel-toggle-btn').first().click();
+      if (viewport.width <= 800) await page.locator('.task-title-row .panel-toggle-btn').first().click();
       await page.locator('.workbench-global-actions').getByRole('button', { name: language === 'zh' ? '\u8bbe\u7f6e' : 'Settings', exact: true }).click();
       for (const id of ['model', 'chat', 'agent', 'tools', 'skills', 'knowledge', 'search', 'data']) {
         await page.locator(`#settings-tab-${id}`).click();
@@ -200,7 +248,7 @@ for (const language of ['en', 'zh']) {
       }
       await page.screenshot({ path: testInfo.outputPath(`settings-font24-${language}-${viewport.width}.png`) });
       await page.keyboard.press('Escape');
-      if (viewport.width < 1180) await page.locator('.navigation-toggle').click();
+      if (viewport.width <= 800) await page.locator('.navigation-toggle').click();
     }
   });
 }

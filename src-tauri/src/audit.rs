@@ -12,9 +12,8 @@ pub struct AuditLogger {
 
 impl AuditLogger {
     pub fn new() -> Self {
-        let log_dir = dirs::data_dir()
+        let log_dir = crate::app_paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("gxAgent")
             .join("audit");
 
         let _ = std::fs::create_dir_all(&log_dir);

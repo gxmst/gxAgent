@@ -34,14 +34,13 @@ export interface ComposerProps {
   pickAndParseAttachments: () => Promise<void>;
   patchSessionConfig: (patch: Partial<SessionConfig>) => void;
   getModelDisplayName: (modelId: string) => string;
-  cacheModelDisplayName: (modelId: string, displayName: string) => void;
   modelsForCurrentConfig: ModelInfo[];
   onSettings: () => void;
   effectiveWorkDir: string;
   branch: string;
 }
 
-export function Composer({ lang, config, setConfig, currentSession, resolvedCurrentConfig, sessionStorageReady, isAttachmentLoading, attachments, setAttachments, prompt, setPrompt, chatTextareaRef, handleSendMessage, handleStopStreaming, handleSteeringMessage, addFilesAsAttachments, pickAndParseAttachments, patchSessionConfig, getModelDisplayName, cacheModelDisplayName, modelsForCurrentConfig, onSettings, effectiveWorkDir, branch }: ComposerProps) {
+export function Composer({ lang, config, setConfig, currentSession, resolvedCurrentConfig, sessionStorageReady, isAttachmentLoading, attachments, setAttachments, prompt, setPrompt, chatTextareaRef, handleSendMessage, handleStopStreaming, handleSteeringMessage, addFilesAsAttachments, pickAndParseAttachments, patchSessionConfig, getModelDisplayName, modelsForCurrentConfig, onSettings, effectiveWorkDir, branch }: ComposerProps) {
   const zh = lang === "zh";
   const sessionId = currentSession.id;
   const coding = currentSession.sessionConfig.mode === "code";
@@ -68,7 +67,9 @@ export function Composer({ lang, config, setConfig, currentSession, resolvedCurr
   const [modelSearch, setModelSearch] = useState("");
   const [checkingCodex, setCheckingCodex] = useState(false);
   const [codexError, setCodexError] = useState("");
-  const displayModel = codex ? resolvedCurrentConfig.codex_model || (zh ? "Codex 默认" : "Codex default") : getModelDisplayName(resolvedCurrentConfig.model);
+  const missingConnection = Boolean(currentSession.sessionConfig.profileId && !config.profiles[currentSession.sessionConfig.profileId]);
+  const connectionName = missingConnection ? (zh ? "连接已删除，请重新选择" : "Connection removed — select another") : config.profiles[currentSession.sessionConfig.profileId || config.active_profile || ""]?.name;
+  const displayModel = codex ? resolvedCurrentConfig.codex_model || (zh ? "Codex 默认" : "Codex default") : `${connectionName || (zh ? "默认连接" : "Default connection")} / ${getModelDisplayName(resolvedCurrentConfig.model)}`;
   const profiles = sortProfileEntries(Object.entries(config.profiles), lang).filter(([, profile]) => `${profile.name} ${profile.default_model}`.toLowerCase().includes(modelSearch.toLowerCase()));
   const models = sortModels(modelsForCurrentConfig, lang).filter(model => model.id.toLowerCase().includes(modelSearch.toLowerCase()));
   const searchEnabled = config.tools_enabled.includes("web_search");
@@ -131,8 +132,10 @@ export function Composer({ lang, config, setConfig, currentSession, resolvedCurr
                 {codexError && <div className="workspace-inline-state error" role="alert">{codexError}</div>}
               </> : <>
               <button className="model-menu-item" onClick={() => { patchSessionConfig({ profileId: null, model: null }); setModelOpen(false); }}><span>{zh ? "使用全局默认" : "Use global default"}</span><small>{config.model}</small></button>
-              {profiles.map(([id, profile]) => <button key={id} className="model-menu-item" aria-pressed={currentSession.sessionConfig.profileId === id && !currentSession.sessionConfig.model} onClick={() => { cacheModelDisplayName(profile.default_model, profile.name); patchSessionConfig({ profileId: id, model: null }); setModelOpen(false); }}><span>{profile.name}</span><small>{profile.default_model}</small></button>)}
+              {profiles.map(([id, profile]) => <button key={id} className="model-menu-item" aria-pressed={currentSession.sessionConfig.profileId === id && !currentSession.sessionConfig.model} onClick={() => { patchSessionConfig({ profileId: id, model: null }); setModelOpen(false); }}><span>{profile.name}</span><small>{profile.default_model}</small></button>)}
+              <div className="model-menu-section">{connectionName || (zh ? "当前连接" : "Current connection")}</div>
               {models.map(model => <button key={model.id} className="model-menu-item" aria-pressed={resolvedCurrentConfig.model === model.id} onClick={() => { patchSessionConfig({ model: model.id }); setModelOpen(false); }}>{model.id}</button>)}
+              {modelSearch.trim() && <button className="model-menu-item" onClick={() => { patchSessionConfig({ model: modelSearch.trim() }); setModelOpen(false); }}><span>{zh ? "使用模型 ID" : "Use model ID"}: {modelSearch.trim()}</span><small>{connectionName || (zh ? "当前连接" : "Current connection")}</small></button>}
               {!profiles.length && !models.length && modelSearch && <div className="model-menu-empty">{zh ? "没有匹配的模型" : "No matching models"}</div>}
               </>}
             </div>
@@ -150,7 +153,6 @@ export function Composer({ lang, config, setConfig, currentSession, resolvedCurr
               <option value="off">{zh ? "关闭" : "Off"}</option><option value="auto">{zh ? "自动" : "Auto"}</option><option value="force">{zh ? "每次搜索" : "Always"}</option>
             </select></label>
             <button className="btn" disabled={!!activeId || preparingId !== null} onClick={() => { setSessions(previous => previous.map(session => session.id === sessionId ? { ...session, messages: [...session.messages, { id: newMessageId(), role: "context_divider", content: "" }], updatedAt: Date.now() } : session)); setOptionsOpen(false); }}>{t("context.isolate", lang)}</button>
-            <button className="btn" onClick={() => { setOptionsOpen(false); onSettings(); }}>{t("session.settings", lang)}</button>
           </Popover.Content></Popover.Portal>
         </Popover.Root>
         <div className="composer-send-actions">

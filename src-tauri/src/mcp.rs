@@ -41,12 +41,13 @@ pub struct McpStartReport {
 
 /// Running MCP server process with its tool definitions
 pub struct McpServer {
-    child: Child,
-    stdin: Mutex<tokio::process::ChildStdin>,
+    child: Option<Child>,
+    stdin: std::sync::Arc<Mutex<tokio::process::ChildStdin>>,
     tool_definitions: Vec<Value>,
     next_id: Mutex<u64>,
     pending: PendingMap,
     _reader_handle: tokio::task::JoinHandle<()>,
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _stderr_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -55,6 +56,15 @@ impl Drop for McpServer {
         // Descendant processes may keep pipes open after the server exits.
         self._reader_handle.abort();
         self._stderr_handle.abort();
+        if let Some(mut child) = self.child.take() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    crate::tools::terminate_process_tree(&mut child).await;
+                });
+            } else {
+                let _ = child.start_kill();
+            }
+        }
     }
 }
 
@@ -108,8 +118,15 @@ fn validate_env_vars(env: &std::collections::HashMap<String, String>) -> Result<
         "GIT_CONFIG_SYSTEM",
     ];
 
+    let mut names = std::collections::HashSet::new();
     for var in env.keys() {
+        if var.is_empty() || var.contains(['=', '\0']) || env[var].contains('\0') {
+            return Err("Invalid MCP environment variable".into());
+        }
         let upper = var.to_ascii_uppercase();
+        if !names.insert(upper.clone()) {
+            return Err("Duplicate MCP environment variable names".into());
+        }
         let blocked = dangerous_vars.iter().any(|dangerous| upper == *dangerous)
             || upper.starts_with("GIT_CONFIG_");
         if blocked {
@@ -123,16 +140,93 @@ fn validate_env_vars(env: &std::collections::HashMap<String, String>) -> Result<
     Ok(())
 }
 
+pub fn validate_server_config(config: &McpServerConfig) -> Result<(), String> {
+    validate_mcp_command(&config.command)?;
+    validate_env_vars(&config.env)?;
+    if config.args.iter().any(|arg| arg.contains('\0')) {
+        return Err("MCP arguments contain a NUL character".into());
+    }
+    Ok(())
+}
+
+fn server_command(config: &McpServerConfig) -> Command {
+    #[cfg(windows)]
+    {
+        // npm installs npx.cmd on Windows. Invoke its JS entry through Node so
+        // JSON arguments never pass through cmd.exe quoting or interpolation.
+        let path = std::path::Path::new(config.command.trim());
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if stem.eq_ignore_ascii_case("npx") || stem.eq_ignore_ascii_case("npm") {
+            let task_path = config
+                .env
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+                .map(|(_, value)| std::ffi::OsString::from(value))
+                .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+            let mut folders = Vec::new();
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                folders.push(parent.to_path_buf());
+            }
+            folders.extend(std::env::split_paths(&task_path));
+            for folder in &folders {
+                let script = folder.join(format!(
+                    "node_modules/npm/bin/{}-cli.js",
+                    stem.to_ascii_lowercase()
+                ));
+                if script.is_file() {
+                    if let Some(node) = folders
+                        .iter()
+                        .map(|dir| dir.join("node.exe"))
+                        .find(|node| node.is_file())
+                    {
+                        let mut command = Command::new(node);
+                        command.arg(script);
+                        return command;
+                    }
+                }
+            }
+        }
+    }
+    Command::new(config.command.trim())
+}
+
+struct PendingRequestGuard {
+    pending: PendingMap,
+    id: u64,
+    stdin: std::sync::Arc<Mutex<tokio::process::ChildStdin>>,
+}
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        let pending = self.pending.clone();
+        let id = self.id;
+        let stdin = self.stdin.clone();
+        tokio::spawn(async move {
+            if pending.lock().await.remove(&id).is_some() {
+                let cancelled = json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":id,"reason":"Client cancelled or timed out"}});
+                let write = async {
+                    let mut input = stdin.lock().await;
+                    input.write_all(format!("{cancelled}\n").as_bytes()).await?;
+                    input.flush().await
+                };
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), write).await;
+            }
+        });
+    }
+}
+
 impl McpServer {
     /// Start an MCP server process and initialize it
     pub async fn start(config: &McpServerConfig) -> Result<Self, String> {
         // Validate command path
-        validate_mcp_command(&config.command)?;
+        validate_server_config(config)?;
 
-        // Validate environment variables
-        validate_env_vars(&config.env)?;
-
-        let mut cmd = Command::new(&config.command);
+        let mut cmd = server_command(config);
         cmd.args(&config.args)
             .envs(&config.env)
             .stdin(Stdio::piped())
@@ -141,18 +235,24 @@ impl McpServer {
             .kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        #[cfg(not(windows))]
+        cmd.process_group(0);
 
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start MCP server '{}': {}", config.command, e))?;
 
-        let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
+        let stdin =
+            std::sync::Arc::new(Mutex::new(child.stdin.take().ok_or("Failed to get stdin")?));
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
         let stderr = child.stderr.take().ok_or("Failed to get stderr")?;
 
         let pending: PendingMap = std::sync::Arc::new(Mutex::new(HashMap::new()));
+        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let reader_pending = pending.clone();
+        let reader_closed = closed.clone();
+        let reader_stdin = stdin.clone();
         let reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let failure = loop {
@@ -165,6 +265,26 @@ impl McpServer {
                     continue;
                 }
                 if let Ok(msg) = serde_json::from_str::<Value>(&line) {
+                    if let Some(method) = msg.get("method").and_then(Value::as_str) {
+                        if let Some(id) = msg.get("id") {
+                            let reply = if method == "ping" {
+                                json!({"jsonrpc":"2.0","id":id,"result":{}})
+                            } else {
+                                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Client does not support this server request"}})
+                            };
+                            let write = async {
+                                let mut input = reader_stdin.lock().await;
+                                input.write_all(format!("{reply}\n").as_bytes()).await?;
+                                input.flush().await
+                            };
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS),
+                                write,
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
                     if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
                         let mut map = reader_pending.lock().await;
                         if let Some(sender) = map.remove(&id) {
@@ -178,6 +298,7 @@ impl McpServer {
                 }
             };
             let mut map = reader_pending.lock().await;
+            reader_closed.store(true, std::sync::atomic::Ordering::Release);
             for (_, sender) in map.drain() {
                 let _ = sender.send(Err(failure.clone()));
             }
@@ -192,13 +313,13 @@ impl McpServer {
             }
         });
 
-        let stdin = Mutex::new(stdin);
         let mut server = McpServer {
-            child,
+            child: Some(child),
             stdin,
             tool_definitions: Vec::new(),
             next_id: Mutex::new(1),
             pending,
+            closed,
             _reader_handle: reader_handle,
             _stderr_handle: stderr_handle,
         };
@@ -212,7 +333,7 @@ impl McpServer {
                     "capabilities": {},
                     "clientInfo": {
                         "name": "gxAgent",
-                        "version": "1.0.0"
+                        "version": env!("CARGO_PKG_VERSION")
                     }
                 }),
             )
@@ -252,6 +373,13 @@ impl McpServer {
                     .ok_or("Invalid MCP tool name")?;
                 if !names.insert(name.to_owned()) {
                     return Err(format!("Duplicate MCP tool: {name}"));
+                }
+                if let Some(schema) = tool.get("inputSchema") {
+                    if !schema.is_object() {
+                        return Err(format!("Invalid input schema for MCP tool '{name}'"));
+                    }
+                    jsonschema::validator_for(schema)
+                        .map_err(|e| format!("Invalid input schema for MCP tool '{name}': {e}"))?;
                 }
                 server.tool_definitions.push(tool.clone());
             }
@@ -293,8 +421,16 @@ impl McpServer {
         let (tx, rx) = oneshot::channel();
         {
             let mut map = self.pending.lock().await;
+            if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+                return Err("MCP server closed connection".into());
+            }
             map.insert(id, tx);
         }
+        let _guard = PendingRequestGuard {
+            pending: self.pending.clone(),
+            id,
+            stdin: self.stdin.clone(),
+        };
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS),
@@ -306,7 +442,9 @@ impl McpServer {
         )
         .await
         .map_err(|_| format!("MCP request '{method}' timed out after {MCP_REQUEST_TIMEOUT_SECS}s"));
-        self.pending.lock().await.remove(&id);
+        if result.is_ok() {
+            self.pending.lock().await.remove(&id);
+        }
         result?
     }
 
@@ -395,12 +533,19 @@ impl McpServer {
 
     /// Kill the server process
     pub async fn kill(&mut self) {
-        let _ = self.child.kill().await;
+        {
+            let mut pending = self.pending.lock().await;
+            self.closed
+                .store(true, std::sync::atomic::Ordering::Release);
+            for (_, sender) in pending.drain() {
+                let _ = sender.send(Err("MCP server stopped".into()));
+            }
+        }
+        if let Some(mut child) = self.child.take() {
+            crate::tools::terminate_process_tree(&mut child).await;
+        }
         self._reader_handle.abort();
         self._stderr_handle.abort();
-        for (_, sender) in self.pending.lock().await.drain() {
-            let _ = sender.send(Err("MCP server stopped".into()));
-        }
     }
 }
 
@@ -438,6 +583,14 @@ impl McpManager {
         McpManager {
             servers: HashMap::new(),
         }
+    }
+
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.servers.iter().any(|(server_name, server)| {
+            server.tool_definitions().iter().any(|tool| {
+                tool_alias(server_name, tool["name"].as_str().unwrap_or_default()) == name
+            })
+        })
     }
 
     /// Start all configured MCP servers and collect their tool definitions
@@ -593,7 +746,11 @@ pub async fn test_server(name: String, config: McpServerConfig) -> McpServerStat
 
 /// Fetch available models from a local Ollama instance
 pub async fn fetch_ollama_models(base_url: &str) -> Result<Vec<Value>, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
 
     let response = client
@@ -635,6 +792,51 @@ pub async fn fetch_ollama_models(base_url: &str) -> Result<Vec<Value>, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn environment_names_cannot_collide_after_case_folding() {
+        let env = HashMap::from([("PATH".into(), "one".into()), ("Path".into(), "two".into())]);
+        assert!(validate_env_vars(&env).unwrap_err().contains("Duplicate"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_npx_passes_literal_arguments_through_node() {
+        let task_path = std::env::var_os("PATH").unwrap();
+        let node_folder = std::env::split_paths(&task_path)
+            .find(|folder| folder.join("node.exe").is_file())
+            .expect("Node.js is required for the Windows MCP regression test");
+        let root = std::env::temp_dir().join(format!("gxagent-npx-{}", uuid::Uuid::new_v4()));
+        let folder = root.join("node_modules/npm/bin");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("npx-cli.js"),
+            "process.stdout.write(JSON.stringify(process.argv.slice(2)))",
+        )
+        .unwrap();
+        let arguments = vec![
+            "a,b".into(),
+            "C:\\folder with spaces\\tool".into(),
+            "x & echo injected".into(),
+            "$(literal)".into(),
+        ];
+        let config = McpServerConfig {
+            command: root.join("npx.cmd").to_string_lossy().into_owned(),
+            args: arguments.clone(),
+            env: HashMap::from([("PATH".into(), node_folder.to_string_lossy().into_owned())]),
+        };
+        let result = server_command(&config)
+            .args(&config.args)
+            .output()
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(result.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Vec<String>>(&result.stdout).unwrap(),
+            arguments
+        );
+    }
+
     #[tokio::test]
     async fn framing_preserves_messages_and_rejects_oversize_input() {
         let mut reader = BufReader::new(&b"one\ntwo\n"[..]);
@@ -672,28 +874,179 @@ mod tests {
         if std::env::var("GX_MCP_FIXTURE").as_deref() != Ok("1") {
             return;
         }
+        let mut cancelled = false;
         for line in std::io::stdin().lock().lines() {
             let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if request["method"] == "notifications/cancelled" {
+                cancelled = true;
+                continue;
+            }
+            if request.get("method").is_none() {
+                continue;
+            }
             let Some(id) = request.get("id") else {
                 continue;
             };
             let result = match request["method"].as_str().unwrap_or("") {
-                "initialize" => json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}}}),
+                "initialize" => {
+                    if std::env::var("GX_MCP_BEHAVIOR").as_deref() == Ok("ping") {
+                        println!(
+                            "{}",
+                            json!({"jsonrpc":"2.0","id":id,"method":"ping","params":{}})
+                        );
+                        std::io::stdout().flush().unwrap();
+                    }
+                    json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}}})
+                }
                 "tools/list" => {
-                    if request["params"]["cursor"].is_string() {
+                    if std::env::var("GX_MCP_BEHAVIOR").as_deref() == Ok("bad-schema") {
+                        json!({"tools":[{"name":"bad","inputSchema":{"type":123}}]})
+                    } else if request["params"]["cursor"].is_string() {
                         json!({"tools":[{"name":"second","inputSchema":{"type":"object"}}]})
                     } else {
                         json!({"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}],"nextCursor":"page2"})
                     }
                 }
                 "tools/call" => {
-                    json!({"content":[{"type":"text","text":"response"}],"structuredContent":{"value":request["params"]["arguments"]["value"]},"isError":request["params"]["arguments"]["value"]=="fail"})
+                    if request["params"]["arguments"]["value"] == "wait" {
+                        continue;
+                    }
+                    if request["params"]["arguments"]["value"] == "close" {
+                        std::process::exit(0);
+                    }
+                    json!({"content":[{"type":"text","text":"response"}],"structuredContent":{"value":request["params"]["arguments"]["value"],"cancelled":cancelled,"server":std::env::var("GX_MCP_TAG").unwrap_or_default()},"isError":request["params"]["arguments"]["value"]=="fail"})
                 }
                 _ => json!({}),
             };
             println!("{}", json!({"jsonrpc":"2.0","id":id,"result":result}));
             std::io::stdout().flush().unwrap();
         }
+    }
+
+    fn fixture_config() -> McpServerConfig {
+        McpServerConfig {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--ignored".into(),
+                "--exact".into(),
+                "mcp::tests::protocol_fixture".into(),
+                "--nocapture".into(),
+            ],
+            env: HashMap::from([("GX_MCP_FIXTURE".into(), "1".into())]),
+        }
+    }
+
+    #[tokio::test]
+    async fn server_requests_do_not_steal_client_response_ids() {
+        let mut config = fixture_config();
+        config.env.insert("GX_MCP_BEHAVIOR".into(), "ping".into());
+        let mut server = McpServer::start(&config).await.unwrap();
+        assert_eq!(server.tool_definitions().len(), 2);
+        server.kill().await;
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            server.call_tool_raw("echo", json!({"value":"after shutdown"}))
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_calls_release_pending_requests_and_notify_server() {
+        let mut server = McpServer::start(&fixture_config()).await.unwrap();
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            server.call_tool_raw("echo", json!({"value":"wait"}))
+        )
+        .await
+        .is_err());
+        let output = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let result = server
+                    .call_tool_raw("echo", json!({"value":"next"}))
+                    .await
+                    .unwrap();
+                if result["structuredContent"]["cancelled"] == true {
+                    break result;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(output["structuredContent"]["value"], "next");
+        assert!(server.pending.lock().await.is_empty());
+        server.kill().await;
+    }
+
+    #[tokio::test]
+    async fn closed_servers_fail_promptly_and_bad_catalog_schemas_are_rejected() {
+        let mut server = McpServer::start(&fixture_config()).await.unwrap();
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            server.call_tool_raw("echo", json!({"value":"close"})),
+        )
+        .await
+        .unwrap();
+        assert!(closed.is_err());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            server.call_tool_raw("echo", json!({"value":"next"}))
+        )
+        .await
+        .unwrap()
+        .is_err());
+        server.kill().await;
+        let mut invalid = fixture_config();
+        invalid
+            .env
+            .insert("GX_MCP_BEHAVIOR".into(), "bad-schema".into());
+        assert!(McpServer::start(&invalid)
+            .await
+            .err()
+            .unwrap()
+            .contains("schema"));
+    }
+
+    #[tokio::test]
+    async fn manager_routes_same_named_tools_to_the_correct_server() {
+        let mut first = fixture_config();
+        first.env.insert("GX_MCP_TAG".into(), "first".into());
+        let mut second = fixture_config();
+        second.env.insert("GX_MCP_TAG".into(), "second".into());
+        let mut manager = McpManager::new();
+        let report = manager
+            .start_all(&HashMap::from([
+                ("first".into(), first),
+                ("second".into(), second),
+            ]))
+            .await;
+        assert_eq!(report.tool_definitions.len(), 4);
+        assert!(!manager.has_tool("echo"));
+        for name in ["first", "second"] {
+            let alias = tool_alias(name, "echo");
+            assert!(manager.has_tool(&alias));
+            let result = manager
+                .route_tool_call(&alias, json!({"value":"hello"}))
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&result).unwrap()["structuredContent"]["server"],
+                name
+            );
+            assert!(manager
+                .route_tool_call(&alias, json!({"value":"fail"}))
+                .await
+                .unwrap_err()
+                .contains("MCP tool failed"));
+        }
+        manager.shutdown().await;
+        assert!(!manager.has_tool(&tool_alias("first", "echo")));
     }
 
     #[tokio::test]

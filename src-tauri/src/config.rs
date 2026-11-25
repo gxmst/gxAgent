@@ -13,6 +13,76 @@ pub struct ApiProfile {
     pub wire_format: String,
     #[serde(default = "default_provider")]
     pub provider: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+pub fn apply_api_profile(config: &mut AppConfig, id: &str) -> Result<(), String> {
+    let profile = config
+        .profiles
+        .get(id)
+        .ok_or("Connection no longer exists")?
+        .clone();
+    config.provider = profile.provider;
+    config.wire_format = profile.wire_format;
+    config.base_url = profile.base_url;
+    config.api_key = profile.api_key;
+    config.model = profile.default_model;
+    config.active_profile = Some(id.to_string());
+    Ok(())
+}
+
+/// Existing map keys remain stable IDs so legacy sessions need no relinking.
+pub fn upsert_api_profile(
+    config: &mut AppConfig,
+    id: Option<String>,
+    mut profile: ApiProfile,
+) -> Result<String, String> {
+    profile.name = profile.name.trim().to_string();
+    profile.base_url = profile.base_url.trim().trim_end_matches('/').to_string();
+    profile.default_model = profile.default_model.trim().to_string();
+    if profile.name.is_empty() || profile.default_model.is_empty() {
+        return Err("Connection name and model are required".into());
+    }
+    let url =
+        reqwest::Url::parse(&profile.base_url).map_err(|_| "Enter a valid HTTP(S) API base URL")?;
+    if !["http", "https"].contains(&url.scheme())
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("API base URL must be HTTP(S), without credentials, query or fragment".into());
+    }
+    if !["openai", "anthropic", "gemini", "ollama"].contains(&profile.wire_format.as_str()) {
+        return Err("Unsupported connection protocol".into());
+    }
+    if let Some(ref id) = id {
+        if !config.profiles.contains_key(id) {
+            return Err("Connection no longer exists".into());
+        }
+    }
+    if config.profiles.iter().any(|(key, p)| {
+        Some(key) != id.as_ref() && p.name.trim().to_lowercase() == profile.name.to_lowercase()
+    }) {
+        return Err("A connection with this name already exists".into());
+    }
+    profile.models.push(profile.default_model.clone());
+    profile.models = profile
+        .models
+        .into_iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
+    profile.models.sort();
+    profile.models.dedup();
+    let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    config.profiles.insert(id.clone(), profile);
+    if config.active_profile.as_deref() == Some(&id) {
+        apply_api_profile(config, &id)?;
+    }
+    Ok(id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,6 +434,47 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn profile(name: &str) -> ApiProfile {
+        ApiProfile {
+            name: name.into(),
+            base_url: "https://gateway.example/v1".into(),
+            api_key: "test-secret".into(),
+            default_model: "private".into(),
+            wire_format: "openai".into(),
+            provider: "openai".into(),
+            models: vec![],
+        }
+    }
+
+    #[test]
+    fn connection_ids_survive_rename_and_active_edits_are_applied() {
+        let mut config = AppConfig::default();
+        config
+            .profiles
+            .insert("legacy-name".into(), profile("Office"));
+        apply_api_profile(&mut config, "legacy-name").unwrap();
+        let mut renamed = profile("New office name");
+        renamed.api_key = "updated-secret".into();
+        renamed.default_model = "new-model".into();
+        upsert_api_profile(&mut config, Some("legacy-name".into()), renamed).unwrap();
+        assert_eq!(config.active_profile.as_deref(), Some("legacy-name"));
+        assert_eq!(config.model, "new-model");
+        assert_eq!(config.api_key, "updated-secret");
+        assert_eq!(config.profiles["legacy-name"].name, "New office name");
+    }
+
+    #[test]
+    fn duplicate_names_and_invalid_urls_do_not_overwrite_connections() {
+        let mut config = AppConfig::default();
+        let id = upsert_api_profile(&mut config, None, profile("Office")).unwrap();
+        assert!(upsert_api_profile(&mut config, None, profile(" office ")).is_err());
+        let mut invalid = profile("Other");
+        invalid.base_url = "file:///tmp".into();
+        assert!(upsert_api_profile(&mut config, None, invalid).is_err());
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles[&id].api_key, "test-secret");
+    }
 
     #[test]
     fn role_prompt_is_accepted_from_requests_but_never_serialized() {

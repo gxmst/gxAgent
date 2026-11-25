@@ -13,17 +13,23 @@ export function SecretInput({
   placeholder,
   revealLabel,
   hideLabel,
+  ariaLabel,
+  disabled,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   revealLabel: string;
   hideLabel: string;
+  ariaLabel?: string;
+  disabled?: boolean;
 }) {
   const [revealed, setRevealed] = useState(false);
   return (
     <div className="secret-input">
       <input
+        aria-label={ariaLabel}
+        disabled={disabled}
         type={revealed ? "text" : "password"}
         className={`input-text${revealed ? "" : " is-masked"}`}
         value={value}
@@ -33,6 +39,7 @@ export function SecretInput({
         spellCheck={false}
       />
       <button
+        disabled={disabled}
         type="button"
         className="secret-input-toggle"
         onClick={() => setRevealed((v) => !v)}

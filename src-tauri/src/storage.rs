@@ -20,9 +20,8 @@ struct SessionIndex {
 }
 
 fn get_sessions_dir() -> Result<PathBuf, String> {
-    let dir = dirs::data_dir()
+    let dir = crate::app_paths::data_dir()
         .ok_or("Failed to get data directory")?
-        .join("gxAgent")
         .join("sessions");
 
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

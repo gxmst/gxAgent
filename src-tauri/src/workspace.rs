@@ -102,6 +102,9 @@ pub struct RunReview {
 }
 
 pub fn default_workspace_path() -> PathBuf {
+    if let Some(root) = crate::app_paths::isolated_root() {
+        return root.join("workspace");
+    }
     dirs::home_dir()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))

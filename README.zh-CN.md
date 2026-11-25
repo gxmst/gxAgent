@@ -19,7 +19,7 @@ gxAgent Studio 是一个基于 Tauri v2、React 19、TypeScript 和 Rust 构建�
 - 内置 DeepSeek、OpenAI、Anthropic Claude、Google Gemini、Ollama 和 OpenAI 兼容接口预设。
 - 请求格式与供应商预设解耦：可以独立选择 OpenAI、Anthropic、Gemini 或 Ollama 协议。
 - 流式输出、工具调用和工具结果在内部统一成一致格式，便于跨供应商使用。
-- API Profile 支持保存供应商、Base URL、模型、API Key 和请求格式，方便一键切换。
+- 模型连接独立保存供应商、API 地址、密钥、协议和模型目录，支持添加、编辑、重命名、复制与删除。
 - 设置面板支持获取模型列表，输入栏支持快速切换当前会话模型。
 
 ### 安全与费用保护
@@ -157,6 +157,12 @@ npm run tauri build
 Cargo 默认在 `src-tauri/target/release/` 和 `src-tauri/target/release/bundle/` 生成程序和安装包；配置 `CARGO_TARGET_DIR` 后根目录随之改变。共享 Cargo target 始终属于可丢弃的构建缓存，普通开发构建不会创建持久交付归档。
 
 Windows 下，`npm run build:desktop` 完整构建程序与 MSI/NSIS 安装包，并报告实际输出位置。`npm run build:archive` 还会将最终程序、安装包与完整第三方许可复制到 `../_build_artifacts/<project>/<timestamp>-<commit>[-dirty]/`，验证 SHA-256 并生成构建清单。可用 `GXAGENT_ARTIFACTS_DIR` 覆盖归档根目录；`LATEST.txt` 只保存相对归档目录名。归档不包含编译缓存或用户数据。程序需要 WebView2，数据保存在正常 Windows 用户目录，不属于便携数据包。本地未签名构建不等于公开发行版。
+
+模型供应商在“设置 → 连接与模型 → 添加供应商”中添加。官方供应商和自定义网关都使用独立草稿；取消不会改变当前连接。模型可搜索或手填，网关不提供模型目录时也能保存。设为默认影响继承全局的会话；输入栏中的连接和模型选择仅影响当前会话。复制连接不复制密钥，删除连接时可为关联会话选择替换连接。
+
+MCP 启动命令与参数分别填写：参数支持 JSON 字符串数组或每行一个参数，包含空格、逗号的参数会原样保留。环境变量使用每行一个 `NAME=value`，格式错误会在表单内显示。Windows 的标准 npm/npx 安装通过 Node 入口启动，参数不会经过命令行 shell 插值。
+
+开发和桌面冒烟测试可在启动前设置 `GXAGENT_DATA_DIR` 为独立目录：配置、加密盐、会话、知识库、审计和 WebView 数据分别保存在该目录下，默认工作区也使用该目录的 `workspace/`。相对路径从进程工作目录解析；未设置时仍使用以下系统默认位置。
 
 ## 配置与安全
 

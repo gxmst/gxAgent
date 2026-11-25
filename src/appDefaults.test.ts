@@ -12,6 +12,10 @@ const connection = {
 const models = [{ id: "shared-model", context_length: 32_000 }];
 
 describe("provider model catalog provenance", () => {
+  it("isolates account-specific catalogs on the same gateway", () => {
+    const first = { ...connection, api_key: "first-test-key" };
+    expect(modelCatalogForConfig(models, modelCatalogKey(first), { ...connection, api_key: "other-test-key" })).toEqual([]);
+  });
   it("normalizes harmless connection formatting differences", () => {
     expect(modelCatalogKey(connection)).toBe(modelCatalogKey({
       wire_format: "OPENAI",

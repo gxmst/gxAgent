@@ -5,10 +5,19 @@ it('reserves usable conversation width for side-by-side panels', () => {
   for (const width of [801, 900, 1024, 1180, 1280, 1440, 1920]) {
     for (const sidebar of [180, 280, 400]) {
       const layout = workbenchLayout(width, sidebar, 900, true, true);
-      const navigation = width >= 1180 ? layout.sidebarWidth + 5 : 0;
+      const navigation = layout.navigationOverlay ? 0 : layout.sidebarWidth + 5;
       expect(width - navigation - layout.reviewWidth - 5).toBeGreaterThanOrEqual(360);
       expect(layout.reviewWidth).toBeGreaterThanOrEqual(320);
     }
+  }
+});
+
+it('keeps the conversation beside navigation in scaled desktop windows', () => {
+  for (const width of [801, 900, 1024, 1147, 1179]) {
+    const layout = workbenchLayout(width, 400, 480, true, false);
+    expect(layout.navigationOverlay).toBe(false);
+    expect(width - layout.sidebarWidth - 5).toBeGreaterThanOrEqual(360);
+    expect(workbenchLayout(width, 400, 480, true, true).navigationOverlay).toBe(true);
   }
 });
 

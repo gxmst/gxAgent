@@ -695,11 +695,12 @@ fn configure_process(command: &mut Command) {
 }
 
 #[cfg(windows)]
-async fn terminate_process_tree(child: &mut tokio::process::Child) {
+pub(crate) async fn terminate_process_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         let mut taskkill = Command::new("taskkill");
         taskkill.args(["/PID", &pid.to_string(), "/T", "/F"]);
         taskkill.creation_flags(CREATE_NO_WINDOW);
+        taskkill.stdout(Stdio::null()).stderr(Stdio::null());
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), taskkill.status()).await;
     }
     let _ = child.start_kill();
@@ -707,7 +708,7 @@ async fn terminate_process_tree(child: &mut tokio::process::Child) {
 }
 
 #[cfg(not(windows))]
-async fn terminate_process_tree(child: &mut tokio::process::Child) {
+pub(crate) async fn terminate_process_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         let process_group = format!("-{}", pid);
         let _ = Command::new("kill")

@@ -136,6 +136,7 @@ export function useOnboarding({
       setModelCatalogSourceKey(modelCatalogKey({
         wire_format: snapshot.wireFormat,
         base_url: snapshot.baseUrl,
+        api_key: snapshot.apiKey,
       }));
       const selectedModelExists = list.length === 0
         || list.some((model) => model.id === snapshot.model);
@@ -159,7 +160,7 @@ export function useOnboarding({
   };
 
   const completeOnboarding = async () => {
-    if (onboardingConnection.state !== "success") return;
+    if (!onboardingValues.baseUrl.trim() || !onboardingValues.model.trim() || onboardingConnection.state === "testing") return;
     try {
       if (onboardingValues.mode === "code") {
         await invoke("validate_workspace", { path: onboardingValues.workDir, create: false });

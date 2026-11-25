@@ -162,6 +162,12 @@ Cargo normally writes binaries and installers under `src-tauri/target/release/` 
 
 On Windows, `npm run build:desktop` builds the executable and MSI/NSIS installers and reports their actual paths. `npm run build:archive` additionally copies final deliverables and full third-party notices into `../_build_artifacts/<project>/<timestamp>-<commit>[-dirty]/`, verifies SHA-256 checksums, and writes a build manifest. Set `GXAGENT_ARTIFACTS_DIR` to override the archive root. `LATEST.txt` contains only the relative archive directory name. Archives exclude compiler caches and user data. The executable requires WebView2 and uses the normal Windows user profile; it is not a portable-data package. Local unsigned builds are not public releases.
 
+Add providers through **Settings → Connections → Add provider**. Drafts are independent of the active connection; cancel leaves it unchanged. Models can be searched or entered manually, including when a gateway has no model directory. Composer choices affect only the current conversation. Copies omit credentials, and deletion offers a replacement for linked conversations.
+
+MCP arguments accept a JSON string array or one argument per line; commas and spaces are preserved. Environment entries use one `NAME=value` per line, with inline validation. Standard Windows npm/npx installations launch through Node without shell interpolation of arguments.
+
+For isolated desktop development or smoke tests, set `GXAGENT_DATA_DIR` before launching. Configuration, encryption salt, sessions, knowledge, audit and WebView storage use this directory, as does the default `workspace/`. Relative paths resolve from the process working directory. Without the variable, normal system storage remains in use.
+
 ## Configuration And Security
 
 Configuration and API profiles are stored in the standard app config directory:

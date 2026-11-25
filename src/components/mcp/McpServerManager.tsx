@@ -54,13 +54,13 @@ export function McpServerManager({
                 <span className="mcp-manager-tools"><Wrench size={11} /> {server.toolCount || 0}</span>
               )}
               <div className="mcp-manager-actions">
-                <button disabled={server.state === "starting"} onClick={() => onTest(server.name)} title={server.state === "ready" ? (zh ? "重新测试" : "Retest") : (zh ? "测试连接" : "Test connection")}>
+                <button disabled={server.state === "starting"} onClick={() => onTest(server.name)} aria-label={`${zh ? "测试连接" : "Test connection"} ${server.name}`} title={server.state === "ready" ? (zh ? "重新测试" : "Retest") : (zh ? "测试连接" : "Test connection")}>
                   {server.state === "ready" ? <RefreshCw size={13} /> : <Play size={13} />}
                 </button>
                 {onStop && server.state === "ready" && (
                   <button onClick={() => onStop(server.name)} title={zh ? "停止" : "Stop"}><Square size={12} /></button>
                 )}
-                <button disabled={server.state === "starting"} className="danger" onClick={() => onDelete(server.name)} title={zh ? "删除" : "Delete"}><Trash2 size={13} /></button>
+                <button disabled={server.state === "starting"} className="danger" onClick={() => onDelete(server.name)} aria-label={`${zh ? "删除" : "Delete"} ${server.name}`} title={zh ? "删除" : "Delete"}><Trash2 size={13} /></button>
               </div>
             </div>
           ))}

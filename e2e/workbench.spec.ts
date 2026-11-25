@@ -82,6 +82,7 @@ test('desktop and narrow layouts remain usable in both themes', async ({ page },
   await page.locator('[data-session-id="performance"]').click();
   await page.screenshot({ path: testInfo.outputPath('desktop-light.png') });
   await page.getByRole('button', { name: 'Toggle theme', exact: true }).click();
+  await expect(page.locator('.chat-input-container')).toHaveCSS('background-color', 'rgb(28, 31, 37)');
   await page.screenshot({ path: testInfo.outputPath('desktop-dark.png') });
   for (const width of [1024, 800, 390, 320]) {
     await page.setViewportSize({ width, height: 844 });

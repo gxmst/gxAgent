@@ -53,6 +53,19 @@ export async function installFixture(page: Page, options: FixtureOptions = {}) {
           language: localStorage.getItem('fixture_language') || 'en', theme: 'light', default_work_dir: config.workDir,
           mcp_servers: { docs: { command: 'fixture', args: [], env: {} } }, ...options.config,
         };
+        if (command === 'save_config') { if (bridge.__configSaveFailure) throw new Error('Configuration disk unavailable'); bridge.__config = structuredClone(args.config); return; }
+        if (command === 'save_profile') {
+          if (bridge.__profileSaveFailure) throw new Error('Profile disk unavailable');
+          const updated = structuredClone(args.currentConfig);
+          const id = args.profileId || 'connection-' + (++sequence);
+          updated.profiles[id] = args.profile;
+          if (args.setDefault || updated.active_profile === id) { Object.assign(updated, { active_profile: id, provider: args.profile.provider, wire_format: args.profile.wire_format, base_url: args.profile.base_url, api_key: args.profile.api_key, model: args.profile.default_model }); }
+          bridge.__config = updated; return updated;
+        }
+        if (command === 'set_active_profile') { const updated = structuredClone(args.currentConfig); const profile = updated.profiles[args.name]; Object.assign(updated, { active_profile: args.name, provider: profile.provider, wire_format: profile.wire_format, base_url: profile.base_url, api_key: profile.api_key, model: profile.default_model }); bridge.__config = updated; return updated; }
+        if (command === 'delete_profile') { const updated = structuredClone(args.currentConfig); delete updated.profiles[args.name]; if (updated.active_profile === args.name) { updated.active_profile = null; if (args.replacementId) { const profile = updated.profiles[args.replacementId]; Object.assign(updated, { active_profile: args.replacementId, provider: profile.provider, wire_format: profile.wire_format, base_url: profile.base_url, api_key: profile.api_key, model: profile.default_model }); } } bridge.__config = updated; return updated; }
+        if (command === 'save_mcp_server') { const updated = structuredClone(args.currentConfig); updated.mcp_servers[args.name] = { command: args.command, args: args.args, env: args.env }; return updated; }
+        if (command === 'test_mcp_server') return { status: 'ready', toolCount: 2 };
         if (command === 'pick_and_parse_files') return options.parsedFiles || [];
         if (command === 'list_skills') return { skills: [skill], errors: [] };
         if (command === 'read_skill_resource') return 'Reference document content.';
@@ -72,7 +85,7 @@ export async function installFixture(page: Page, options: FixtureOptions = {}) {
         if (command === 'save_knowledge_case') { bridge.__evalCases.push({ id: 'case-' + bridge.__evalCases.length, question: args.question, expectedDocumentId: args.expectedDocumentId }); return; }
         if (command === 'delete_knowledge_case') { bridge.__evalCases = bridge.__evalCases.filter((c: any) => c.id !== args.id); return; }
         if (command === 'run_knowledge_evaluation') { const report = { id: 'eval-1', createdAt: Date.now(), topK: args.topK, mode: args.mode, indexRevision: 'fixture-index-revision', hitRate: 1, mrr: 1, unanswerable: 0, noAnswerCorrect: 0, results: bridge.__evalCases.map((c: any) => ({ case: c, rank: 1, report: { query: c.question, hits: [hit], durationMs: 1, mode: args.mode, topK: args.topK } })) }; bridge.__evalRuns.unshift(report); return report; }
-        if (command === 'get_provider_presets') return [];
+        if (command === 'get_provider_presets') return [{ name: 'OpenAI', provider: 'openai', wire_format: 'openai', base_url: 'https://api.openai.com/v1', default_model: 'gpt-4o', needs_api_key: true }, { name: 'Ollama', provider: 'ollama', wire_format: 'ollama', base_url: 'http://localhost:11434', default_model: '', needs_api_key: false }];
         if (command === 'load_sessions') { if (localStorage.getItem('fixture_damaged_storage')) throw new Error('Invalid session JSON'); return bridge.__sessions; }
         if (command === 'save_session') {
           if (bridge.__saveFailure) throw new Error('Session disk is unavailable');
@@ -81,7 +94,7 @@ export async function installFixture(page: Page, options: FixtureOptions = {}) {
           return;
         }
         if (command === 'save_sessions') { bridge.__sessions = args.sessions; return; }
-        if (command === 'fetch_ollama_models' || command === 'fetch_models') return [{ id: 'qwen3-coder' }, { id: 'deepseek-r1' }, { id: 'very-long-model-name-for-overflow-check' }];
+        if (command === 'fetch_ollama_models' || command === 'fetch_models') { if (bridge.__modelDirectoryFailure) throw new Error('Models endpoint unsupported'); return [{ id: 'qwen3-coder' }, { id: 'deepseek-r1' }, { id: 'very-long-model-name-for-overflow-check' }]; }
         if (command === 'inspect_codex') return { connected: true, authenticated: true, models: [{ id: 'fixture-model', model: 'fixture-model', displayName: 'Fixture model' }] };
         if (command === 'start_agent_session') return new Promise(resolve => { bridge.__finishAgent = resolve; });
         if (command === 'resolve_tool_approval') {

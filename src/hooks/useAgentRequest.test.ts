@@ -8,17 +8,18 @@ import { useAppStore } from '../store/appStore';
 import { runtime } from '../services/agentRuntime';
 import { useAgentRequest } from './useAgentRequest';
 import type { ApiMessage } from '../utils/messageHistory';
-import { notify } from '../services/agentEvents';
+import { addLog, notify } from '../services/agentEvents';
 
 vi.hoisted(() => { vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() }); });
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('../services/agentEvents', () => ({ addLog: vi.fn(), notify: vi.fn(), finishStreamingLocally: vi.fn() }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-function setup(history: Message[], prompt = 'continue', contextLimit = 32000, codeEngine: 'native' | 'codex' = 'native', attachments: Attachment[] = []) {
+function setup(history: Message[], prompt = 'continue', contextLimit = 32000, codeEngine: 'native' | 'codex' = 'native', attachments: Attachment[] = [], profileId: string | null = null) {
   const config = { ...DEFAULT_CONFIG, provider: 'ollama', base_url: 'http://localhost:11434', system_prompt: '', context_limit: contextLimit, code_engine: codeEngine };
   const session = createSession('code', 'test', history);
-  useAppStore.setState({ sessions: [session], currentSessionId: session.id, activeRunSessionId: null, checkpointBySession: {}, quoteBySession: {}, runtimeBySession: {} });
+  session.sessionConfig.profileId = profileId;
+  useAppStore.setState({ sessions: [session], currentSessionId: session.id, activeRunSessionId: null, preparingRequestSessionId: null, settingsOpen: false, checkpointBySession: {}, quoteBySession: {}, runtimeBySession: {} });
   Object.assign(runtime, { isStreaming: false, activeRequestId: '', activeRequestSessionId: '', requestSessionById: {}, assistantMessageIdByRequest: {} });
   const params: Parameters<typeof useAgentRequest>[0] = {
     lang: 'en', config, sessionStorageReady: true, sessionMutationLocked: false, requestStartingRef: { current: false },
@@ -98,4 +99,13 @@ it('does not route Codex manual compaction to a different provider', async () =>
   expect(invoke).not.toHaveBeenCalled();
   expect(notify).toHaveBeenCalledWith(expect.stringContaining('Codex manages context'), 'info');
   expect(useAppStore.getState().sessions[0].messages).toEqual(history);
+});
+
+it('blocks requests for a deleted connection instead of using global credentials', async () => {
+  const { result } = setup([], 'continue', 32000, 'native', [], 'deleted-profile');
+  await act(async () => { await result.current.handleSendMessage(); });
+  expect(invoke).not.toHaveBeenCalled();
+  expect(useAppStore.getState().settingsOpen).toBe(true);
+  expect(addLog).toHaveBeenCalledWith(expect.stringContaining('connection no longer exists'), 'error', true, expect.any(String));
+  expect(runtime.isStreaming).toBe(false);
 });

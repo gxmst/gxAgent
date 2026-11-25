@@ -27,7 +27,7 @@ export function ToolsSettings({ lang, config, setConfig, toggleTool, statuses, o
       </label>)}
     </fieldset>
     <div className="settings-panel settings-wide"><div className="settings-panel-header"><span><Server size={14} /> MCP</span><span>{Object.keys(config.mcp_servers).length}</span></div>
-      <McpServerManager lang={lang} servers={Object.entries(config.mcp_servers).map(([name, server]) => ({ name, command: server.command, args: server.args || [], state: statuses[name]?.state || "stopped", toolCount: statuses[name]?.toolCount, message: statuses[name]?.message }))} onTest={onTest} onDelete={onDelete} />
+      <McpServerManager lang={lang} servers={Object.entries(config.mcp_servers).map(([name, server]) => ({ name, command: server.command, args: server.args || [], state: statuses[name]?.state || "stopped", toolCount: statuses[name]?.toolCount, message: statuses[name]?.message }))} onTest={onTest} onDelete={async name => { if (await requestConfirmation({ title: lang === "zh" ? "删除 MCP 服务" : "Delete MCP server", message: name, confirmLabel: lang === "zh" ? "删除" : "Delete", cancelLabel: lang === "zh" ? "取消" : "Cancel", danger: true })) onDelete(name); }} />
       <McpAddForm setConfig={setConfig} addLog={addLog} lang={lang} t={t} config={config} />
     </div>
     <McpInspector config={config} lang={lang} requestConfirmation={requestConfirmation} />

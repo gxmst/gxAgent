@@ -18,14 +18,12 @@ import {
   FolderOpen,
   FolderPlus,
   SquarePen,
-  Wrench,
   MessageSquare,
   MoreHorizontal,
   Pencil,
   Pin,
   Plus,
   Search,
-  Settings,
   Terminal as TerminalIcon,
   Trash2,
   Upload,
@@ -117,7 +115,6 @@ export function Sidebar(props: SidebarProps) {
     <aside className="sidebar" style={{ width: sidebarWidth }}>
   <nav className="sidebar-shortcuts" aria-label={lang === "zh" ? "工作入口" : "Workspace actions"}>
     <button disabled={!sessionStorageReady} onClick={createNewSession}><SquarePen size={17} /><span>{sidebarNav === "code" ? (lang === "zh" ? "新建任务" : "New task") : t("session.new", lang)}</span></button>
-    <button onClick={() => { setSettingsTab("tools"); setSettingsOpen(true); }}><Wrench size={17} /><span>{lang === "zh" ? "工具与 MCP" : "Tools & MCP"}</span></button>
   </nav>
 
   {/* Session Search */}
@@ -519,9 +516,6 @@ export function Sidebar(props: SidebarProps) {
           : (t("ui.not-configured", lang))}
         onClick={() => { setSettingsTab("model"); setSettingsOpen(true); }}
       />
-      <button className="panel-toggle-btn" onClick={() => setSettingsOpen(true)} title={t("settings.title", lang)}>
-        <Settings size={13} />
-      </button>
     </div>
   </div>
 </aside>

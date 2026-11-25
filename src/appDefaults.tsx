@@ -671,12 +671,13 @@ export const CHAT_VIRTUOSO_COMPONENTS = { Footer: ChatListFooter };
 export const CONTEXT_BUDGET_OPTIONS = [128_000, 256_000, 500_000, 1_000_000] as const;
 export const MAX_CONTEXT_BUDGET = 1_000_000;
 
-type ModelCatalogConnection = Pick<AppConfig, "wire_format" | "base_url">;
+type ModelCatalogConnection = Pick<AppConfig, "wire_format" | "base_url"> & Partial<Pick<AppConfig, "api_key">>;
 
 export const modelCatalogKey = (connection: ModelCatalogConnection) => {
   const wireFormat = (connection.wire_format || "openai").trim().toLowerCase();
   const baseUrl = connection.base_url.trim().replace(/\/+$/, "");
-  return `${wireFormat}\n${baseUrl}`;
+  // In-memory key only: two accounts on one gateway may expose different models.
+  return JSON.stringify([wireFormat, baseUrl, connection.api_key || ""]);
 };
 
 export const modelCatalogForConfig = (

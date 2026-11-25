@@ -1,4 +1,5 @@
 mod agent;
+mod app_paths;
 mod audit;
 mod codex;
 mod codex_transport;
@@ -229,9 +230,8 @@ fn normalize_context_budget(value: u32, migration_version: u32) -> u32 {
 /// Load config from local file, returns default if not found (decrypts API keys)
 #[tauri::command]
 fn load_config() -> Result<AppConfig, String> {
-    let config_path = dirs::config_dir()
-        .unwrap_or_default()
-        .join("gxAgent")
+    let config_path = app_paths::config_dir()
+        .ok_or("Config directory is unavailable")?
         .join("config.json");
 
     if !config_path.exists() {
@@ -835,21 +835,40 @@ async fn check_python_available() -> bool {
 
 /// Save or update an API profile
 #[tauri::command]
-fn save_profile(current_config: AppConfig, profile: ApiProfile) -> Result<AppConfig, String> {
+fn save_profile(
+    current_config: AppConfig,
+    profile: ApiProfile,
+    profile_id: Option<String>,
+    set_default: Option<bool>,
+) -> Result<AppConfig, String> {
     let mut config = current_config;
-    let key = profile.name.clone();
-    config.profiles.insert(key, profile);
+    let id = config::upsert_api_profile(&mut config, profile_id, profile)?;
+    if set_default.unwrap_or(false) {
+        config::apply_api_profile(&mut config, &id)?;
+    }
     persist_config(&config)?;
     Ok(config)
 }
 
 /// Delete an API profile by name
 #[tauri::command]
-fn delete_profile(current_config: AppConfig, name: String) -> Result<AppConfig, String> {
+fn delete_profile(
+    current_config: AppConfig,
+    name: String,
+    replacement_id: Option<String>,
+) -> Result<AppConfig, String> {
     let mut config = current_config;
+    if let Some(ref replacement) = replacement_id {
+        if replacement == &name || !config.profiles.contains_key(replacement) {
+            return Err("Choose an existing replacement connection".into());
+        }
+    }
     config.profiles.remove(&name);
     if config.active_profile.as_deref() == Some(&name) {
         config.active_profile = None;
+        if let Some(ref replacement) = replacement_id {
+            config::apply_api_profile(&mut config, replacement)?;
+        }
     }
     persist_config(&config)?;
     Ok(config)
@@ -859,17 +878,7 @@ fn delete_profile(current_config: AppConfig, name: String) -> Result<AppConfig, 
 #[tauri::command]
 fn set_active_profile(current_config: AppConfig, name: String) -> Result<AppConfig, String> {
     let mut config = current_config;
-    let profile = config
-        .profiles
-        .get(&name)
-        .cloned()
-        .ok_or_else(|| format!("Profile '{}' not found", name))?;
-    config.base_url = profile.base_url;
-    config.api_key = profile.api_key;
-    config.model = profile.default_model;
-    config.wire_format = profile.wire_format;
-    config.provider = profile.provider;
-    config.active_profile = Some(name);
+    config::apply_api_profile(&mut config, &name)?;
     persist_config(&config)?;
     Ok(config)
 }
@@ -892,11 +901,11 @@ fn persist_config(config: &AppConfig) -> Result<(), String> {
     for profile in encrypted_config.profiles.values_mut() {
         profile.api_key = encrypt(&profile.api_key);
     }
-    let config_dir = dirs::config_dir().unwrap_or_default().join("gxAgent");
+    let config_dir = app_paths::config_dir().ok_or("Config directory is unavailable")?;
     fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let config_path = config_dir.join("config.json");
     let json = serde_json::to_string_pretty(&encrypted_config).map_err(|e| e.to_string())?;
-    fs::write(config_path, json).map_err(|e| e.to_string())
+    storage::atomic_write(&config_path, json.as_bytes())
 }
 
 /// Save or update an MCP server configuration
@@ -910,7 +919,11 @@ fn save_mcp_server(
 ) -> Result<AppConfig, String> {
     let mut config = current_config;
     let server = config::McpServerConfig { command, args, env };
-    config.mcp_servers.insert(name, server);
+    if name.trim().is_empty() || config.mcp_servers.contains_key(name.trim()) {
+        return Err("MCP server name is empty or already exists".into());
+    }
+    mcp::validate_server_config(&server)?;
+    config.mcp_servers.insert(name.trim().to_string(), server);
     persist_config(&config)?;
     Ok(config)
 }
@@ -1364,7 +1377,7 @@ fn import_config(app: AppHandle, json: String) -> Result<AppConfig, String> {
 fn clear_all_sessions() -> Result<(), String> {
     storage::clear_sessions()?;
 
-    let data_dir = dirs::data_dir().unwrap_or_default().join("gxAgent");
+    let data_dir = app_paths::data_dir().ok_or("Data directory is unavailable")?;
     if data_dir.exists() {
         let entries = fs::read_dir(&data_dir).map_err(|e| e.to_string())?;
         for entry in entries.flatten() {
@@ -1387,7 +1400,7 @@ async fn show_spotlight(app: tauri::AppHandle) -> Result<(), String> {
         window.show().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
     } else {
-        let _window = tauri::WebviewWindowBuilder::new(
+        let mut builder = tauri::WebviewWindowBuilder::new(
             &app,
             "spotlight",
             tauri::WebviewUrl::App("index.html#spotlight".into()),
@@ -1397,20 +1410,35 @@ async fn show_spotlight(app: tauri::AppHandle) -> Result<(), String> {
         .center()
         .decorations(false)
         .always_on_top(true)
-        .skip_taskbar(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .skip_taskbar(true);
+        if let Some(root) = app_paths::isolated_root() {
+            builder = builder.data_directory(root.join("webview"));
+        }
+        let _window = builder.build().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mut context = tauri::generate_context!();
+    if app_paths::isolated_root().is_some() {
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+        }
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            if let Some(root) = app_paths::isolated_root() {
+                for window in &app.config().app.windows {
+                    tauri::WebviewWindowBuilder::from_config(app, window)?
+                        .data_directory(root.join("webview"))
+                        .build()?;
+                }
+            }
             // System tray icon with menu
             let icon = app
                 .default_window_icon()
@@ -1565,7 +1593,7 @@ pub fn run() {
             read_file_as_base64,
             toggle_always_on_top,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 

@@ -1,20 +1,16 @@
-import type { KeyboardEvent, RefObject } from "react";
+import { useState, type KeyboardEvent, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog } from "radix-ui";
 import {
   Download,
   Globe,
-  Loader2,
   MessageSquare,
-  Plus,
-  RefreshCw,
   Save,
   Server,
   Settings2,
   ShieldAlert,
   Timer,
   Trash,
-  Trash2,
   Type,
   Upload,
   X,
@@ -22,7 +18,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { t } from "../../i18n";
-import type { AppConfig, ChatSession, ModelInfo, ProviderPreset } from "../../types";
+import type { AppConfig, ChatSession, ProviderPreset } from "../../types";
 import {
   CONTEXT_BUDGET_OPTIONS,
   FONT_OPTIONS,
@@ -33,6 +29,7 @@ import {
   formatContextBudget,
 } from "../../appDefaults";
 import { SecretInput } from "../shared/SecretInput";
+import { ConnectionSettings } from "./ConnectionSettings";
 import { type McpServerView } from "../mcp/McpServerManager";
 import { ToolsSettings } from "./ToolsSettings";
 import { EngineSettings } from "./EngineSettings";
@@ -41,7 +38,7 @@ import { KnowledgeSettings } from "./KnowledgeSettings";
 import { BackupSettings } from "./BackupSettings";
 import { useAppStore } from "../../store/appStore";
 import type { ConfirmationOptions } from "../shared/ConfirmDialog";
-import { sortModels, sortProfileEntries } from "../../utils/modelSorting";
+
 
 import { settingsTabLabel, type SettingsTab } from "./settingsNavigation";
 
@@ -49,22 +46,13 @@ export interface SettingsModalProps {
   lang: string;
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
-  models: ModelInfo[];
-  modelsLoading: boolean;
   settingsTab: SettingsTab;
   setSettingsTab: React.Dispatch<React.SetStateAction<SettingsTab>>;
   setSettingsOpen: (open: boolean) => void;
   settingsBodyRef: RefObject<HTMLDivElement | null>;
   handleSettingsTabKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
   currentSettingsTabLabel: string;
-  newProfileName: string;
-  setNewProfileName: React.Dispatch<React.SetStateAction<string>>;
-  handleSaveProfile: () => void;
-  handleActivateProfile: (name: string) => void;
-  handleClearActiveProfile: () => void;
-  handleDeleteProfile: (name: string) => void;
-  fetchModelList: () => void;
-  saveConfig: () => Promise<void>;
+  saveConfig: () => Promise<boolean>;
   configSaveStatus: "idle" | "saving" | "saved" | "error";
   addLog: (text: string, type?: "info" | "success" | "error" | "cmd", showToast?: boolean, sessionId?: string) => void;
   notify: (text: string, type?: "info" | "success" | "error" | "cmd") => void;
@@ -76,7 +64,6 @@ export interface SettingsModalProps {
   testMcpServer: (name: string) => void;
   deleteMcpServer: (name: string) => void;
   presets: ProviderPreset[];
-  applyPreset: (preset: ProviderPreset) => void;
   sessionMutationLocked: boolean;
   createSessionSnapshot: () => Promise<void>;
   hasAttachmentLoading: boolean;
@@ -86,29 +73,26 @@ export interface SettingsModalProps {
 
 export function SettingsModal(props: SettingsModalProps) {
   const {
-    lang, config, setConfig, models, modelsLoading,
+    lang, config, setConfig,
     settingsTab, setSettingsTab, setSettingsOpen, settingsBodyRef,
     handleSettingsTabKeyDown, currentSettingsTabLabel,
-    newProfileName, setNewProfileName, handleSaveProfile,
-    handleActivateProfile, handleClearActiveProfile, handleDeleteProfile,
-    fetchModelList, saveConfig, configSaveStatus, addLog, notify,
+    saveConfig, configSaveStatus, addLog, notify,
     customGlobalContextBudget, setCustomGlobalContextBudget,
     toggleTool, removeTrustedPattern, mcpStatusByName, testMcpServer,
-    deleteMcpServer, presets, applyPreset, sessionMutationLocked,
+    deleteMcpServer, presets, sessionMutationLocked,
     hasAttachmentLoading, replaceAllSessions, requestConfirmation, createSessionSnapshot,
   } = props;
-  const profileEntries = sortProfileEntries(Object.entries(config.profiles), lang);
+  const [connectionEditing, setConnectionEditing] = useState(false);
+  const [connectionBusy, setConnectionBusy] = useState(false);
+  const [explicitSaving, setExplicitSaving] = useState(false);
+  const saving = connectionBusy || explicitSaving;
   const selectedWorkDir = useAppStore(s => s.sessions.find(session => session.id === s.currentSessionId)?.sessionConfig.workDir);
   const projectConfig = { ...config, default_work_dir: selectedWorkDir || config.default_work_dir };
-  const configuredModelIds = new Set(profileEntries.map(([, profile]) => profile.default_model));
-  const otherModels = sortModels(
-    models.filter((model) => !configuredModelIds.has(model.id)),
-    lang,
-  );
+
 
   return (
     <Dialog.Root open onOpenChange={(next) => {
-      if (!next) setSettingsOpen(false);
+      if (!next && !saving) setSettingsOpen(false);
     }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
@@ -116,6 +100,8 @@ export function SettingsModal(props: SettingsModalProps) {
           className="dialog-panel settings-modal"
           aria-modal="true"
           aria-describedby={undefined}
+          onInteractOutside={event => { if (saving || connectionEditing) event.preventDefault(); }}
+          onEscapeKeyDown={event => { if (saving || connectionEditing) event.preventDefault(); }}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             document.getElementById(`settings-tab-${settingsTab}`)?.focus();
@@ -135,6 +121,7 @@ export function SettingsModal(props: SettingsModalProps) {
             <button
               type="button"
               className="settings-close-button"
+              disabled={saving}
               title={t("settings.close", lang)}
               aria-label={t("settings.close", lang)}
             >
@@ -164,8 +151,12 @@ export function SettingsModal(props: SettingsModalProps) {
               tabIndex={settingsTab === tab.id ? 0 : -1}
               autoFocus={settingsTab === tab.id}
               className={`settings-tab ${settingsTab === tab.id ? "active" : ""}`}
+              disabled={connectionEditing && tab.id !== "model"}
               onClick={() => setSettingsTab(tab.id)}
-              onKeyDown={handleSettingsTabKeyDown}
+              onKeyDown={event => {
+                if (connectionEditing && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) { event.preventDefault(); return; }
+                handleSettingsTabKeyDown(event);
+              }}
             >
               {tab.icon}
               <span>{tab.label}</span>
@@ -185,150 +176,8 @@ export function SettingsModal(props: SettingsModalProps) {
             role="tabpanel"
             aria-labelledby="settings-tab-model"
           >
-          {/* API Profiles */}
-          <EngineSettings lang={lang} config={config} setConfig={setConfig} />
-          <div className="form-group settings-wide">
-            <label className="form-label">{t("profile.title", lang)}</label>
-            <div className="profile-list">
-              {profileEntries.map(([, p]) => (
-                <div key={p.name} className={`profile-item ${config.active_profile === p.name ? "active" : ""}`}>
-                  <div className="profile-info">
-                    <span className="profile-name">{p.name}</span>
-                    <span className="profile-meta">{p.default_model} · {p.base_url.replace(/^https?:\/\//, "").split("/")[0]}</span>
-                  </div>
-                  <div className="profile-actions">
-                    {config.active_profile !== p.name ? (
-                      <button className="btn" style={{ padding: "2px 8px", fontSize: "var(--font-caption)" }} onClick={() => handleActivateProfile(p.name)}>
-                        {t("profile.activate", lang)}
-                      </button>
-                    ) : (
-                      <span className="profile-active-badge">{t("profile.active", lang)}</span>
-                    )}
-                    <button className="btn" style={{ padding: "2px 6px", fontSize: "var(--font-caption)", color: "var(--error)" }} onClick={() => handleDeleteProfile(p.name)}>
-                      <Trash2 size={11} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-              {Object.keys(config.profiles).length === 0 && (
-                <div className="profile-empty">{t("profile.empty", lang)}</div>
-              )}
-            </div>
-            {config.active_profile && (
-              <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)", marginTop: 4 }} onClick={handleClearActiveProfile}>
-                {t("profile.clearActive", lang)}
-              </button>
-            )}
-            <div className="profile-add" style={{ marginTop: 6 }}>
-              <input
-                type="text"
-                className="input-text"
-                style={{ fontSize: "var(--font-caption)" }}
-                placeholder={t("profile.newName", lang)}
-                value={newProfileName}
-                onChange={(e) => setNewProfileName(e.target.value)}
-              />
-              <button className="btn" style={{ padding: "3px 8px", fontSize: "var(--font-caption)" }} onClick={handleSaveProfile} disabled={!newProfileName.trim()}>
-                <Plus size={11} /> {t("profile.save", lang)}
-              </button>
-            </div>
-          </div>
-
-          {/* Provider Preset — hidden entirely when the preset catalog has
-              not loaded (e.g. backend unavailable) instead of an empty card. */}
-          {presets.length > 0 && (
-            <div className="form-group">
-              <label className="form-label">{t("settings.provider", lang)}</label>
-              <div className="preset-buttons">
-                {presets.map((p) => (
-                  <button
-                    key={p.name}
-                    className={`preset-btn ${config.base_url === p.base_url ? "active" : ""}`}
-                    onClick={() => applyPreset(p)}
-                  >
-                    {p.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Request format (wire protocol) — decoupled from the provider
-              preset so a Claude model behind an OpenAI-compatible proxy can
-              still use the OpenAI format, etc. */}
-          <div className="form-group">
-            <label className="form-label">{t("settings.wireFormat", lang)}</label>
-            <select
-              className="input-text"
-              value={config.wire_format || "openai"}
-              onChange={(e) => setConfig((prev) => ({ ...prev, wire_format: e.target.value }))}
-            >
-              <option value="openai">{t("settings.wire.openai", lang)}</option>
-              <option value="anthropic">{t("settings.wire.anthropic", lang)}</option>
-              <option value="gemini">{t("settings.wire.gemini", lang)}</option>
-              <option value="ollama">{t("settings.wire.ollama", lang)}</option>
-            </select>
-            <div className="form-hint">{t("settings.wireFormat.hint", lang)}</div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">{t("settings.baseUrl", lang)}</label>
-            <input
-              type="text"
-              className="input-text"
-              value={config.base_url}
-              onChange={(e) => setConfig((prev) => ({ ...prev, base_url: e.target.value }))}
-              placeholder="https://api.deepseek.com/v1"
-            />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">{t("settings.apiKey", lang)}</label>
-            <SecretInput
-              value={config.api_key}
-              onChange={(v) => setConfig((prev) => ({ ...prev, api_key: v }))}
-              placeholder="sk-..."
-              revealLabel={t("secret.reveal", lang)}
-              hideLabel={t("secret.hide", lang)}
-            />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">{t("settings.model", lang)}</label>
-            <div className="model-input-row">
-              <select
-                className="input-text"
-                value={config.model}
-                onChange={(e) => setConfig((prev) => ({ ...prev, model: e.target.value }))}
-              >
-                {profileEntries.map(([, p]) => (
-                  <option key={p.name} value={p.default_model}>{p.name} ({p.default_model})</option>
-                ))}
-                {models.length > 0 && (
-                  <optgroup label={t("ui.available-models-2", lang)}>
-                    {otherModels.map((m) => (
-                      <option key={m.id} value={m.id}>{m.id}</option>
-                    ))}
-                  </optgroup>
-                )}
-                {!Object.values(config.profiles).some(p => p.default_model === config.model) && models.length === 0 && (
-                  <option value={config.model}>{config.model}</option>
-                )}
-              </select>
-              <button
-                className="btn btn-icon"
-                onClick={fetchModelList}
-                disabled={modelsLoading}
-                title={t("ui.fetch-model-list", lang)}
-              >
-                {modelsLoading ? (
-                  <Loader2 size={13} className="animate-spin" />
-                ) : (
-                  <RefreshCw size={13} />
-                )}
-              </button>
-            </div>
-          </div>
+          <ConnectionSettings lang={lang} config={config} setConfig={setConfig} presets={presets} onEditingChange={setConnectionEditing} onBusyChange={setConnectionBusy} />
+          <details className="settings-engine-disclosure settings-wide"><summary>{lang === "zh" ? "编码引擎" : "Coding engine"}</summary><EngineSettings lang={lang} config={config} setConfig={setConfig} /></details>
           </section>
           )}
 
@@ -769,9 +618,11 @@ export function SettingsModal(props: SettingsModalProps) {
           </span>
           <button
             className="btn btn-primary"
+            disabled={configSaveStatus === "saving" || connectionEditing}
             onClick={async () => {
-              await saveConfig();
-              setSettingsOpen(false);
+              setExplicitSaving(true);
+              try { if (await saveConfig()) setSettingsOpen(false); }
+              finally { setExplicitSaving(false); }
             }}
           >
             {t("settings.save", lang)}

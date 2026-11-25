@@ -20,6 +20,7 @@ import {
   type SessionRuntime,
 } from "../../appDefaults";
 import type { ConfirmationOptions } from "../shared/ConfirmDialog";
+import { ModelInput } from "../shared/ModelInput";
 import { sortModels, sortProfileEntries } from "../../utils/modelSorting";
 import type { RolePreset } from "../../rolePresets";
 import { RolePresetManager } from "./RolePresetManager";
@@ -56,9 +57,8 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
   } = props;
   const codex = resolvedCurrentConfig.code_engine === "codex";
   const profileEntries = sortProfileEntries(Object.entries(config.profiles), lang);
-  const configuredModelIds = new Set(profileEntries.map(([, profile]) => profile.default_model));
   const otherModels = sortModels(
-    models.filter((model) => !configuredModelIds.has(model.id)),
+    models,
     lang,
   );
 
@@ -128,7 +128,7 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
                 />
               </label>
               <label className="session-field">
-                <span className="session-label">{codex ? (lang === "zh" ? "Codex 模型" : "Codex model") : "Profile / API"}</span>
+                <span className="session-label">{codex ? (lang === "zh" ? "Codex 模型" : "Codex model") : (lang === "zh" ? "模型连接" : "Model connection")}</span>
                 {codex ? <input className="session-input" value={currentSession.sessionConfig.codexModel || ""} placeholder={config.codex_model || (lang === "zh" ? "继承 Codex 默认" : "Inherit Codex default")} onChange={event => patchSessionConfig({ codexModel: event.target.value || null })} /> :
                 <select
                   className="session-select"
@@ -148,25 +148,7 @@ export function SessionSettingsPanel(props: SessionSettingsPanelProps) {
               {/* Model */}
               <label className="session-field">
                 <span className="session-label">{t("session.model", lang)}</span>
-                <select
-                  className="session-select"
-                  value={currentSession.sessionConfig.model || ""}
-                  onChange={(e) => {
-                    patchSessionConfig({ model: e.target.value || null });
-                  }}
-                >
-                  <option value="">{t("ui.inherit-value", lang, { value: resolvedCurrentConfig.model })}</option>
-                  {models.length > 0 && (
-                    <optgroup label={t("ui.available-models", lang)}>
-                      {otherModels.map((m) => (
-                        <option key={m.id} value={m.id}>{m.id}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                  {!Object.values(config.profiles).some(p => p.default_model === config.model) && models.length === 0 && (
-                    <option value={config.model}>{config.model}</option>
-                  )}
-                </select>
+                <ModelInput label={t("session.model", lang)} value={currentSession.sessionConfig.model || ""} onChange={value => patchSessionConfig({ model: value || null })} models={Array.from(new Set([resolvedCurrentConfig.model, ...otherModels.map(model => model.id)]))} placeholder={t("ui.inherit-value", lang, { value: resolvedCurrentConfig.model })} />
               </label>
               {/* Context Limit */}
               <label className="session-field">

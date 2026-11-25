@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Loader2, Play, RefreshCw } from "lucide-react";
 import type { AppConfig } from "../../types";
@@ -28,6 +28,10 @@ export function McpInspector({
   const [toolName, setToolName] = useState("");
   const [catalogKey, setCatalogKey] = useState("");
   const key = JSON.stringify([selected, config.mcp_servers[selected]]);
+  const currentKey = useRef(key);
+  currentKey.current = key;
+  useEffect(() => () => { currentKey.current = ""; }, []);
+  useEffect(() => { setResult(null); setError(""); }, [key]);
   const tool =
     catalogKey === key ? tools.find((t) => t.name === toolName) : undefined;
   const [argumentsText, setArgumentsText] = useState("{}");
@@ -45,11 +49,13 @@ export function McpInspector({
       const catalog = await invoke<Tool[]>("inspect_mcp_tools", {
         config: config.mcp_servers[selected],
       });
+      if (currentKey.current !== key) return;
       setTools(catalog);
       setCatalogKey(key);
       setToolName(catalog[0]?.name || "");
       setArgumentsText("{}");
     } catch (e) {
+      if (currentKey.current !== key) return;
       setError(String(e));
       setTools([]);
     } finally {
@@ -60,6 +66,9 @@ export function McpInspector({
     if (!tool) return;
     setError("");
     setResult(null);
+    const approvedKey = key;
+    const approvedTool = tool;
+    const approvedConfig = config.mcp_servers[selected];
     let args: unknown;
     try {
       args = JSON.parse(argumentsText);
@@ -80,6 +89,7 @@ export function McpInspector({
       }))
     )
       return;
+    if (currentKey.current !== approvedKey) return;
     if (
       useAppStore.getState().activeRunSessionId ||
       useAppStore.getState().preparingRequestSessionId
@@ -87,15 +97,14 @@ export function McpInspector({
       return;
     setBusy(true);
     try {
-      setResult(
-        await invoke<CallResult>("call_mcp_debug", {
-          config: config.mcp_servers[selected],
-          tool: tool.name,
+      const response = await invoke<CallResult>("call_mcp_debug", {
+          config: approvedConfig,
+          tool: approvedTool.name,
           arguments: args,
-        }),
-      );
+        });
+      if (currentKey.current === approvedKey) setResult(response);
     } catch (e) {
-      setError(String(e));
+      if (currentKey.current === approvedKey) setError(String(e));
     } finally {
       setBusy(false);
     }

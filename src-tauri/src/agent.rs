@@ -1077,7 +1077,7 @@ fn assistant_message_with_tool_calls(content: &str, calls: &[AccumulatedToolCall
                 "type": "function",
                 "function": {
                     "name": tc.name,
-                    "arguments": tc.arguments,
+                    "arguments": serde_json::from_str::<Value>(&tc.arguments).ok().filter(Value::is_object).unwrap_or_else(|| json!({})).to_string(),
                 }
             })
         })
@@ -1119,11 +1119,12 @@ fn normalize_tool_calls(calls: &mut Vec<AccumulatedToolCall>) {
         }
         ids.insert(call.id.clone());
 
-        call.arguments = serde_json::from_str::<Value>(&call.arguments)
-            .ok()
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({}))
-            .to_string();
+        if call.arguments.trim().is_empty() {
+            call.arguments = "{}".into();
+        }
+        if let Ok(Value::Object(args)) = serde_json::from_str::<Value>(&call.arguments) {
+            call.arguments = Value::Object(args).to_string();
+        }
     }
 }
 
@@ -1321,7 +1322,9 @@ async fn run_chat_tools(
         }
         *tool_call_count += 1;
 
-        if !CHAT_READ_ONLY_TOOLS.contains(&tc.name.as_str()) {
+        if !CHAT_READ_ONLY_TOOLS.contains(&tc.name.as_str())
+            || !config.tools_enabled.contains(&tc.name)
+        {
             let reason = format!(
                 "Tool '{}' is not available in ordinary chat. Switch to code mode for commands or file changes.",
                 tc.name
@@ -2204,6 +2207,7 @@ async fn execute_tool_with_mcp(
     cancel_rx: &watch::Receiver<bool>,
 ) -> Result<String, String> {
     let read_only_tools = [
+        "get_current_time",
         "read_file",
         "list_dir",
         "web_search",
@@ -2216,6 +2220,7 @@ async fn execute_tool_with_mcp(
     }
 
     let builtin_tools = [
+        "get_current_time",
         "execute_command",
         "read_file",
         "write_file",
@@ -2284,7 +2289,7 @@ async fn execute_tool_with_mcp(
         let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
         match await_with_cancel(cancel_rx, mcp_manager.route_tool_call(name, args)).await? {
             Ok(output) => Ok(output),
-            Err(e) => Ok(format!("MCP tool error: {}", e)),
+            Err(e) => Ok(format!("Error: MCP tool: {}", e)),
         }
     }
 }
@@ -2568,6 +2573,21 @@ async fn cancel_approval_request(window: &Window, request_id: &str, approval_req
 }
 
 /// Process accumulated tool calls with human-in-the-loop approval.
+fn tool_call_problem(
+    call: &AccumulatedToolCall,
+    config: &AppConfig,
+    mcp: &McpManager,
+) -> Option<&'static str> {
+    if !serde_json::from_str::<Value>(&call.arguments).is_ok_and(|args| args.is_object()) {
+        return Some("Invalid tool arguments: expected a JSON object");
+    }
+    if !config.tools_enabled.contains(&call.name) && !mcp.has_tool(&call.name) {
+        return Some("Tool is disabled or unavailable");
+    }
+    None
+}
+
+/// Process accumulated tool calls with human-in-the-loop approval.
 /// Returns Ok(true) if the agent should stop (no more tool calls needed),
 /// Ok(false) if the loop should continue.
 #[allow(clippy::too_many_arguments)]
@@ -2597,6 +2617,18 @@ async fn process_tool_calls(
     // budget. Budget rejections are returned to the model as tool results so it
     // can stop, summarize progress, or ask the user whether to continue.
     for tc in tool_calls {
+        if let Some(reason) = tool_call_problem(tc, config, mcp_manager) {
+            emit_request_event(
+                window,
+                "agent-tool-blocked",
+                request_id,
+                json!({"id":tc.id,"name":tc.name,"arguments":tc.arguments,"reason":reason}),
+            );
+            messages.push(
+                json!({"role":"tool","tool_call_id":tc.id,"content":format!("Error: {reason}")}),
+            );
+            continue;
+        }
         if *tool_call_count >= max_tool_calls {
             let reason = format!(
                 "Per-request tool call limit reached ({}). Ask the user before continuing.",
@@ -3182,8 +3214,9 @@ pub async fn fetch_models(
             } else {
                 format!("{}/v1beta", base)
             };
-            let url = format!("{}/models?key={}", prefix, api_key);
-            let body = fetch_models_json(client.get(&url)).await?;
+            let url = format!("{}/models", prefix);
+            let body =
+                fetch_models_json(client.get(&url).header("x-goog-api-key", api_key)).await?;
             let models = body["models"]
                 .as_array()
                 .cloned()
@@ -3495,10 +3528,37 @@ mod role_prompt_tests {
 
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "web_search");
-        assert_eq!(calls[0].arguments, "{}");
+        assert_eq!(calls[0].arguments, "{\"query\":");
         assert_eq!(calls[0].id, "duplicate");
         assert_ne!(calls[1].id, "duplicate");
-        assert_eq!(calls[1].arguments, "{}");
+        assert_eq!(calls[1].arguments, "null");
+        let mut config = AppConfig::default();
+        let mcp = McpManager::new();
+        assert_eq!(
+            tool_call_problem(&calls[0], &config, &mcp),
+            Some("Invalid tool arguments: expected a JSON object")
+        );
+        let valid = AccumulatedToolCall {
+            id: "valid".into(),
+            name: "write_file".into(),
+            arguments: "{}".into(),
+        };
+        config.tools_enabled.retain(|name| name != "write_file");
+        assert_eq!(
+            tool_call_problem(&valid, &config, &mcp),
+            Some("Tool is disabled or unavailable")
+        );
+        assert_eq!(
+            tool_call_problem(
+                &AccumulatedToolCall {
+                    name: "unknown".into(),
+                    ..valid
+                },
+                &config,
+                &mcp
+            ),
+            Some("Tool is disabled or unavailable")
+        );
 
         let history = assistant_message_with_tool_calls("", &calls);
         for call in history["tool_calls"].as_array().unwrap() {

@@ -31,6 +31,8 @@ import { SessionSettingsPanel } from "./components/settings/SessionSettingsPanel
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { WorkspacePanel } from "./components/workspace/WorkspacePanel";
 import "./styles/learning.css";
+import "./styles/settings.css";
+import { WindowTitleBar } from "./components/workspace/WindowTitleBar";
 import { WorkbenchHeader } from "./components/workspace/WorkbenchHeader";
 import { EMPTY_FILE_VIEW, useWorkspaceViewStore } from "./store/workspaceViewStore";
 import { ConfirmDialog, type ConfirmationOptions } from "./components/shared/ConfirmDialog";
@@ -47,6 +49,7 @@ import { useConfigActions } from "./hooks/useConfigActions";
 import { useAgentRequest } from "./hooks/useAgentRequest";
 import { useSessionLifecycle } from "./hooks/useSessionLifecycle";
 import { workbenchLayout } from "./utils/workbenchLayout";
+import { connectionModels } from "./utils/connections";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 
 import { SETTINGS_TAB_ORDER, settingsTabLabel, type SettingsTab } from "./components/settings/settingsNavigation";
@@ -134,7 +137,7 @@ function App() {
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelCatalogSourceKey, setModelCatalogSourceKey] = useState<string | null>(null);
-  const [modelsLoading, setModelsLoading] = useState(false);
+  const [, setModelsLoading] = useState(false);
   const [customGlobalContextBudget, setCustomGlobalContextBudget] = useState(false);
   const [customSessionContextBudget, setCustomSessionContextBudget] = useState<Record<string, boolean>>({});
   const mcpStatusByName = useAppStore((s) => s.mcpStatusByName);
@@ -148,10 +151,9 @@ function App() {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const setPreviewBySession = useAppStore((s) => s.setPreviewBySession);
-  const [newProfileName, setNewProfileName] = useState("");
   const setModifiedFilesBySession = useAppStore((s) => s.setModifiedFilesBySession);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [navigationOpen, setNavigationOpen] = useState(() => window.innerWidth >= 1180);
+  const [navigationOpen, setNavigationOpen] = useState(() => window.innerWidth > 800);
   const [mobilePane, setMobilePane] = useState<"conversation" | "review">("conversation");
   const [selectedRunBySession, setSelectedRunBySession] = useState<Record<string, string | undefined>>({});
   const showRun = useCallback((messageId?: string) => {
@@ -237,6 +239,18 @@ function App() {
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const layout = workbenchLayout(viewportWidth, sidebarWidth, rightPanelWidth, navigationOpen, rightPanelOpen);
   const { maxSidebarWidth, maxReviewWidth } = layout;
+  const restoreNavigationRef = useRef(false);
+  useEffect(() => {
+    if (layout.navigationOverlay) {
+      restoreNavigationRef.current = navigationOpen;
+      setNavigationOpen(false);
+    } else if (restoreNavigationRef.current) {
+      restoreNavigationRef.current = false;
+      setNavigationOpen(true);
+    }
+    // Capture visibility only when entering the drawer layout, so manual opens stay open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout.navigationOverlay]);
 
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
   const historyListRef = useRef<HTMLDivElement>(null);
@@ -347,8 +361,7 @@ function App() {
     () => resolveRequestConfig(config, currentSession.sessionConfig, effectiveSearchMode),
     [config, currentSession.sessionConfig, effectiveSearchMode],
   );
-  const modelsForCurrentConfig = modelCatalogForConfig(models, modelCatalogSourceKey, resolvedCurrentConfig);
-  const modelsForGlobalConfig = modelCatalogForConfig(models, modelCatalogSourceKey, config);
+  const modelsForCurrentConfig = connectionModels(resolvedCurrentConfig.model, config.profiles[resolvedCurrentConfig.active_profile || ""]?.models, modelCatalogForConfig(models, modelCatalogSourceKey, resolvedCurrentConfig));
   const effectiveWorkDir = resolvedCurrentConfig.default_work_dir;
   const currentWorkspace = workspaceBySession[currentSessionId] || createEmptyWorkspaceState();
 
@@ -377,12 +390,12 @@ function App() {
 
   useEffect(() => {
     setMobilePane("conversation");
-    if (window.innerWidth < 1180) setNavigationOpen(false);
+    if (window.innerWidth <= 800) setNavigationOpen(false);
     closeSessionSettings();
   }, [currentSessionId, closeSessionSettings]);
 
   useEffect(() => {
-    const query = window.matchMedia("(min-width: 1180px)");
+    const query = window.matchMedia("(min-width: 801px)");
     const onChange = () => setNavigationOpen(query.matches);
     query.addEventListener("change", onChange);
     return () => query.removeEventListener("change", onChange);
@@ -394,6 +407,7 @@ function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === "Escape" && confirmation) {
         e.preventDefault();
         settleConfirmation(false);
@@ -411,13 +425,14 @@ function App() {
       }
       if (ctrl && e.key === ",") {
         e.preventDefault();
-        setSettingsOpen(prev => !prev);
+        setSettingsOpen(true);
       }
       if (e.key === "Escape") {
         if (contextMenu) { setContextMenu(null); return; }
         if (toolStatsDialog) { setToolStatsDialog(null); return; }
-        if (settingsOpen) { setSettingsOpen(false); return; }
+        if (settingsOpen) return; // The dialog owns Escape, including draft/save guards.
         if (sessionSettingsOpen) { closeSessionSettings(true); return; }
+        if (navigationOpen && layout.navigationOverlay) { setNavigationOpen(false); return; }
         if (rightPanelOpen && window.matchMedia("(max-width: 980px)").matches) {
           setRightPanelOpen(false);
           return;
@@ -427,7 +442,7 @@ function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [confirmation, contextMenu, rightPanelOpen, sessionSettingsOpen, settingsOpen, settleConfirmation, toolStatsDialog]);
+  }, [confirmation, contextMenu, rightPanelOpen, sessionSettingsOpen, settingsOpen, settleConfirmation, toolStatsDialog, navigationOpen, layout.navigationOverlay]);
 
   useEffect(() => () => {
     confirmationResolverRef.current?.(false);
@@ -834,13 +849,7 @@ function App() {
 
   const {
     fetchModelList,
-    applyPreset,
-    handleSaveProfile,
     getModelDisplayName,
-    cacheModelDisplayName,
-    handleActivateProfile,
-    handleDeleteProfile,
-    handleClearActiveProfile,
     testMcpServer,
     deleteMcpServer,
     saveConfig,
@@ -853,8 +862,6 @@ function App() {
     setModels,
     setModelCatalogSourceKey,
     setModelsLoading,
-    newProfileName,
-    setNewProfileName,
     setConfigSaveStatus,
     lastSavedConfigRef,
   });
@@ -965,6 +972,7 @@ function App() {
   const modelsForOnboarding = sortModels(modelCatalogForConfig(models, modelCatalogSourceKey, {
     wire_format: onboardingValues.wireFormat,
     base_url: onboardingValues.baseUrl,
+    api_key: onboardingValues.apiKey,
   }), lang);
 
   const statusLabel = (status: ToolAction["status"]) => {
@@ -1069,16 +1077,18 @@ function App() {
   };
 
   return (
-    <div className={`app-container workbench mode-${currentMode} ${navigationOpen ? "navigation-open" : "navigation-closed"} mobile-pane-${mobilePane} ${rightPanelOpen ? "review-open" : "review-closed"}`} onContextMenu={(e) => {
+    <div className={`app-container workbench mode-${currentMode} ${navigationOpen ? "navigation-open" : "navigation-closed"} ${layout.navigationOverlay ? "navigation-overlay" : "navigation-inline"} mobile-pane-${mobilePane} ${rightPanelOpen ? "review-open" : "review-closed"}`} onContextMenu={(e) => {
       // 只在空白区域显示全局菜单
       if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains('chat-panel') || (e.target as HTMLElement).classList.contains('chat-messages')) {
         handleContextMenu(e);
       }
     }}>
       <ToastStack />
+      <WindowTitleBar lang={lang} />
 
       {/* ====== Sidebar ====== */}
       <div className="workbench-body">
+      {navigationOpen && layout.navigationOverlay && <button type="button" className="navigation-backdrop" aria-label={lang === "zh" ? "关闭侧栏" : "Close sidebar"} onClick={() => setNavigationOpen(false)} />}
       <div id="workbench-navigation" className="workbench-navigation" style={{ "--sidebar-width": `${layout.sidebarWidth}px` } as React.CSSProperties}>
       <WorkbenchHeader lang={lang} config={config} setConfig={setConfig} navigationOpen={navigationOpen} onToggleNavigation={() => setNavigationOpen(open => !open)} onSettings={() => setSettingsOpen(true)} />
       <Sidebar
@@ -1106,7 +1116,7 @@ function App() {
         getModelDisplayName={getModelDisplayName}
         createNewSession={createNewSession}
         createProjectTask={(workDir) => { void createNewSessionInMode("code", workDir); }}
-        setCurrentSessionId={(id) => { setCurrentSessionId(id); if (window.innerWidth < 1180) setNavigationOpen(false); }}
+        setCurrentSessionId={(id) => { setCurrentSessionId(id); if (layout.navigationOverlay) setNavigationOpen(false); }}
         setSessions={setSessions}
         deleteSession={deleteSession}
         setSessionArchived={setSessionArchived}
@@ -1237,9 +1247,7 @@ function App() {
             addFilesAsAttachments={addFilesAsAttachments}
             pickAndParseAttachments={pickAndParseAttachments}
             patchSessionConfig={patchSessionConfig}
-            getModelDisplayName={getModelDisplayName}
-            cacheModelDisplayName={cacheModelDisplayName}
-            modelsForCurrentConfig={modelsForCurrentConfig}
+            getModelDisplayName={getModelDisplayName}            modelsForCurrentConfig={modelsForCurrentConfig}
             onSettings={() => setSessionSettingsOpen(true)}
             effectiveWorkDir={effectiveWorkDir}
             branch={currentWorkspace.branch}
@@ -1293,22 +1301,12 @@ function App() {
           lang={lang}
           config={config}
           setConfig={setConfig}
-          models={modelsForGlobalConfig}
-          modelsLoading={modelsLoading}
           settingsTab={settingsTab}
           setSettingsTab={setSettingsTab}
           setSettingsOpen={setSettingsOpen}
           settingsBodyRef={settingsBodyRef}
           handleSettingsTabKeyDown={handleSettingsTabKeyDown}
-          currentSettingsTabLabel={currentSettingsTabLabel}
-          newProfileName={newProfileName}
-          setNewProfileName={setNewProfileName}
-          handleSaveProfile={handleSaveProfile}
-          handleActivateProfile={handleActivateProfile}
-          handleClearActiveProfile={handleClearActiveProfile}
-          handleDeleteProfile={handleDeleteProfile}
-          fetchModelList={fetchModelList}
-          saveConfig={saveConfig}
+          currentSettingsTabLabel={currentSettingsTabLabel}          saveConfig={saveConfig}
           configSaveStatus={configSaveStatus}
           addLog={addLog}
           notify={notify}
@@ -1319,9 +1317,7 @@ function App() {
           mcpStatusByName={mcpStatusByName}
           testMcpServer={testMcpServer}
           deleteMcpServer={deleteMcpServer}
-          presets={presets}
-          applyPreset={applyPreset}
-          sessionMutationLocked={sessionMutationLocked}
+          presets={presets}          sessionMutationLocked={sessionMutationLocked}
           createSessionSnapshot={async () => {
             if (sessionMutationLocked || !persistLatestRef.current) throw new Error(lang === "zh" ? "会话存储尚未就绪" : "Task storage is not ready");
             await persistLatestRef.current(true);

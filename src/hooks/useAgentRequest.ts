@@ -223,6 +223,11 @@ export function useAgentRequest({
     assistantMessageId?: string;
   }): Promise<boolean> => {
     if (!sessionStorageReady || runtime.isStreaming || requestStartingRef.current) return false;
+    if (sessionConfig.profileId && !config.profiles[sessionConfig.profileId]) {
+      setSettingsOpen(true);
+      addLog(lang === "zh" ? "此会话的模型连接已不存在，请重新选择连接。" : "This conversation's connection no longer exists. Select a replacement connection.", "error", true, targetSessionId);
+      return false;
+    }
     const { requestConfig, searchMode: requestSearchMode } = resolveSessionRequest(sessionConfig);
     if (requestNeedsApiKey(requestConfig)) {
       setSettingsOpen(true);

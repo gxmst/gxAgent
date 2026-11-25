@@ -5,6 +5,8 @@ export interface ApiProfile {
   default_model: string;
   wire_format: string;
   provider: string;
+  /** Model IDs belong to this connection, never to a different gateway. */
+  models?: string[];
 }
 
 export interface AppConfig {

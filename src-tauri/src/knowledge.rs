@@ -37,9 +37,7 @@ pub async fn pick_knowledge_files(app: tauri::AppHandle) -> Result<Vec<String>, 
 }
 
 fn database() -> Result<Connection, String> {
-    let dir = dirs::data_dir()
-        .ok_or("No application data directory")?
-        .join("gxAgent");
+    let dir = crate::app_paths::data_dir().ok_or("No application data directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let db = Connection::open(dir.join("knowledge.sqlite3")).map_err(|e| e.to_string())?;
     initialize(&db)?;

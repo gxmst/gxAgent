@@ -75,7 +75,7 @@ export function OnboardingWizard({
   ];
   const connectionReady = Boolean(values.baseUrl.trim() && values.model.trim());
   const workspaceReady = values.mode === "chat" || Boolean(values.workDir.trim());
-  const canComplete = connectionReady && workspaceReady && connection.state === "success";
+  const canComplete = connectionReady && workspaceReady && connection.state !== "testing";
 
   const connectionTypes = [
     {
@@ -133,7 +133,7 @@ export function OnboardingWizard({
       wireFormat: option.wireFormat,
       baseUrl: option.baseUrl,
       model: option.model,
-      apiKey: option.id === "ollama" ? "" : values.apiKey,
+      apiKey: "",
     });
   };
 
@@ -299,7 +299,7 @@ export function OnboardingWizard({
                 <div>
                   <strong>{zh ? "模型连接" : "Model connection"}</strong>
                   <span>
-                    {connection.state === "idle" && (zh ? "发送测试请求前不会保存设置" : "Settings are saved after a successful check")}
+                    {connection.state === "idle" && (zh ? "可检查连接，也可直接填写模型并保存" : "Check the connection or enter a model and save directly")}
                     {connection.state === "testing" && (zh ? "正在验证 API 端点..." : "Checking API endpoint...")}
                     {(connection.state === "success" || connection.state === "error") && connection.message}
                   </span>

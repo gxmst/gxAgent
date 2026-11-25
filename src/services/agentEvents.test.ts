@@ -22,6 +22,19 @@ vi.mock('./codexWorkflow', () => ({ rememberCodexHistory: vi.fn() }));
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); vi.useRealTimers(); useWorkspaceViewStore.getState().clear(); });
 
+it('MCP failures stay errors in the action list and model history', async () => {
+  vi.useFakeTimers();
+  const session = createSession('code');
+  useAppStore.setState({ sessions: [session], currentSessionId: session.id });
+  Object.assign(runtime, { activeRequestId: 'mcp-error', activeRequestSessionId: session.id, assistantMessageIdByRequest: {}, requestSessionById: { 'mcp-error': session.id } });
+  dispose = await initAgentEventListeners();
+  handlers.get('agent-tool-executing')!({ payload: { requestId: 'mcp-error', id: 'call', name: 'mcp_test', arguments: '{}' } });
+  handlers.get('agent-tool-output')!({ payload: { requestId: 'mcp-error', id: 'call', name: 'mcp_test', output: 'Error: MCP tool: server disconnected' } });
+  const messages = useAppStore.getState().sessions[0].messages;
+  const action = messages.flatMap(message => message.actions || []).find(item => item.id === 'call');
+  expect(action).toMatchObject({ status: 'error', output: 'Error: MCP tool: server disconnected' });
+});
+
 it.each([true, false])('remembers cancelled Codex history only when a turn actually started: %s', started => {
   vi.useFakeTimers();
   vi.mocked(rememberCodexHistory).mockClear();

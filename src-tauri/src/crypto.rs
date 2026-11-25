@@ -15,8 +15,8 @@ static MACHINE_SALT: OnceLock<[u8; 32]> = OnceLock::new();
 
 /// Get the machine-specific salt file path
 fn get_salt_file_path() -> io::Result<PathBuf> {
-    dirs::config_dir()
-        .map(|directory| directory.join("gxAgent").join(".salt"))
+    crate::app_paths::config_dir()
+        .map(|directory| directory.join(".salt"))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Config directory is unavailable"))
 }
 
