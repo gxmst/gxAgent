@@ -71,55 +71,74 @@ async fn git_checkpoint(window: &Window, request_id: &str, work_dir: &str) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct ToolExecContext<'a> {
+    pub window: &'a Window,
+    pub request_id: &'a str,
+    pub config: &'a AppConfig,
+    pub cancel_rx: &'a watch::Receiver<bool>,
+    pub steering_rx: &'a watch::Receiver<bool>,
+}
+
+const READ_ONLY_CHECKPOINT_SKIP_TOOLS: &[&str] = &[
+    "get_current_time",
+    "read_file",
+    "list_dir",
+    "web_search",
+    "web_fetch",
+    "grep",
+    "glob",
+    "todo_write",
+    "read_background_output",
+    "list_background_processes",
+    "save_memory",
+    "delete_memory",
+    "list_memories",
+];
+
+const BUILTIN_TOOLS: &[&str] = &[
+    "get_current_time",
+    "execute_command",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "run_python",
+    "web_search",
+    "web_fetch",
+    "grep",
+    "glob",
+    "todo_write",
+    "start_background_process",
+    "read_background_output",
+    "stop_background_process",
+    "list_background_processes",
+    "save_memory",
+    "delete_memory",
+    "list_memories",
+];
+
 async fn execute_tool_with_mcp(
-    window: &Window,
-    request_id: &str,
+    ctx: &ToolExecContext<'_>,
     tool_call_id: &str,
     name: &str,
     args_str: &str,
-    config: &AppConfig,
     mcp_manager: &mut McpManager,
-    cancel_rx: &watch::Receiver<bool>,
+    stop_rx: &watch::Receiver<bool>,
 ) -> Result<String, String> {
-    let read_only_tools = [
-        "get_current_time",
-        "read_file",
-        "list_dir",
-        "web_search",
-        "web_fetch",
-        "grep",
-        "glob",
-        "todo_write",
-    ];
-    if !read_only_tools.contains(&name) {
-        git_checkpoint(window, request_id, &config.default_work_dir).await;
+    if !READ_ONLY_CHECKPOINT_SKIP_TOOLS.contains(&name) {
+        git_checkpoint(ctx.window, ctx.request_id, &ctx.config.default_work_dir).await;
     }
 
-    let builtin_tools = [
-        "get_current_time",
-        "execute_command",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "list_dir",
-        "run_python",
-        "web_search",
-        "web_fetch",
-        "grep",
-        "glob",
-        "todo_write",
-    ];
-    if builtin_tools.contains(&name) {
+    if BUILTIN_TOOLS.contains(&name) {
         let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutionChunk>();
         let execution = execute_tool_with_control(
             name,
             args_str,
-            &config.default_work_dir,
-            &config.search_provider,
-            &config.search_api_key,
-            config.command_timeout,
-            Some(cancel_rx.clone()),
+            &ctx.config.default_work_dir,
+            &ctx.config.search_provider,
+            &ctx.config.search_api_key,
+            ctx.config.command_timeout,
+            Some(stop_rx.clone()),
             Some(output_tx),
         );
         tokio::pin!(execution);
@@ -130,9 +149,9 @@ async fn execute_tool_with_mcp(
                 chunk = output_rx.recv() => {
                     if let Some(chunk) = chunk {
                         emit_request_event(
-                            window,
+                            ctx.window,
                             "agent-tool-output-chunk",
-                            request_id,
+                            ctx.request_id,
                             json!({
                                 "id": tool_call_id,
                                 "name": name,
@@ -146,9 +165,9 @@ async fn execute_tool_with_mcp(
         };
         while let Ok(chunk) = output_rx.try_recv() {
             emit_request_event(
-                window,
+                ctx.window,
                 "agent-tool-output-chunk",
-                request_id,
+                ctx.request_id,
                 json!({
                     "id": tool_call_id,
                     "name": name,
@@ -165,7 +184,7 @@ async fn execute_tool_with_mcp(
         }
     } else {
         let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
-        match await_with_cancel(cancel_rx, mcp_manager.route_tool_call(name, args)).await? {
+        match await_with_cancel(stop_rx, mcp_manager.route_tool_call(name, args)).await? {
             Ok(output) => Ok(output),
             Err(e) => Ok(format!("Error: MCP tool: {}", e)),
         }
@@ -225,30 +244,16 @@ async fn resolve_steering_output(
 /// Run a tool with a second, request-scoped stop signal for user steering.
 /// The executor still receives a watch receiver, so process-backed commands
 /// terminate their child tree instead of being dropped mid-future.
-#[allow(clippy::too_many_arguments)]
 async fn execute_tool_with_steering(
-    window: &Window,
-    request_id: &str,
+    ctx: &ToolExecContext<'_>,
     tool_call_id: &str,
     name: &str,
     args_str: &str,
-    config: &AppConfig,
     mcp_manager: &mut McpManager,
-    cancel_rx: &watch::Receiver<bool>,
-    steering_rx: &watch::Receiver<bool>,
 ) -> Result<String, String> {
-    let (stop_rx, reason_rx, watcher) = spawn_steering_watcher(cancel_rx, steering_rx);
-    let output = execute_tool_with_mcp(
-        window,
-        request_id,
-        tool_call_id,
-        name,
-        args_str,
-        config,
-        mcp_manager,
-        &stop_rx,
-    )
-    .await;
+    let (stop_rx, reason_rx, watcher) = spawn_steering_watcher(ctx.cancel_rx, ctx.steering_rx);
+    let output =
+        execute_tool_with_mcp(ctx, tool_call_id, name, args_str, mcp_manager, &stop_rx).await;
     resolve_steering_output(output, reason_rx, watcher).await
 }
 
@@ -420,20 +425,15 @@ fn run_read_skill(config: &AppConfig, args_str: &str) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_sequential_tool(
-    window: &Window,
-    request_id: &str,
+    ctx: &ToolExecContext<'_>,
     tc: &AccumulatedToolCall,
-    config: &AppConfig,
     mcp_manager: &mut McpManager,
-    cancel_rx: &watch::Receiver<bool>,
-    steering_rx: &watch::Receiver<bool>,
 ) -> Result<String, String> {
     if let crate::hooks::PreHookDecision::Block(reason) = crate::hooks::run_pre_tool_hooks(
-        window,
-        request_id,
-        &config.default_work_dir,
+        ctx.window,
+        ctx.request_id,
+        &ctx.config.default_work_dir,
         &tc.name,
         &tc.arguments,
     )
@@ -444,12 +444,12 @@ async fn run_sequential_tool(
 
     let mut result = if tc.name == "spawn_agent" {
         match run_spawn_agent_with_steering(
-            window,
-            request_id,
+            ctx.window,
+            ctx.request_id,
             &tc.arguments,
-            config,
-            cancel_rx,
-            steering_rx,
+            ctx.config,
+            ctx.cancel_rx,
+            ctx.steering_rx,
         )
         .await
         {
@@ -459,11 +459,11 @@ async fn run_sequential_tool(
         }
     } else if tc.name == "ask_user_question" {
         match run_ask_user_question_with_steering(
-            window,
-            request_id,
+            ctx.window,
+            ctx.request_id,
             &tc.arguments,
-            cancel_rx,
-            steering_rx,
+            ctx.cancel_rx,
+            ctx.steering_rx,
         )
         .await
         {
@@ -472,28 +472,17 @@ async fn run_sequential_tool(
             Err(error) => Ok(format!("Error: {}", error)),
         }
     } else if tc.name == "read_skill" {
-        Ok(run_read_skill(config, &tc.arguments))
+        Ok(run_read_skill(ctx.config, &tc.arguments))
     } else {
-        execute_tool_with_steering(
-            window,
-            request_id,
-            &tc.id,
-            &tc.name,
-            &tc.arguments,
-            config,
-            mcp_manager,
-            cancel_rx,
-            steering_rx,
-        )
-        .await
+        execute_tool_with_steering(ctx, &tc.id, &tc.name, &tc.arguments, mcp_manager).await
     };
 
     if let Ok(ref mut output) = result {
         if output != AGENT_STEERING_INTERRUPTED_OUTPUT {
             if let Some(note) = crate::hooks::run_post_tool_hooks(
-                window,
-                request_id,
-                &config.default_work_dir,
+                ctx.window,
+                ctx.request_id,
+                &ctx.config.default_work_dir,
                 &tc.name,
                 &tc.arguments,
                 output,
@@ -596,18 +585,18 @@ fn tool_call_problem(
 /// Process accumulated tool calls with human-in-the-loop approval.
 /// Returns Ok(true) if the agent should stop (no more tool calls needed),
 /// Ok(false) if the loop should continue.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn process_tool_calls(
-    window: &Window,
-    request_id: &str,
+    ctx: &ToolExecContext<'_>,
     tool_calls: &[AccumulatedToolCall],
-    config: &AppConfig,
     messages: &mut Vec<Value>,
     mcp_manager: &mut McpManager,
     tool_call_count: &mut u32,
-    cancel_rx: &watch::Receiver<bool>,
-    steering_rx: &watch::Receiver<bool>,
 ) -> Result<bool, String> {
+    let window = ctx.window;
+    let request_id = ctx.request_id;
+    let config = ctx.config;
+    let cancel_rx = ctx.cancel_rx;
+    let steering_rx = ctx.steering_rx;
     ensure_not_cancelled(cancel_rx)?;
 
     let audit = Arc::new(AuditLogger::new());
@@ -892,16 +881,7 @@ pub(super) async fn process_tool_calls(
                 tool_executing_payload(tc, config).await,
             );
 
-            let output = run_sequential_tool(
-                window,
-                request_id,
-                tc,
-                config,
-                &mut *mcp_manager,
-                cancel_rx,
-                steering_rx,
-            )
-            .await;
+            let output = run_sequential_tool(ctx, tc, &mut *mcp_manager).await;
             let output = match output {
                 Ok(output) => output,
                 Err(error) => {
@@ -1073,16 +1053,7 @@ pub(super) async fn process_tool_calls(
                         tool_executing_payload(tc, config).await,
                     );
 
-                    let output = run_sequential_tool(
-                        window,
-                        request_id,
-                        tc,
-                        config,
-                        &mut *mcp_manager,
-                        cancel_rx,
-                        steering_rx,
-                    )
-                    .await?;
+                    let output = run_sequential_tool(ctx, tc, &mut *mcp_manager).await?;
 
                     let was_steering_interrupted = output == AGENT_STEERING_INTERRUPTED_OUTPUT;
                     emit_request_event(
@@ -1192,6 +1163,20 @@ mod execution_tests {
             assert!(serde_json::from_str::<Value>(arguments)
                 .unwrap()
                 .is_object());
+        }
+    }
+
+    #[test]
+    fn builtin_tools_list_covers_non_delegated_tools() {
+        let config = AppConfig::default();
+        for tool in crate::tools::get_enabled_tool_definitions(&config.tools_enabled) {
+            let name = tool["function"]["name"].as_str().unwrap();
+            let handled_specially =
+                matches!(name, "spawn_agent" | "ask_user_question" | "read_skill");
+            assert!(
+                handled_specially || BUILTIN_TOOLS.contains(&name),
+                "Builtin tool '{name}' missing from execution::BUILTIN_TOOLS"
+            );
         }
     }
 }

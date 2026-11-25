@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
+import { lazy, Suspense, useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 // Order matters: tokens first, responsive overrides last.
 import "./styles/tokens.css";
@@ -24,7 +24,12 @@ import { resolveRequestConfig } from "./utils/requestConfig";
 import { compareSidebarSessions, moveSessionInSidebar } from "./utils/sessionOrder";
 import { searchSessions, type SearchSnippet } from "./utils/sessionSearch";
 import { sortModels, sortProfileEntries } from "./utils/modelSorting";
-import { SettingsModal } from "./components/settings/SettingsModal";
+const SettingsModal = lazy(() =>
+  import("./components/settings/SettingsModal").then((m) => ({ default: m.SettingsModal }))
+);
+const CommandPalette = lazy(() =>
+  import("./components/shared/CommandPalette").then((m) => ({ default: m.CommandPalette }))
+);
 import { SessionSettingsPanel } from "./components/settings/SessionSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { WorkspacePanel } from "./components/workspace/WorkspacePanel";
@@ -37,7 +42,6 @@ import { Composer } from "./components/chat/Composer";
 import { ChatHeader } from "./components/chat/ChatHeader";
 import { ToastStack } from "./components/shared/ToastStack";
 import { ToolStatsModal } from "./components/shared/ToolStatsModal";
-import { CommandPalette } from "./components/shared/CommandPalette";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { SETTINGS_TAB_ORDER, settingsTabLabel } from "./components/settings/settingsNavigation";
 
@@ -805,39 +809,41 @@ function App() {
       </div>
 
       {settingsOpen && (
-        <SettingsModal
-          lang={lang}
-          config={config}
-          setConfig={setConfig}
-          settingsTab={settingsTab}
-          setSettingsTab={setSettingsTab}
-          setSettingsOpen={setSettingsOpen}
-          settingsBodyRef={settingsBodyRef}
-          handleSettingsTabKeyDown={handleSettingsTabKeyDown}
-          currentSettingsTabLabel={currentSettingsTabLabel}
-          saveConfig={saveConfig}
-          configSaveStatus={configSaveStatus}
-          addLog={addLog}
-          notify={notify}
-          customGlobalContextBudget={customGlobalContextBudget}
-          setCustomGlobalContextBudget={setCustomGlobalContextBudget}
-          toggleTool={toggleTool}
-          removeTrustedPattern={removeTrustedPattern}
-          mcpStatusByName={mcpStatusByName}
-          testMcpServer={testMcpServer}
-          stopMcpServer={stopMcpServer}
-          deleteMcpServer={deleteMcpServer}
-          presets={presets}
-          sessionMutationLocked={sessionMutationLocked}
-          createSessionSnapshot={async () => {
-            if (sessionMutationLocked || !persistLatestRef.current) throw new Error(lang === "zh" ? "会话存储尚未就绪" : "Task storage is not ready");
-            await persistLatestRef.current(true);
-            await invoke("create_session_backup");
-          }}
-          hasAttachmentLoading={hasAttachmentLoading}
-          replaceAllSessions={replaceAllSessions}
-          requestConfirmation={requestConfirmation}
-        />
+        <Suspense fallback={null}>
+          <SettingsModal
+            lang={lang}
+            config={config}
+            setConfig={setConfig}
+            settingsTab={settingsTab}
+            setSettingsTab={setSettingsTab}
+            setSettingsOpen={setSettingsOpen}
+            settingsBodyRef={settingsBodyRef}
+            handleSettingsTabKeyDown={handleSettingsTabKeyDown}
+            currentSettingsTabLabel={currentSettingsTabLabel}
+            saveConfig={saveConfig}
+            configSaveStatus={configSaveStatus}
+            addLog={addLog}
+            notify={notify}
+            customGlobalContextBudget={customGlobalContextBudget}
+            setCustomGlobalContextBudget={setCustomGlobalContextBudget}
+            toggleTool={toggleTool}
+            removeTrustedPattern={removeTrustedPattern}
+            mcpStatusByName={mcpStatusByName}
+            testMcpServer={testMcpServer}
+            stopMcpServer={stopMcpServer}
+            deleteMcpServer={deleteMcpServer}
+            presets={presets}
+            sessionMutationLocked={sessionMutationLocked}
+            createSessionSnapshot={async () => {
+              if (sessionMutationLocked || !persistLatestRef.current) throw new Error(lang === "zh" ? "会话存储尚未就绪" : "Task storage is not ready");
+              await persistLatestRef.current(true);
+              await invoke("create_session_backup");
+            }}
+            hasAttachmentLoading={hasAttachmentLoading}
+            replaceAllSessions={replaceAllSessions}
+            requestConfirmation={requestConfirmation}
+          />
+        </Suspense>
       )}
       {confirmation && (
         <ConfirmDialog
@@ -853,22 +859,26 @@ function App() {
           setToolStatsDialog={setToolStatsDialog}
         />
       )}
-      <CommandPalette
-        open={commandPaletteOpen}
-        onOpenChange={setCommandPaletteOpen}
-        lang={lang}
-        config={config}
-        sessions={sessions}
-        currentSession={currentSession}
-        onNewSession={createNewSession}
-        onSelectSession={(id) => { setCurrentSessionId(id); if (layout.navigationOverlay) setNavigationOpen(false); }}
-        onSwitchMode={switchSessionMode}
-        onTogglePlanMode={() => setConfig((prev) => ({ ...prev, plan_mode: !prev.plan_mode }))}
-        onCompact={() => { void handleCompact(); }}
-        onToggleRightPanel={() => setRightPanelOpen((open) => !open)}
-        onThemeChange={(theme) => setConfig((prev) => ({ ...prev, theme }))}
-        onOpenSettings={(tab) => openSettings(tab)}
-      />
+      {commandPaletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette
+            open={commandPaletteOpen}
+            onOpenChange={setCommandPaletteOpen}
+            lang={lang}
+            config={config}
+            sessions={sessions}
+            currentSession={currentSession}
+            onNewSession={createNewSession}
+            onSelectSession={(id) => { setCurrentSessionId(id); if (layout.navigationOverlay) setNavigationOpen(false); }}
+            onSwitchMode={switchSessionMode}
+            onTogglePlanMode={() => setConfig((prev) => ({ ...prev, plan_mode: !prev.plan_mode }))}
+            onCompact={() => { void handleCompact(); }}
+            onToggleRightPanel={() => setRightPanelOpen((open) => !open)}
+            onThemeChange={(theme) => setConfig((prev) => ({ ...prev, theme }))}
+            onOpenSettings={(tab) => openSettings(tab)}
+          />
+        </Suspense>
+      )}
       <OnboardingWizard
         open={onboardingOpen}
         lang={lang}

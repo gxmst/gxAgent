@@ -14,7 +14,7 @@ use context_budget::{
     normalize_session_messages,
 };
 use dsml::{parse_dsml_tool_calls, strip_dsml_tags};
-use execution::process_tool_calls;
+use execution::{process_tool_calls, ToolExecContext};
 use prompts::{
     append_code_mode_instruction, append_general_assistant_instruction,
     append_plan_mode_instruction, append_shell_guidance, append_thinking_instruction,
@@ -373,6 +373,7 @@ async fn start_agent_loop_inner(
 
             if accumulated.is_empty() {
                 mcp_manager.shutdown().await;
+                crate::hooks::run_stop_hooks(&window, &request_id, &config.default_work_dir).await;
                 emit_agent_complete(&window, &request_id, "success");
                 return Ok(());
             }
@@ -381,16 +382,19 @@ async fn start_agent_loop_inner(
             // rest of the loop (and the next request) stays provider-agnostic.
             messages.push(assistant_message_with_tool_calls(&content, &accumulated));
 
+            let exec_ctx = ToolExecContext {
+                window: &window,
+                request_id: &request_id,
+                config: &config,
+                cancel_rx: &cancel_rx,
+                steering_rx: &steering_rx,
+            };
             let result = process_tool_calls(
-                &window,
-                &request_id,
+                &exec_ctx,
                 &accumulated,
-                &config,
                 &mut messages,
                 mcp_manager,
                 &mut tool_call_count,
-                &cancel_rx,
-                &steering_rx,
             )
             .await?;
             if result {
@@ -484,16 +488,19 @@ async fn start_agent_loop_inner(
         ));
 
         // Process tool calls with approval
+        let exec_ctx = ToolExecContext {
+            window: &window,
+            request_id: &request_id,
+            config: &config,
+            cancel_rx: &cancel_rx,
+            steering_rx: &steering_rx,
+        };
         let result = process_tool_calls(
-            &window,
-            &request_id,
+            &exec_ctx,
             &accumulated_tool_calls,
-            &config,
             &mut messages,
             mcp_manager,
             &mut tool_call_count,
-            &cancel_rx,
-            &steering_rx,
         )
         .await?;
         if result {
