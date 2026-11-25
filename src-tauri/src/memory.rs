@@ -39,19 +39,27 @@ pub fn normalize_category(raw: &str) -> &'static str {
 
 fn workspace_identity(work_dir: &str) -> String {
     let trimmed = work_dir.trim();
-    let normalized = if trimmed.is_empty() {
+    let resolved = if trimmed.is_empty() {
         "global".to_string()
     } else if let Ok(canon) = std::fs::canonicalize(trimmed) {
         canon.to_string_lossy().into_owned()
     } else {
         trimmed.to_string()
     };
+    let stripped = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
+    let normalized = stripped
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
     if cfg!(windows) {
         normalized.to_lowercase()
     } else {
         normalized
     }
 }
+
+static MEMORY_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
 
 fn memory_store_path(work_dir: &str) -> Result<PathBuf, String> {
     let dir = app_paths::data_dir()
@@ -100,7 +108,8 @@ pub(crate) fn upsert_memory_at_path(
     let cat = normalize_category(category).to_string();
     let now = now_secs();
 
-    let mut entries = load_memories_from_path(path).unwrap_or_default();
+    let _guard = MEMORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut entries = load_memories_from_path(path)?;
     let saved = if let Some(existing) = entries
         .iter_mut()
         .find(|e| e.key.eq_ignore_ascii_case(&clean_key))
@@ -133,6 +142,7 @@ pub(crate) fn remove_memory_at_path(path: &Path, id_or_key: &str) -> Result<bool
     if target.is_empty() {
         return Err("Memory id or key is required".into());
     }
+    let _guard = MEMORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = load_memories_from_path(path)?;
     let before = entries.len();
     entries.retain(|e| e.id != target && !e.key.eq_ignore_ascii_case(target));

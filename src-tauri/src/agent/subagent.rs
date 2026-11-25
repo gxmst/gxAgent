@@ -148,6 +148,7 @@ pub(super) async fn run_spawn_agent(
 
     for turn in 0..SUBAGENT_MAX_TURNS {
         ensure_not_cancelled(cancel_rx)?;
+        super::context_budget::compact_messages(&mut messages, child_config.context_limit as usize);
         emit_request_event(
             window,
             "agent-subagent-progress",

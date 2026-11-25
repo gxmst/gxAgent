@@ -203,6 +203,17 @@ pub fn run() {
             commands::files::pick_and_parse_files,
             commands::window::toggle_always_on_top,
         ])
-        .run(context)
-        .expect("error while running tauri application");
+        .build(context)
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                tauri::async_runtime::block_on(async {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        mcp::shutdown_all_pooled_servers().await;
+                        tools::background::stop_all_background_processes().await;
+                    })
+                    .await;
+                });
+            }
+        });
 }

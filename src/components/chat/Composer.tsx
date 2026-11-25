@@ -118,7 +118,7 @@ export function Composer({
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const [cachedTree, setCachedTree] = useState<{ workDir: string; tree: DirectoryNode } | null>(null);
-  const [cachedSkills, setCachedSkills] = useState<Skill[] | null>(null);
+  const [cachedSkills, setCachedSkills] = useState<{ workDir: string; skills: Skill[] } | null>(null);
 
   const activeMention = useMemo(
     () => (mentionDismissed || prompt.startsWith("/") ? null : extractActiveMention(prompt, cursorPos)),
@@ -132,12 +132,14 @@ export function Composer({
         .then((tree) => setCachedTree({ workDir: effectiveWorkDir, tree }))
         .catch(() => { /* ignore mention tree lookup error */ });
     }
-    if (cachedSkills === null) {
-      invoke<{ skills: Skill[] }>("list_skills", { config })
-        .then((catalog) => setCachedSkills(catalog.skills || []))
-        .catch(() => setCachedSkills([]));
+    if (cachedSkills?.workDir !== effectiveWorkDir) {
+      invoke<{ skills: Skill[] }>("list_skills", {
+        config: { ...config, default_work_dir: effectiveWorkDir },
+      })
+        .then((catalog) => setCachedSkills({ workDir: effectiveWorkDir, skills: catalog.skills || [] }))
+        .catch(() => setCachedSkills({ workDir: effectiveWorkDir, skills: [] }));
     }
-  }, [activeMention, cachedSkills, cachedTree?.workDir, config, effectiveWorkDir, workspaceTree]);
+  }, [activeMention, cachedSkills?.workDir, cachedTree?.workDir, config, effectiveWorkDir, workspaceTree]);
 
   const flatFiles = useMemo(() => {
     const tree = workspaceTree || (cachedTree?.workDir === effectiveWorkDir ? cachedTree.tree : null);
@@ -145,8 +147,15 @@ export function Composer({
   }, [cachedTree, effectiveWorkDir, workspaceTree]);
 
   const mentionOptions = useMemo(
-    () => (activeMention ? matchMentions(activeMention.query, flatFiles, cachedSkills || [], lang) : []),
-    [activeMention, cachedSkills, flatFiles, lang],
+    () => (activeMention
+      ? matchMentions(
+          activeMention.query,
+          flatFiles,
+          cachedSkills?.workDir === effectiveWorkDir ? cachedSkills.skills : [],
+          lang,
+        )
+      : []),
+    [activeMention, cachedSkills, effectiveWorkDir, flatFiles, lang],
   );
 
   useEffect(() => {

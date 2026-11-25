@@ -1,11 +1,11 @@
-use crate::tools::scrub_sensitive_env;
+use crate::tools::{scrub_sensitive_env, terminate_process_tree};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tauri::Emitter;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 const MAX_HOOKS_FILE_BYTES: u64 = 128 * 1024;
@@ -48,15 +48,21 @@ pub fn load_project_hooks(work_dir: &str) -> Result<Option<HooksConfig>, String>
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let path = Path::new(trimmed).join(".gxagent").join("hooks.json");
+    let root = Path::new(trimmed);
+    let path = root.join(".gxagent").join("hooks.json");
     if !path.is_file() {
         return Ok(None);
     }
-    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let canonical_path = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err("Project .gxagent/hooks.json resolves outside the workspace root".into());
+    }
+    let meta = std::fs::metadata(&canonical_path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_HOOKS_FILE_BYTES {
         return Err("Project .gxagent/hooks.json exceeds 128 KB".into());
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let raw = std::fs::read_to_string(&canonical_path).map_err(|e| e.to_string())?;
     if raw.trim().is_empty() {
         return Ok(None);
     }
@@ -109,11 +115,13 @@ async fn run_single_hook(
         let mut c = Command::new("powershell");
         c.args(["-NoProfile", "-NonInteractive", "-Command", cmd_str]);
         #[cfg(windows)]
-        c.creation_flags(0x08000000);
+        c.creation_flags(0x08000000 | 0x00000200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         c
     } else {
         let mut c = Command::new("sh");
         c.args(["-c", cmd_str]);
+        #[cfg(not(windows))]
+        c.process_group(0);
         c
     };
 
@@ -149,19 +157,60 @@ async fn run_single_hook(
         let _ = stdin.shutdown().await;
     }
 
-    let timeout_secs = hook.timeout_secs.clamp(1, MAX_HOOK_TIMEOUT_SECS);
-    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-        .await
-        .map_err(|_| format!("Hook '{}' timed out after {}s", cmd_str, timeout_secs))?
-        .map_err(|e| format!("Hook '{}' failed: {e}", cmd_str))?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let max_read = (MAX_HOOK_OUTPUT_BYTES * 2) as u64;
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stdout_pipe {
+            let _ = pipe.take(max_read).read_to_end(&mut buf).await;
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stderr_pipe {
+            let _ = pipe.take(max_read).read_to_end(&mut buf).await;
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
 
-    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
+    let timeout_secs = hook.timeout_secs.clamp(1, MAX_HOOK_TIMEOUT_SECS);
+    let status = match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(format!("Hook '{}' failed: {e}", cmd_str));
+        }
+        Err(_) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            terminate_process_tree(&mut child).await;
+            return Err(format!(
+                "Hook '{}' timed out after {}s",
+                cmd_str, timeout_secs
+            ));
+        }
+    };
+
+    let stdout_text = tokio::time::timeout(Duration::from_secs(2), stdout_task)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let stderr_text = tokio::time::timeout(Duration::from_secs(2), stderr_task)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+
+    let mut combined = stdout_text;
+    if !stderr_text.trim().is_empty() {
         if !combined.is_empty() {
             combined.push('\n');
         }
-        combined.push_str(stderr.trim());
+        combined.push_str(stderr_text.trim());
     }
     let truncated: String = combined
         .trim()
@@ -169,8 +218,8 @@ async fn run_single_hook(
         .take(MAX_HOOK_OUTPUT_BYTES)
         .collect();
     Ok(HookRunResult {
-        success: output.status.success(),
-        exit_code: output.status.code(),
+        success: status.success(),
+        exit_code: status.code(),
         output: truncated,
     })
 }

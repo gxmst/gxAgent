@@ -149,6 +149,15 @@ fn entry_info(entry: &BackgroundEntry) -> BackgroundProcessInfo {
     }
 }
 
+async fn kill_background_entry(mut entry: BackgroundEntry) {
+    for handle in &entry.readers {
+        handle.abort();
+    }
+    if let Some(mut child) = entry.child.take() {
+        super::process::terminate_process_tree(&mut child).await;
+    }
+}
+
 pub async fn start_background_process(
     command: &str,
     work_dir: &str,
@@ -235,7 +244,22 @@ pub async fn start_background_process(
         readers: vec![h_out, h_err],
     };
     let info = entry_info(&entry);
-    GLOBAL_BG_PROCESSES.lock().await.insert(id, entry);
+    let mut map = GLOBAL_BG_PROCESSES.lock().await;
+    let now = now_secs();
+    map.retain(|_, existing| {
+        refresh_entry_status(existing);
+        existing.running || now.saturating_sub(existing.started_at) < 600
+    });
+    let live_count = map.values().filter(|e| e.running).count();
+    if live_count >= MAX_LIVE_BG_PROCESSES {
+        drop(map);
+        kill_background_entry(entry).await;
+        return Err(format!(
+            "Maximum live background processes ({}) reached. Stop an existing process first.",
+            MAX_LIVE_BG_PROCESSES
+        ));
+    }
+    map.insert(id, entry);
     Ok(info)
 }
 
@@ -272,13 +296,21 @@ pub async fn stop_background_process(process_id: &str) -> Result<String, String>
         .await
         .remove(process_id.trim())
         .ok_or_else(|| format!("Background process '{}' not found", process_id))?;
-    for handle in &entry.readers {
-        handle.abort();
+    let id = entry.id.clone();
+    kill_background_entry(entry).await;
+    Ok(format!("Stopped background process '{}'.", id))
+}
+
+pub async fn stop_all_background_processes() {
+    let entries: Vec<_> = GLOBAL_BG_PROCESSES
+        .lock()
+        .await
+        .drain()
+        .map(|(_, entry)| entry)
+        .collect();
+    for entry in entries {
+        kill_background_entry(entry).await;
     }
-    if let Some(mut child) = entry.child {
-        super::process::terminate_process_tree(&mut child).await;
-    }
-    Ok(format!("Stopped background process '{}'.", entry.id))
 }
 
 pub async fn list_background_processes_internal() -> Vec<BackgroundProcessInfo> {

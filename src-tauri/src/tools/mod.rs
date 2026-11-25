@@ -701,12 +701,14 @@ mod tests {
 
         let text = html_to_readable_text(
             "<html><head><style>.x{}</style><script>alert(1)</script></head>\
-             <body><h1>Docs</h1><p>Hello &amp; welcome</p><ul><li>Item 1</li></ul></body></html>",
+             <body><h1>Docs</h1><svg>drop</svg><svg-icon>keep</svg-icon><p>Hello &amp; welcome</p><ul><li>Item 1</li></ul></body></html>",
         );
         assert!(text.contains("Docs"));
         assert!(text.contains("Hello & welcome"));
         assert!(text.contains("- Item 1"));
+        assert!(text.contains("keep"));
         assert!(!text.contains("alert(1)"));
+        assert!(!text.contains("drop"));
     }
 
     #[test]

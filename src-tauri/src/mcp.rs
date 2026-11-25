@@ -667,10 +667,20 @@ impl McpServer {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                let body_text = response
-                    .text()
-                    .await
-                    .map_err(|e| format!("Failed to read MCP HTTP response: {e}"))?;
+                let body_text = {
+                    use futures_util::StreamExt;
+                    let mut bytes = Vec::new();
+                    let mut stream = response.bytes_stream();
+                    while let Some(chunk) = stream.next().await {
+                        let chunk =
+                            chunk.map_err(|e| format!("Failed to read MCP HTTP response: {e}"))?;
+                        if (bytes.len() + chunk.len()) as u64 > MCP_MAX_FRAME_BYTES {
+                            return Err("MCP HTTP response exceeds the 8 MB limit".into());
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    String::from_utf8_lossy(&bytes).into_owned()
+                };
                 if !status.is_success() {
                     return Err(format!("MCP HTTP error ({status}): {body_text}"));
                 }
@@ -862,6 +872,18 @@ static GLOBAL_MCP_POOL: once_cell::sync::Lazy<Mutex<HashMap<String, PooledMcpEnt
 pub async fn stop_pooled_server(name: &str) {
     let removed = GLOBAL_MCP_POOL.lock().await.remove(name);
     if let Some(entry) = removed {
+        entry.server.lock().await.kill().await;
+    }
+}
+
+pub async fn shutdown_all_pooled_servers() {
+    let entries: Vec<_> = GLOBAL_MCP_POOL
+        .lock()
+        .await
+        .drain()
+        .map(|(_, entry)| entry)
+        .collect();
+    for entry in entries {
         entry.server.lock().await.kill().await;
     }
 }

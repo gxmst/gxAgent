@@ -201,16 +201,26 @@ fn strip_tag_block(input: &str, tag: &str) -> String {
     let open = format!("<{}", tag);
     let close = format!("</{}>", tag);
     let mut result = input.to_string();
-    loop {
+    let mut search_from = 0usize;
+    while search_from < result.len() {
         let lower = result.to_ascii_lowercase();
-        let Some(start) = lower.find(&open) else {
+        let Some(rel_start) = lower[search_from..].find(&open) else {
             break;
         };
+        let start = search_from + rel_start;
+        let after = lower.as_bytes().get(start + open.len()).copied();
+        let is_tag_boundary =
+            after.is_none_or(|b| matches!(b, b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n'));
+        if !is_tag_boundary {
+            search_from = start + open.len();
+            continue;
+        }
         let end = lower[start..]
             .find(&close)
             .map(|offset| start + offset + close.len())
             .unwrap_or(result.len());
         result.replace_range(start..end, " ");
+        search_from = start;
     }
     result
 }
