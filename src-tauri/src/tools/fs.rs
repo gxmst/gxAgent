@@ -44,12 +44,86 @@ fn check_blocked_path(resolved: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) async fn run_read_file(path: &str, work_dir: &str) -> Result<String, String> {
+const MAX_LINE_SLICE_LINES: usize = 1000;
+const MAX_LINE_SLICE_BYTES: usize = 200 * 1024;
+
+pub(super) async fn run_read_file_with_options(
+    path: &str,
+    work_dir: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    line_numbers: bool,
+) -> Result<String, String> {
     let full_path = resolve_path(path, work_dir)?;
 
     let metadata = tokio::fs::metadata(&full_path)
         .await
         .map_err(|e| format!("Cannot access file: {}", e))?;
+
+    if start_line.is_some() || end_line.is_some() || line_numbers {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let start = start_line.unwrap_or(1).max(1);
+        let requested_end = end_line.unwrap_or(usize::MAX).max(start);
+        let file = tokio::fs::File::open(&full_path)
+            .await
+            .map_err(|e| format!("Failed to open file: {}", e))?;
+        let mut reader = BufReader::new(file).lines();
+        let mut collected = Vec::new();
+        let mut total_lines = 0usize;
+        let mut total_bytes = 0usize;
+        let mut actual_end = 0usize;
+        let mut capped = false;
+
+        while let Some(line) = reader
+            .next_line()
+            .await
+            .map_err(|e| format!("Failed to read file: {}", e))?
+        {
+            total_lines += 1;
+            if total_lines < start || total_lines > requested_end || capped {
+                continue;
+            }
+            if collected.len() >= MAX_LINE_SLICE_LINES
+                || total_bytes.saturating_add(line.len()) > MAX_LINE_SLICE_BYTES
+            {
+                capped = true;
+                continue;
+            }
+            total_bytes += line.len() + 1;
+            actual_end = total_lines;
+            if line_numbers {
+                collected.push(format!("{}: {}", total_lines, line));
+            } else {
+                collected.push(line);
+            }
+        }
+
+        if total_lines == 0 {
+            return Ok(String::new());
+        }
+        if start > total_lines {
+            return Err(format!(
+                "Requested start_line {} exceeds file length ({} lines)",
+                start, total_lines
+            ));
+        }
+
+        let mut output = if start_line.is_some() || end_line.is_some() || capped {
+            format!("[Lines {}-{} of {}]\n", start, actual_end, total_lines)
+        } else {
+            String::new()
+        };
+        output.push_str(&collected.join("\n"));
+        if capped {
+            output.push_str(&format!(
+                "\n\n[Output capped at {} lines / {} KB. Call read_file with start_line={} to continue.]",
+                MAX_LINE_SLICE_LINES,
+                MAX_LINE_SLICE_BYTES / 1024,
+                actual_end + 1
+            ));
+        }
+        return Ok(output);
+    }
 
     if metadata.len() as usize > FILE_SIZE_LIMIT {
         use tokio::io::AsyncReadExt;
@@ -66,7 +140,7 @@ pub(super) async fn run_read_file(path: &str, work_dir: &str) -> Result<String, 
         let content = String::from_utf8(buffer)
             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
         Ok(format!(
-            "{}\n\n[File truncated at {}KB]",
+            "{}\n\n[File truncated at {}KB. Pass start_line and end_line to read a specific slice.]",
             &content,
             FILE_SIZE_LIMIT / 1024
         ))

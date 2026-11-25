@@ -197,6 +197,10 @@ export interface UsageStats {
   completionTokens: number;
   totalPromptTokens: number;
   totalCompletionTokens: number;
+  cachedTokens?: number;
+  cacheCreationTokens?: number;
+  totalCachedTokens?: number;
+  totalCacheCreationTokens?: number;
   ttftMs: number;
   responseTimeMs: number;
   loopCount: number;

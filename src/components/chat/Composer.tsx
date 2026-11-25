@@ -1,17 +1,34 @@
-import { useLayoutEffect, useState, type ClipboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, type ClipboardEvent } from "react";
 import { Popover } from "radix-ui";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowUp, ChevronDown, CircleStop, FileText, Loader2, Plus, Quote, Search, Settings2, ShieldCheck, X } from "lucide-react";
+import { ArrowUp, ChevronDown, CircleStop, FileText, Loader2, Minimize2, Plus, Quote, Search, Settings2, ShieldCheck, X } from "lucide-react";
 import { t } from "../../i18n";
-import type { AppConfig, Attachment, ChatSession, ModelInfo, SessionConfig } from "../../types";
-import { isSendableAttachment, newMessageId } from "../../appDefaults";
+import type { AppConfig, Attachment, ChatSession, ModelInfo, SessionConfig, Skill } from "../../types";
+import {
+  MAX_ATTACHMENT_TEXT_PER_FILE,
+  estimateTextTokens,
+  fitAttachmentBudget,
+  isSendableAttachment,
+  modelContextLimit,
+  newMessageId,
+} from "../../appDefaults";
 import { useAppStore } from "../../store/appStore";
 import { notify } from "../../services/agentEvents";
 import { sortModels, sortProfileEntries } from "../../utils/modelSorting";
+import { activeHistoryGroups, estimateApiMessageTokens } from "../../utils/messageHistory";
+import {
+  extractActiveMention,
+  flattenDirectoryTree,
+  matchMentions,
+  stripMentionToken,
+  type MentionOption,
+} from "../../utils/mentions";
 import { CommandSuggestions } from "../shared/CommandSuggestions";
+import { MentionSuggestions } from "./MentionSuggestions";
 import { ApprovalCard, messageHasPendingApproval } from "./ApprovalCard";
 import { ProjectPicker } from "./ProjectPicker";
 import { AgentQuestion } from "./AgentQuestion";
+import type { DirectoryNode } from "../workspace/WorkspaceTree";
 import { useCodexStore, type CodexModel } from "../../store/codexStore";
 
 export interface ComposerProps {
@@ -36,9 +53,13 @@ export interface ComposerProps {
   getModelDisplayName: (modelId: string) => string;
   modelsForCurrentConfig: ModelInfo[];
   onSettings: () => void;
+  onCompact?: () => void;
   effectiveWorkDir: string;
   branch: string;
 }
+
+const formatCompactTokens = (value: number) =>
+  value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : String(value);
 
 export function Composer({
   lang,
@@ -62,6 +83,7 @@ export function Composer({
   getModelDisplayName,
   modelsForCurrentConfig,
   onSettings,
+  onCompact,
   effectiveWorkDir,
   branch,
 }: ComposerProps) {
@@ -81,6 +103,7 @@ export function Composer({
   const quote = useAppStore((state) => state.quoteBySession[sessionId]);
   const setQuote = useAppStore((state) => state.setQuoteBySession);
   const usage = useAppStore((state) => state.usageStatsBySession[sessionId]);
+  const workspaceTree = useAppStore((state) => state.workspaceBySession[sessionId]?.root ?? null);
   const streaming = activeId === sessionId;
   const otherRun = sessions.find((session) => session.id === activeId && session.id !== sessionId);
   const locked = !sessionStorageReady || isAttachmentLoading || preparingId !== null;
@@ -91,6 +114,124 @@ export function Composer({
   const [modelSearch, setModelSearch] = useState("");
   const [checkingCodex, setCheckingCodex] = useState(false);
   const [codexError, setCodexError] = useState("");
+  const [cursorPos, setCursorPos] = useState(0);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  const [cachedTree, setCachedTree] = useState<{ workDir: string; tree: DirectoryNode } | null>(null);
+  const [cachedSkills, setCachedSkills] = useState<Skill[] | null>(null);
+
+  const activeMention = useMemo(
+    () => (mentionDismissed || prompt.startsWith("/") ? null : extractActiveMention(prompt, cursorPos)),
+    [mentionDismissed, prompt, cursorPos],
+  );
+
+  useEffect(() => {
+    if (!activeMention) return;
+    if (!workspaceTree && effectiveWorkDir && cachedTree?.workDir !== effectiveWorkDir) {
+      invoke<DirectoryNode>("list_directory_tree", { workDir: effectiveWorkDir, maxDepth: 5, includeHidden: false })
+        .then((tree) => setCachedTree({ workDir: effectiveWorkDir, tree }))
+        .catch(() => { /* ignore mention tree lookup error */ });
+    }
+    if (cachedSkills === null) {
+      invoke<{ skills: Skill[] }>("list_skills", { config })
+        .then((catalog) => setCachedSkills(catalog.skills || []))
+        .catch(() => setCachedSkills([]));
+    }
+  }, [activeMention, cachedSkills, cachedTree?.workDir, config, effectiveWorkDir, workspaceTree]);
+
+  const flatFiles = useMemo(() => {
+    const tree = workspaceTree || (cachedTree?.workDir === effectiveWorkDir ? cachedTree.tree : null);
+    return flattenDirectoryTree(tree, effectiveWorkDir);
+  }, [cachedTree, effectiveWorkDir, workspaceTree]);
+
+  const mentionOptions = useMemo(
+    () => (activeMention ? matchMentions(activeMention.query, flatFiles, cachedSkills || [], lang) : []),
+    [activeMention, cachedSkills, flatFiles, lang],
+  );
+
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [activeMention?.query, mentionOptions.length]);
+
+  const selectMention = async (option: MentionOption) => {
+    if (!activeMention) return;
+    const mentionSnapshot = activeMention;
+    setMentionDismissed(false);
+
+    if (option.kind === "skill" && option.skill) {
+      const before = prompt.slice(0, mentionSnapshot.start);
+      const after = prompt.slice(mentionSnapshot.end).replace(/^\s*/, "");
+      const insertion = `[Skill: ${option.skill.name}] `;
+      setPrompt(`${before}${insertion}${after}`);
+      patchSessionConfig({
+        skillIds: Array.from(new Set([...(currentSession.sessionConfig.skillIds || []), option.skill.id])),
+      });
+      return;
+    }
+
+    const appendTextAttachment = (item: Attachment) => {
+      setAttachments((prev) => {
+        const fitted = fitAttachmentBudget(prev, [item]);
+        return fitted.accepted.length ? [...prev, ...fitted.accepted] : prev;
+      });
+    };
+
+    setPrompt((prev) => stripMentionToken(prev, mentionSnapshot));
+    try {
+      if (option.kind === "git-diff") {
+        const [staged, worktree] = await Promise.all([
+          invoke<string>("get_git_diff", { workDir: effectiveWorkDir, staged: true }).catch(() => ""),
+          invoke<string>("get_git_diff", { workDir: effectiveWorkDir, staged: false }).catch(() => ""),
+        ]);
+        const rawDiff = [staged, worktree].filter(Boolean).join("\n\n").trim();
+        if (!rawDiff) {
+          notify(zh ? "当前工作区没有可附加的 Git Diff" : "No workspace Git diff to attach", "info");
+          return;
+        }
+        const data = rawDiff.slice(0, MAX_ATTACHMENT_TEXT_PER_FILE);
+        appendTextAttachment({
+          name: "git-diff.patch",
+          type: "text",
+          data,
+          mimeType: "text/x-diff",
+          truncated: data.length < rawDiff.length,
+          originalSize: rawDiff.length,
+        });
+        return;
+      }
+
+      if (option.kind === "file" && option.path) {
+        const content = await invoke<string>("read_file_content", { path: option.path, workDir: effectiveWorkDir });
+        const data = content.slice(0, MAX_ATTACHMENT_TEXT_PER_FILE);
+        appendTextAttachment({
+          name: option.label,
+          path: option.path,
+          type: "text",
+          data,
+          mimeType: "text/plain",
+          truncated: data.length < content.length,
+          originalSize: content.length,
+        });
+      }
+    } catch (error) {
+      notify(String(error), "error");
+    }
+  };
+
+  const estimatedHistoryTokens = useMemo(() => {
+    const groups = activeHistoryGroups(currentSession.messages).flatMap((g) => g.serialized);
+    return groups.reduce((sum, msg) => sum + estimateApiMessageTokens(msg), 0) + estimateTextTokens(prompt);
+  }, [currentSession.messages, prompt]);
+  const contextLimit = Math.max(
+    1000,
+    Math.min(
+      modelContextLimit(resolvedCurrentConfig.model, modelsForCurrentConfig),
+      resolvedCurrentConfig.context_limit || 128_000,
+    ),
+  );
+  const contextUsed = usage?.promptTokens && usage.promptTokens > 0 ? usage.promptTokens : estimatedHistoryTokens;
+  const contextPct = Math.min(100, Math.round((contextUsed / contextLimit) * 100));
+  const cachedTokens = usage?.totalCachedTokens || usage?.cachedTokens || 0;
   const missingConnection = Boolean(currentSession.sessionConfig.profileId && !config.profiles[currentSession.sessionConfig.profileId]);
   const connectionName = missingConnection
     ? (zh ? "连接已删除，请重新选择" : "Connection removed — select another")
@@ -208,21 +349,56 @@ export function Composer({
         )}
         <div className={`chat-input-container ${streaming && coding ? "steering-active" : ""}`}>
           <CommandSuggestions input={prompt} onSelect={setPrompt} lang={lang} />
+          <MentionSuggestions
+            open={Boolean(activeMention) && mentionOptions.length > 0}
+            options={mentionOptions}
+            selectedIndex={mentionIndex}
+            onSelect={(option) => { void selectMention(option); }}
+            lang={lang}
+          />
           <textarea
             ref={chatTextareaRef}
             className="chat-textarea"
             aria-label={zh ? "消息" : "Message"}
             value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event) => {
+              setPrompt(event.target.value);
+              setCursorPos(event.target.selectionStart ?? event.target.value.length);
+              setMentionDismissed(false);
+            }}
+            onClick={(event) => setCursorPos(event.currentTarget.selectionStart ?? prompt.length)}
+            onKeyUp={(event) => setCursorPos(event.currentTarget.selectionStart ?? prompt.length)}
             onPaste={pasteImages}
             rows={2}
             placeholder={streaming && coding
               ? t("input.steering", lang)
               : coding
-                ? (zh ? "描述任务，或补充要求…" : "Describe a task or add requirements...")
-                : (zh ? "发送消息…" : "Send a message...")}
+                ? (zh ? "描述任务，输入 @ 引用文件/Diff，或补充要求…" : "Describe a task, type @ to reference files/diff...")
+                : (zh ? "发送消息，输入 @ 引用上下文…" : "Send a message, or type @ for context...")}
             disabled={!sessionStorageReady || (streaming && !coding) || preparingId === sessionId}
             onKeyDown={(event) => {
+              if (activeMention && mentionOptions.length > 0) {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setMentionIndex((idx) => (idx + 1) % mentionOptions.length);
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setMentionIndex((idx) => (idx - 1 + mentionOptions.length) % mentionOptions.length);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setMentionDismissed(true);
+                  return;
+                }
+                if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing)) {
+                  event.preventDefault();
+                  void selectMention(mentionOptions[mentionIndex]);
+                  return;
+                }
+              }
               if (event.nativeEvent.isComposing || event.key !== "Enter" || event.shiftKey) return;
               event.preventDefault();
               if (streaming && coding && prompt.trim()) void handleSteeringMessage();
@@ -458,10 +634,39 @@ export function Composer({
         </div>
       </div>
 
-      {usage && (
+      {(contextUsed > 0 || Boolean(usage)) && (
         <div className="usage-footer">
-          <span>{usage.totalPromptTokens + usage.totalCompletionTokens} tokens</span>
-          <span>{usage.loopCount} {zh ? "轮执行" : "iterations"}</span>
+          <div className="context-meter" title={`${contextUsed} / ${contextLimit} tokens (${contextPct}%)`}>
+            <span className="context-meter-bar" aria-hidden="true">
+              <span
+                className={`context-meter-fill ${contextPct >= 90 ? "danger" : contextPct >= 75 ? "warn" : ""}`}
+                style={{ width: `${contextPct}%` }}
+              />
+            </span>
+            <span>{formatCompactTokens(contextUsed)} / {formatCompactTokens(contextLimit)} ({contextPct}%)</span>
+            {cachedTokens > 0 && (
+              <span className="usage-cache-pill">
+                {zh ? `缓存 ${formatCompactTokens(cachedTokens)}` : `${formatCompactTokens(cachedTokens)} cached`}
+              </span>
+            )}
+            {onCompact && !streaming && !codex && currentSession.messages.length >= 3 && (
+              <button
+                type="button"
+                className="usage-compact-btn"
+                onClick={onCompact}
+                title={zh ? "压缩对话历史 (/compact)" : "Compact history (/compact)"}
+              >
+                <Minimize2 size={11} />
+                <span>{zh ? "压缩" : "Compact"}</span>
+              </button>
+            )}
+          </div>
+          {usage && (
+            <div className="usage-totals">
+              <span>{usage.totalPromptTokens + usage.totalCompletionTokens} tokens</span>
+              <span>{usage.loopCount} {zh ? "轮执行" : "iterations"}</span>
+            </div>
+          )}
         </div>
       )}
     </div>

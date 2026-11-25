@@ -274,6 +274,7 @@ pub fn check_approval(
             | "read_file"
             | "list_dir"
             | "web_search"
+            | "web_fetch"
             | "grep"
             | "glob"
             | "todo_write"

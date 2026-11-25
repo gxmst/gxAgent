@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import type { SessionConfig } from "../types";
-import { useGlobalHotkeys } from "../components/shared/CommandSuggestions";
 import type { ConfirmationOptions } from "../components/shared/ConfirmDialog";
 import { useAppStore } from "../store/appStore";
 import { useUIStore } from "../store/uiStore";
@@ -35,6 +34,8 @@ export function useWorkbenchHotkeys({
   const rightPanelOpen = useUIStore((s) => s.rightPanelOpen);
   const setRightPanelOpen = useUIStore((s) => s.setRightPanelOpen);
   const sessionSettingsOpen = useUIStore((s) => s.sessionSettingsOpen);
+  const commandPaletteOpen = useUIStore((s) => s.commandPaletteOpen);
+  const setCommandPaletteOpen = useUIStore((s) => s.setCommandPaletteOpen);
   const toolStatsDialog = useUIStore((s) => s.toolStatsDialog);
   const setToolStatsDialog = useUIStore((s) => s.setToolStatsDialog);
   const sidebarNav = useUIStore((s) => s.sidebarNav);
@@ -46,8 +47,6 @@ export function useWorkbenchHotkeys({
   createNewSessionRef.current = createNewSession;
   switchSessionModeRef.current = switchSessionMode;
 
-  useGlobalHotkeys(() => createNewSessionRef.current());
-
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
@@ -57,6 +56,11 @@ export function useWorkbenchHotkeys({
         return;
       }
       const ctrl = e.ctrlKey || e.metaKey;
+      if (ctrl && !e.shiftKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+        return;
+      }
       if (ctrl && e.shiftKey && (e.key === "N" || e.key === "n")) {
         e.preventDefault();
         switchSessionModeRef.current(sidebarNavRef.current === "chat" ? "code" : "chat");
@@ -71,6 +75,7 @@ export function useWorkbenchHotkeys({
         setSettingsOpen(true);
       }
       if (e.key === "Escape") {
+        if (commandPaletteOpen) { setCommandPaletteOpen(false); return; }
         if (contextMenu) { closeSessionContextMenu(); return; }
         if (toolStatsDialog) { setToolStatsDialog(null); return; }
         if (settingsOpen) return;
@@ -85,6 +90,7 @@ export function useWorkbenchHotkeys({
     return () => window.removeEventListener("keydown", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    commandPaletteOpen,
     confirmation,
     contextMenu,
     navigationOpen,

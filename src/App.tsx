@@ -37,6 +37,7 @@ import { Composer } from "./components/chat/Composer";
 import { ChatHeader } from "./components/chat/ChatHeader";
 import { ToastStack } from "./components/shared/ToastStack";
 import { ToolStatsModal } from "./components/shared/ToolStatsModal";
+import { CommandPalette } from "./components/shared/CommandPalette";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { SETTINGS_TAB_ORDER, settingsTabLabel } from "./components/settings/settingsNavigation";
 
@@ -112,6 +113,9 @@ function App() {
   const setSettingsTab = useUIStore((s) => s.setSettingsTab);
   const sessionSettingsOpen = useUIStore((s) => s.sessionSettingsOpen);
   const setSessionSettingsOpen = useUIStore((s) => s.setSessionSettingsOpen);
+  const commandPaletteOpen = useUIStore((s) => s.commandPaletteOpen);
+  const setCommandPaletteOpen = useUIStore((s) => s.setCommandPaletteOpen);
+  const openSettings = useUIStore((s) => s.openSettings);
   const toolStatsDialog = useUIStore((s) => s.toolStatsDialog);
   const setToolStatsDialog = useUIStore((s) => s.setToolStatsDialog);
   const selectedRunBySession = useUIStore((s) => s.selectedRunBySession);
@@ -385,6 +389,7 @@ function App() {
 
   const {
     formatTokenCount,
+    handleCompact,
     undoCompact,
     handleSendMessage,
     handleStopStreaming,
@@ -750,6 +755,7 @@ function App() {
               getModelDisplayName={getModelDisplayName}
               modelsForCurrentConfig={modelsForCurrentConfig}
               onSettings={() => setSessionSettingsOpen(true)}
+              onCompact={() => { void handleCompact(); }}
               effectiveWorkDir={effectiveWorkDir}
               branch={currentWorkspace.branch}
             />
@@ -840,6 +846,22 @@ function App() {
           setToolStatsDialog={setToolStatsDialog}
         />
       )}
+      <CommandPalette
+        open={commandPaletteOpen}
+        onOpenChange={setCommandPaletteOpen}
+        lang={lang}
+        config={config}
+        sessions={sessions}
+        currentSession={currentSession}
+        onNewSession={createNewSession}
+        onSelectSession={(id) => { setCurrentSessionId(id); if (layout.navigationOverlay) setNavigationOpen(false); }}
+        onSwitchMode={switchSessionMode}
+        onTogglePlanMode={() => setConfig((prev) => ({ ...prev, plan_mode: !prev.plan_mode }))}
+        onCompact={() => { void handleCompact(); }}
+        onToggleRightPanel={() => setRightPanelOpen((open) => !open)}
+        onThemeChange={(theme) => setConfig((prev) => ({ ...prev, theme }))}
+        onOpenSettings={(tab) => openSettings(tab)}
+      />
       <OnboardingWizard
         open={onboardingOpen}
         lang={lang}

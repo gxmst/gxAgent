@@ -1,16 +1,27 @@
 use serde_json::{json, Value};
 
 pub fn get_all_tool_definitions() -> Vec<Value> {
+    let (shell_description, command_description) = if cfg!(target_os = "windows") {
+        (
+            "Execute a shell command on the local Windows machine using PowerShell and return stdout/stderr. Use this to run scripts, install packages, manage files, or diagnose system issues. IMPORTANT: Use PowerShell syntax only — do NOT use || or &&, use ; to chain commands. Use 2>$null to suppress errors.",
+            "The PowerShell command to execute",
+        )
+    } else {
+        (
+            "Execute a shell command on the local machine using sh and return stdout/stderr. Use this to run scripts, install packages, manage files, or diagnose system issues.",
+            "The POSIX shell command to execute",
+        )
+    };
     vec![
         json!({
             "type": "function",
             "function": {
                 "name": "execute_command",
-                "description": "Execute a shell command on the local Windows machine using PowerShell and return stdout/stderr. Use this to run scripts, install packages, manage files, or diagnose system issues. IMPORTANT: Use PowerShell syntax only — do NOT use || or &&, use ; to chain commands. Use 2>$null to suppress errors.",
+                "description": shell_description,
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "The PowerShell command to execute" }
+                        "command": { "type": "string", "description": command_description }
                     },
                     "required": ["command"]
                 }
@@ -20,11 +31,14 @@ pub fn get_all_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the content of a local file. Use this to inspect configuration, source code, logs, or any text file.",
+                "description": "Read the content of a local file. Pass optional start_line and end_line (1-indexed, inclusive) for large source files so you only inspect the needed range with line numbers.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Absolute or relative file path to read" }
+                        "path": { "type": "string", "description": "Absolute or relative file path to read" },
+                        "start_line": { "type": "integer", "description": "Optional 1-indexed starting line number." },
+                        "end_line": { "type": "integer", "description": "Optional 1-indexed inclusive ending line number." },
+                        "line_numbers": { "type": "boolean", "description": "Include line numbers in the output. Defaults to true when slicing lines." }
                     },
                     "required": ["path"]
                 }
@@ -83,6 +97,21 @@ pub fn get_all_tool_definitions() -> Vec<Value> {
                         "query": { "type": "string", "description": "Search query" }
                     },
                     "required": ["query"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "Fetch a public HTTP(S) web page or documentation URL and extract readable text/Markdown.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "Public http:// or https:// URL to fetch" },
+                        "max_chars": { "type": "integer", "description": "Optional character cap (500-50000, default 20000)." }
+                    },
+                    "required": ["url"]
                 }
             }
         }),

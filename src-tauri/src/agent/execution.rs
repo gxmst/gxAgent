@@ -88,6 +88,7 @@ async fn execute_tool_with_mcp(
         "read_file",
         "list_dir",
         "web_search",
+        "web_fetch",
         "grep",
         "glob",
         "todo_write",
@@ -105,6 +106,7 @@ async fn execute_tool_with_mcp(
         "list_dir",
         "run_python",
         "web_search",
+        "web_fetch",
         "grep",
         "glob",
         "todo_write",
@@ -610,7 +612,13 @@ pub(super) async fn process_tool_calls(
     let is_parallel_read = |name: &str| {
         matches!(
             name,
-            "get_current_time" | "read_file" | "list_dir" | "web_search" | "grep" | "glob"
+            "get_current_time"
+                | "read_file"
+                | "list_dir"
+                | "web_search"
+                | "web_fetch"
+                | "grep"
+                | "glob"
         )
     };
 

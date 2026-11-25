@@ -778,6 +778,7 @@ export function useAgentRequest({
 
   return {
     formatTokenCount,
+    handleCompact,
     undoCompact,
     handleSendMessage,
     handleStopStreaming,

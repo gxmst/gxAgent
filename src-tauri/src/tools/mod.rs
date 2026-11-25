@@ -3,6 +3,7 @@ mod fs;
 mod process;
 mod schema;
 mod search_files;
+mod web_fetch;
 mod web_search;
 
 use serde::{de::DeserializeOwned, Deserialize};
@@ -140,7 +141,14 @@ pub async fn execute_tool_with_control(
         }
         "read_file" => {
             let path = args["path"].as_str().unwrap_or("");
-            match fs::run_read_file(path, work_dir).await {
+            let start_line = args["start_line"].as_u64().map(|n| n as usize);
+            let end_line = args["end_line"].as_u64().map(|n| n as usize);
+            let line_numbers = args["line_numbers"]
+                .as_bool()
+                .unwrap_or(start_line.is_some() || end_line.is_some());
+            match fs::run_read_file_with_options(path, work_dir, start_line, end_line, line_numbers)
+                .await
+            {
                 Ok(out) => out,
                 Err(e) => format!("Error: {}", e),
             }
@@ -197,6 +205,29 @@ pub async fn execute_tool_with_control(
                 }
             }
         }
+        "web_fetch" => {
+            let url = args["url"].as_str().unwrap_or("");
+            let max_chars = args["max_chars"].as_u64().map(|n| n as usize);
+            let fetch_timeout = std::time::Duration::from_secs(timeout_secs.min(25));
+            let fetch = web_fetch::run_web_fetch(url, max_chars);
+            tokio::pin!(fetch);
+            if let Some(mut receiver) = cancel_rx {
+                tokio::select! {
+                    result = tokio::time::timeout(fetch_timeout, &mut fetch) => match result {
+                        Ok(Ok(out)) => out,
+                        Ok(Err(e)) => format!("Error: {}", e),
+                        Err(_) => format!("Error: Fetch timed out after {}s.", fetch_timeout.as_secs()),
+                    },
+                    _ = process::wait_for_cancel(&mut receiver) => TOOL_CANCELLED_ERROR.to_string(),
+                }
+            } else {
+                match tokio::time::timeout(fetch_timeout, &mut fetch).await {
+                    Ok(Ok(out)) => out,
+                    Ok(Err(e)) => format!("Error: {}", e),
+                    Err(_) => format!("Error: Fetch timed out after {}s.", fetch_timeout.as_secs()),
+                }
+            }
+        }
         "get_current_time" => fs::run_current_time(&args),
         "edit_file" => {
             let args: EditFileArgs = match parse_tool_args(name, args_str) {
@@ -242,13 +273,14 @@ pub async fn execute_tool_with_control(
 #[cfg(test)]
 mod tests {
     use super::edit::{common_indent, locate_edit, nearest_match_hint, EditMatchKind};
-    use super::fs::run_current_time;
+    use super::fs::{run_current_time, run_read_file_with_options};
     use super::process::{
-        capture_process_output, clone_captured_output, finish_process_reader, spawn_process_reader,
-        ProcessOutputBudget, PROCESS_OUTPUT_TRUNCATION_NOTICE,
+        capture_process_output, clone_captured_output, finish_process_reader, should_scrub_env_var,
+        spawn_process_reader, ProcessOutputBudget, PROCESS_OUTPUT_TRUNCATION_NOTICE,
     };
     use super::schema::get_all_tool_definitions;
     use super::search_files::glob_to_regex;
+    use super::web_fetch::{html_to_readable_text, run_web_fetch};
     use super::web_search::{
         format_tavily_response, is_safe_url, run_web_search, tavily_error_detail,
     };
@@ -578,5 +610,62 @@ mod tests {
         assert!(output.starts_with("hello"));
         assert!(output.contains("descendant process may still have it open"));
         drop(writer);
+    }
+
+    #[tokio::test]
+    async fn read_file_supports_line_slices_and_line_numbers() {
+        let dir = std::env::temp_dir().join(format!("gx-read-lines-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sample.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+        let raw =
+            run_read_file_with_options("sample.txt", dir.to_str().unwrap(), None, None, false)
+                .await
+                .unwrap();
+        assert_eq!(raw, "alpha\nbeta\ngamma\ndelta\n");
+
+        let slice =
+            run_read_file_with_options("sample.txt", dir.to_str().unwrap(), Some(2), Some(3), true)
+                .await
+                .unwrap();
+        assert!(slice.starts_with("[Lines 2-3 of 4]"));
+        assert!(slice.contains("2: beta"));
+        assert!(slice.contains("3: gamma"));
+        assert!(!slice.contains("alpha"));
+        assert!(!slice.contains("delta"));
+
+        let err =
+            run_read_file_with_options("sample.txt", dir.to_str().unwrap(), Some(99), None, true)
+                .await
+                .unwrap_err();
+        assert!(err.contains("exceeds file length"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_private_urls_and_strips_html() {
+        let err = run_web_fetch("http://127.0.0.1:8080/secret", None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("blocked"));
+
+        let text = html_to_readable_text(
+            "<html><head><style>.x{}</style><script>alert(1)</script></head>\
+             <body><h1>Docs</h1><p>Hello &amp; welcome</p><ul><li>Item 1</li></ul></body></html>",
+        );
+        assert!(text.contains("Docs"));
+        assert!(text.contains("Hello & welcome"));
+        assert!(text.contains("- Item 1"));
+        assert!(!text.contains("alert(1)"));
+    }
+
+    #[test]
+    fn env_scrubbing_targets_api_keys_and_gxagent_secrets() {
+        assert!(should_scrub_env_var("OPENAI_API_KEY"));
+        assert!(should_scrub_env_var("anthropic_api_key"));
+        assert!(should_scrub_env_var("GXAGENT_MASTER_SECRET"));
+        assert!(!should_scrub_env_var("PATH"));
+        assert!(!should_scrub_env_var("GXAGENT_WORK_DIR"));
     }
 }

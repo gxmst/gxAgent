@@ -210,7 +210,7 @@ fn default_plan_mode() -> bool {
 /// (the `#[serde(default)]` on the field) and are migrated on load; after
 /// migration the version is stored, so a tool the user later disables stays
 /// disabled instead of being re-enabled on every launch.
-pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 5;
+pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 6;
 
 /// Pre-v2 defaults for the agent limits, used by the one-time migration in
 /// load_config to tell "user never touched this" (exact old default) apart
@@ -399,6 +399,7 @@ impl Default for AppConfig {
                 "list_dir".into(),
                 "run_python".into(),
                 "web_search".into(),
+                "web_fetch".into(),
                 "get_current_time".into(),
                 "grep".into(),
                 "glob".into(),

@@ -570,6 +570,10 @@ async function registerLifecycleListeners(unlisteners: (() => void)[]) {
     completion_tokens: number;
     total_prompt_tokens: number;
     total_completion_tokens: number;
+    cached_tokens?: number;
+    cache_creation_tokens?: number;
+    total_cached_tokens?: number;
+    total_cache_creation_tokens?: number;
     ttft_ms: number;
     response_time_ms: number;
     loop_count: number;
@@ -582,6 +586,10 @@ async function registerLifecycleListeners(unlisteners: (() => void)[]) {
       completionTokens: event.payload.completion_tokens,
       totalPromptTokens: event.payload.total_prompt_tokens,
       totalCompletionTokens: event.payload.total_completion_tokens,
+      cachedTokens: event.payload.cached_tokens,
+      cacheCreationTokens: event.payload.cache_creation_tokens,
+      totalCachedTokens: event.payload.total_cached_tokens,
+      totalCacheCreationTokens: event.payload.total_cache_creation_tokens,
       ttftMs: event.payload.ttft_ms,
       responseTimeMs: event.payload.response_time_ms,
       loopCount: event.payload.loop_count,

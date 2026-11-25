@@ -23,6 +23,8 @@ pub(super) struct StreamOutcome {
     pub tool_calls: Vec<AccumulatedToolCall>,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_creation_tokens: u64,
     pub ttft_ms: Option<u64>,
     /// True if DSML markers were seen in the content (DeepSeek text-format tool
     /// calls). When set, the raw (un-emitted) DSML text is in `dsml_buffer` and
@@ -189,6 +191,8 @@ pub(super) async fn consume_stream(
     let mut tool_calls: Vec<AccumulatedToolCall> = Vec::new();
     let mut prompt_tokens: u64 = 0;
     let mut completion_tokens: u64 = 0;
+    let mut cached_tokens: u64 = 0;
+    let mut cache_creation_tokens: u64 = 0;
     let mut ttft_ms: Option<u64> = None;
     let mut first_content = false;
     let mut dsml_buffering = false;
@@ -242,6 +246,12 @@ pub(super) async fn consume_stream(
         if let Some(ct) = delta.completion_tokens {
             completion_tokens = ct;
         }
+        if let Some(cached) = delta.cached_tokens {
+            cached_tokens = cached;
+        }
+        if let Some(created) = delta.cache_creation_tokens {
+            cache_creation_tokens = created;
+        }
     };
 
     while !decoder.done {
@@ -263,6 +273,8 @@ pub(super) async fn consume_stream(
         tool_calls,
         prompt_tokens,
         completion_tokens,
+        cached_tokens,
+        cache_creation_tokens,
         ttft_ms,
         dsml_buffering,
         dsml_buffer,

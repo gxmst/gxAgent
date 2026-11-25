@@ -69,6 +69,8 @@ export interface UIStoreState {
   setSettingsTab: (next: Updater<SettingsTab>) => void;
   sessionSettingsOpen: boolean;
   setSessionSettingsOpen: (next: Updater<boolean>) => void;
+  commandPaletteOpen: boolean;
+  setCommandPaletteOpen: (next: Updater<boolean>) => void;
   toolStatsDialog: ToolStatsDialog | null;
   setToolStatsDialog: (next: Updater<ToolStatsDialog | null>) => void;
   selectedRunBySession: Record<string, string | undefined>;
@@ -106,6 +108,8 @@ export const useUIStore = create<UIStoreState>((set) => ({
   setSettingsTab: (next) => set((s) => ({ settingsTab: resolve(next, s.settingsTab) })),
   sessionSettingsOpen: false,
   setSessionSettingsOpen: (next) => set((s) => ({ sessionSettingsOpen: resolve(next, s.sessionSettingsOpen) })),
+  commandPaletteOpen: false,
+  setCommandPaletteOpen: (next) => set((s) => ({ commandPaletteOpen: resolve(next, s.commandPaletteOpen) })),
   toolStatsDialog: null,
   setToolStatsDialog: (next) => set((s) => ({ toolStatsDialog: resolve(next, s.toolStatsDialog) })),
   selectedRunBySession: {},

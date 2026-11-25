@@ -238,6 +238,8 @@ async fn start_agent_loop_inner(
     let mut loop_count = 0;
     let mut total_prompt_tokens: u64 = 0;
     let mut total_completion_tokens: u64 = 0;
+    let mut total_cached_tokens: u64 = 0;
+    let mut total_cache_creation_tokens: u64 = 0;
     let max_loops = configured_max_agent_loops(&config);
     let mut tool_call_count: u32 = 0;
 
@@ -335,9 +337,12 @@ async fn start_agent_loop_inner(
 
             let (content, reasoning_content, mut accumulated, prompt_tokens, completion_tokens) =
                 provider::parse_full_response(wire, &body);
+            let (cached_tokens, cache_creation_tokens) = provider::parse_cache_usage(wire, &body);
             normalize_tool_calls(&mut accumulated);
             total_prompt_tokens += prompt_tokens;
             total_completion_tokens += completion_tokens;
+            total_cached_tokens += cached_tokens;
+            total_cache_creation_tokens += cache_creation_tokens;
 
             emit_usage(
                 &window,
@@ -347,6 +352,10 @@ async fn start_agent_loop_inner(
                     "completion_tokens": completion_tokens,
                     "total_prompt_tokens": total_prompt_tokens,
                     "total_completion_tokens": total_completion_tokens,
+                    "cached_tokens": cached_tokens,
+                    "cache_creation_tokens": cache_creation_tokens,
+                    "total_cached_tokens": total_cached_tokens,
+                    "total_cache_creation_tokens": total_cache_creation_tokens,
                     "ttft_ms": response_time_ms,
                     "response_time_ms": response_time_ms,
                     "loop_count": loop_count,
@@ -430,6 +439,8 @@ async fn start_agent_loop_inner(
         let response_time_ms = request_start.elapsed().as_millis() as u64;
         total_prompt_tokens += outcome.prompt_tokens;
         total_completion_tokens += outcome.completion_tokens;
+        total_cached_tokens += outcome.cached_tokens;
+        total_cache_creation_tokens += outcome.cache_creation_tokens;
 
         emit_usage(
             &window,
@@ -439,6 +450,10 @@ async fn start_agent_loop_inner(
                 "completion_tokens": outcome.completion_tokens,
                 "total_prompt_tokens": total_prompt_tokens,
                 "total_completion_tokens": total_completion_tokens,
+                "cached_tokens": outcome.cached_tokens,
+                "cache_creation_tokens": outcome.cache_creation_tokens,
+                "total_cached_tokens": total_cached_tokens,
+                "total_cache_creation_tokens": total_cache_creation_tokens,
                 "ttft_ms": outcome.ttft_ms.unwrap_or(response_time_ms),
                 "response_time_ms": response_time_ms,
                 "loop_count": loop_count,

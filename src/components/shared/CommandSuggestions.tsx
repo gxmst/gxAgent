@@ -1,4 +1,3 @@
-import { useEffect, useRef } from 'react';
 import { Popover } from 'radix-ui';
 
 interface CommandSuggestion {
@@ -61,22 +60,4 @@ export function CommandSuggestions({ input, onSelect, lang = 'zh' }: CommandSugg
       </Popover.Portal>
     </Popover.Root>
   );
-}
-
-export function useGlobalHotkeys(onNewSession: () => void) {
-  const callbackRef = useRef(onNewSession);
-  callbackRef.current = onNewSession;
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      // Ctrl/Cmd + K: New session
-      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-        e.preventDefault();
-        callbackRef.current();
-      }
-    };
-
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, []);
 }

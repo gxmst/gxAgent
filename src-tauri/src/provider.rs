@@ -299,16 +299,53 @@ fn build_anthropic_body(
         "top_p": config.top_p,
     });
 
+    // Place ephemeral prompt-cache breakpoints on stable prefixes: system prompt,
+    // last tool schema, and the penultimate conversation turn (so history grows
+    // incrementally without invalidating the prefix cache on every loop turn).
     if !system_parts.is_empty() {
-        body["system"] = json!(system_parts.join("\n\n"));
+        body["system"] = json!([{
+            "type": "text",
+            "text": system_parts.join("\n\n"),
+            "cache_control": { "type": "ephemeral" },
+        }]);
     }
 
-    let anth_tools = openai_tools_to_anthropic(tools);
+    let mut anth_tools = openai_tools_to_anthropic(tools);
+    if let Some(last_tool) = anth_tools.last_mut().and_then(Value::as_object_mut) {
+        last_tool.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+    }
     if !anth_tools.is_empty() {
         body["tools"] = json!(anth_tools);
     }
 
+    if let Some(messages_arr) = body["messages"].as_array_mut() {
+        if messages_arr.len() >= 2 {
+            let bp = messages_arr.len() - 2;
+            mark_anthropic_cache_breakpoint(&mut messages_arr[bp]);
+        }
+    }
+
     body
+}
+
+fn mark_anthropic_cache_breakpoint(message: &mut Value) {
+    let cache = json!({ "type": "ephemeral" });
+    match &mut message["content"] {
+        Value::Array(blocks) => {
+            if let Some(last) = blocks.last_mut().and_then(Value::as_object_mut) {
+                last.insert("cache_control".into(), cache);
+            }
+        }
+        Value::String(text) if !text.is_empty() => {
+            let content_text = std::mem::take(text);
+            message["content"] = json!([{
+                "type": "text",
+                "text": content_text,
+                "cache_control": cache,
+            }]);
+        }
+        _ => {}
+    }
 }
 
 /// User content for Anthropic: plain string, or blocks when images are present.
@@ -631,6 +668,10 @@ pub struct StreamDelta {
     /// Usage stats, when the provider reports them (often only at the end).
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    /// Prompt tokens served from provider cache (OpenAI/Anthropic/Gemini).
+    pub cached_tokens: Option<u64>,
+    /// Tokens written to provider cache this turn (Anthropic).
+    pub cache_creation_tokens: Option<u64>,
     /// True when this event marks the end of the stream.
     pub done: bool,
 }
@@ -763,6 +804,7 @@ fn parse_openai_sse(v: &Value) -> Vec<StreamDelta> {
     if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
         delta.prompt_tokens = usage["prompt_tokens"].as_u64();
         delta.completion_tokens = usage["completion_tokens"].as_u64();
+        delta.cached_tokens = usage["prompt_tokens_details"]["cached_tokens"].as_u64();
     }
 
     if let Some(choices) = v["choices"].as_array() {
@@ -845,7 +887,18 @@ fn parse_anthropic_sse(v: &Value, state: &mut StreamState) -> Vec<StreamDelta> {
     match v["type"].as_str() {
         Some("message_start") => {
             if let Some(u) = v["message"]["usage"].as_object() {
-                delta.prompt_tokens = u.get("input_tokens").and_then(|x| x.as_u64());
+                let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                let cache_read = u.get("cache_read_input_tokens").and_then(|x| x.as_u64());
+                let cache_create = u
+                    .get("cache_creation_input_tokens")
+                    .and_then(|x| x.as_u64());
+                if u.contains_key("input_tokens") || cache_read.is_some() || cache_create.is_some()
+                {
+                    delta.prompt_tokens =
+                        Some(input + cache_read.unwrap_or(0) + cache_create.unwrap_or(0));
+                }
+                delta.cached_tokens = cache_read;
+                delta.cache_creation_tokens = cache_create;
                 delta.completion_tokens = u.get("output_tokens").and_then(|x| x.as_u64());
             }
         }
@@ -898,8 +951,20 @@ fn parse_anthropic_sse(v: &Value, state: &mut StreamState) -> Vec<StreamDelta> {
             }
         }
         Some("message_delta") => {
-            if let Some(out) = v["usage"]["output_tokens"].as_u64() {
-                delta.completion_tokens = Some(out);
+            if let Some(u) = v["usage"].as_object() {
+                if let Some(out) = u.get("output_tokens").and_then(|x| x.as_u64()) {
+                    delta.completion_tokens = Some(out);
+                }
+                if let Some(cache_read) = u.get("cache_read_input_tokens").and_then(|x| x.as_u64())
+                {
+                    delta.cached_tokens = Some(cache_read);
+                }
+                if let Some(cache_create) = u
+                    .get("cache_creation_input_tokens")
+                    .and_then(|x| x.as_u64())
+                {
+                    delta.cache_creation_tokens = Some(cache_create);
+                }
             }
         }
         Some("message_stop") => {
@@ -917,6 +982,7 @@ fn parse_gemini_sse(v: &Value, state: &mut StreamState) -> Vec<StreamDelta> {
     if let Some(um) = v.get("usageMetadata") {
         delta.prompt_tokens = um["promptTokenCount"].as_u64();
         delta.completion_tokens = um["candidatesTokenCount"].as_u64();
+        delta.cached_tokens = um["cachedContentTokenCount"].as_u64();
     }
 
     if let Some(candidates) = v["candidates"].as_array() {
@@ -1033,7 +1099,14 @@ pub fn parse_full_response(
                     }
                 }
             }
-            let pt = body["usage"]["input_tokens"].as_u64().unwrap_or(0);
+            let cache_read = body["usage"]["cache_read_input_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            let cache_create = body["usage"]["cache_creation_input_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            let pt =
+                body["usage"]["input_tokens"].as_u64().unwrap_or(0) + cache_read + cache_create;
             let ct = body["usage"]["output_tokens"].as_u64().unwrap_or(0);
             (content, reasoning, calls, pt, ct)
         }
@@ -1062,6 +1135,33 @@ pub fn parse_full_response(
                 .unwrap_or(0);
             (content, String::new(), calls, pt, ct)
         }
+    }
+}
+
+/// Extract `(cached_tokens, cache_creation_tokens)` from a non-streaming response body.
+pub fn parse_cache_usage(wire: Wire, body: &Value) -> (u64, u64) {
+    match wire {
+        Wire::OpenAI => (
+            body["usage"]["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+            0,
+        ),
+        Wire::Anthropic => (
+            body["usage"]["cache_read_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+            body["usage"]["cache_creation_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+        ),
+        Wire::Gemini => (
+            body["usageMetadata"]["cachedContentTokenCount"]
+                .as_u64()
+                .unwrap_or(0),
+            0,
+        ),
+        Wire::Ollama => (0, 0),
     }
 }
 
@@ -1259,7 +1359,12 @@ mod tests {
     #[test]
     fn anthropic_body_moves_system_out_and_converts_tool_traffic() {
         let body = build_body(Wire::Anthropic, "m", &msgs(), &tools(), &cfg(), false);
-        assert_eq!(body["system"], json!("sys"));
+        assert_eq!(body["system"][0]["type"], json!("text"));
+        assert_eq!(body["system"][0]["text"], json!("sys"));
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
         let conv = body["messages"].as_array().unwrap();
         // system removed from messages; assistant tool_call became tool_use block;
         // tool result became a user-role tool_result block
@@ -1267,14 +1372,62 @@ mod tests {
         let assistant = &conv[1];
         assert_eq!(assistant["content"][1]["type"], json!("tool_use"));
         assert_eq!(assistant["content"][1]["id"], json!("call_1"));
+        // Penultimate message carries cache breakpoint on its final block
+        assert_eq!(
+            assistant["content"][1]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
         let result_msg = &conv[2];
         assert_eq!(result_msg["role"], json!("user"));
         assert_eq!(result_msg["content"][0]["type"], json!("tool_result"));
         assert_eq!(result_msg["content"][0]["tool_use_id"], json!("call_1"));
-        // Anthropic tool shape uses input_schema
+        // Anthropic tool shape uses input_schema and cache breakpoint on last tool
         assert!(body["tools"][0]["input_schema"].is_object());
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
         // max_tokens is mandatory
         assert_eq!(body["max_tokens"], json!(2048));
+    }
+
+    #[test]
+    fn cache_usage_is_parsed_across_providers() {
+        let mut state = StreamState::default();
+        let openai = parse_stream_line(
+            Wire::OpenAI,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":80}}}"#,
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(openai[0].cached_tokens, Some(80));
+
+        let mut anth_state = StreamState::default();
+        let anth = parse_stream_line(
+            Wire::Anthropic,
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":25,"output_tokens":0}}}"#,
+            &mut anth_state,
+        )
+        .unwrap();
+        assert_eq!(anth[0].prompt_tokens, Some(125));
+        assert_eq!(anth[0].cached_tokens, Some(90));
+        assert_eq!(anth[0].cache_creation_tokens, Some(25));
+
+        let mut gem_state = StreamState::default();
+        let gem = parse_stream_line(
+            Wire::Gemini,
+            r#"data: {"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":10,"cachedContentTokenCount":40}}"#,
+            &mut gem_state,
+        )
+        .unwrap();
+        assert_eq!(gem[0].cached_tokens, Some(40));
+        assert_eq!(
+            parse_cache_usage(
+                Wire::Anthropic,
+                &json!({ "usage": { "cache_read_input_tokens": 12, "cache_creation_input_tokens": 3 } })
+            ),
+            (12, 3)
+        );
     }
 
     #[test]

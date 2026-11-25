@@ -238,6 +238,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     "list_dir",
     "run_python",
     "web_search",
+    "web_fetch",
     "get_current_time",
     "grep",
     "glob",
@@ -560,6 +561,7 @@ export const TOOL_NAMES: { key: string; label: string; shortLabel: string; descr
   { key: "list_dir", label: "List Folder", shortLabel: "Files", description: "Browse folders in the workspace.", risk: "low" },
   { key: "run_python", label: "Python", shortLabel: "Py", description: "Run short Python scripts for analysis.", risk: "medium" },
   { key: "web_search", label: "Web Search", shortLabel: "Web", description: "Search the web for current information.", risk: "low" },
+  { key: "web_fetch", label: "Web Fetch", shortLabel: "Fetch", description: "Fetch readable text or Markdown from a public URL.", risk: "low" },
   { key: "get_current_time", label: "Current Time", shortLabel: "Time", description: "Read the current local or UTC time.", risk: "low" },
   { key: "grep", label: "Grep", shortLabel: "Grep", description: "Search file contents by regex across the workspace.", risk: "low" },
   { key: "glob", label: "Find Files", shortLabel: "Glob", description: "Find files by name pattern.", risk: "low" },
@@ -580,6 +582,7 @@ export const toolIcon = (key: string, size = 11) => {
     case "run_python":
       return <Zap size={size} />;
     case "web_search":
+    case "web_fetch":
       return <Globe size={size} />;
     case "get_current_time":
       return <Clock size={size} />;

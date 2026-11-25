@@ -13,7 +13,7 @@ use super::prompts::{
 use super::state::{ensure_not_cancelled, AGENT_CANCELLED_ERROR};
 use super::stream::{
     assistant_message_with_tool_calls, consume_stream, emit_agent_complete, emit_reasoning_chunk,
-    emit_request_event, emit_stream_chunk, emit_stream_done, normalize_tool_calls,
+    emit_request_event, emit_stream_chunk, emit_stream_done, emit_usage, normalize_tool_calls,
     send_model_request_with_retry, AccumulatedToolCall, StreamOutcome,
 };
 use crate::config::AppConfig;
@@ -114,6 +114,7 @@ async fn chat_turn(
             .map_err(|e| format!("Parse error: {}", e))?;
         let (mut content, reasoning, mut tool_calls, prompt_tokens, completion_tokens) =
             provider::parse_full_response(wire, &body);
+        let (cached_tokens, cache_creation_tokens) = provider::parse_cache_usage(wire, &body);
 
         // DSML in non-streaming OpenAI content.
         if dsml_aware && tool_calls.is_empty() && content.contains("DSML") {
@@ -140,6 +141,8 @@ async fn chat_turn(
             tool_calls,
             prompt_tokens,
             completion_tokens,
+            cached_tokens,
+            cache_creation_tokens,
             ttft_ms: Some(request_start.elapsed().as_millis() as u64),
             dsml_buffering: false,
             dsml_buffer: String::new(),
@@ -481,6 +484,10 @@ pub(super) async fn run_chat_mode(
     // search -> answer follow-ups when the model requests web_search. Tool calls
     // (native or DSML) are surfaced uniformly via `chat_turn`.
     let mut turn: u32 = 0;
+    let mut total_prompt_tokens: u64 = 0;
+    let mut total_completion_tokens: u64 = 0;
+    let mut total_cached_tokens: u64 = 0;
+    let mut total_cache_creation_tokens: u64 = 0;
 
     loop {
         turn += 1;
@@ -513,6 +520,31 @@ pub(super) async fn run_chat_mode(
             &cancel_rx,
         )
         .await?;
+
+        total_prompt_tokens += outcome.prompt_tokens;
+        total_completion_tokens += outcome.completion_tokens;
+        total_cached_tokens += outcome.cached_tokens;
+        total_cache_creation_tokens += outcome.cache_creation_tokens;
+        if outcome.prompt_tokens > 0 || outcome.completion_tokens > 0 {
+            let elapsed_ms = request_start.elapsed().as_millis() as u64;
+            emit_usage(
+                &window,
+                &request_id,
+                json!({
+                    "prompt_tokens": outcome.prompt_tokens,
+                    "completion_tokens": outcome.completion_tokens,
+                    "total_prompt_tokens": total_prompt_tokens,
+                    "total_completion_tokens": total_completion_tokens,
+                    "cached_tokens": outcome.cached_tokens,
+                    "cache_creation_tokens": outcome.cache_creation_tokens,
+                    "total_cached_tokens": total_cached_tokens,
+                    "total_cache_creation_tokens": total_cache_creation_tokens,
+                    "ttft_ms": outcome.ttft_ms.unwrap_or(elapsed_ms),
+                    "response_time_ms": elapsed_ms,
+                    "loop_count": turn,
+                }),
+            );
+        }
 
         let last_content = outcome.content.clone();
 

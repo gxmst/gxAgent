@@ -218,13 +218,45 @@ pub(super) async fn finish_process_reader(
     Ok(clone_captured_output(&task.output))
 }
 
+pub(super) fn should_scrub_env_var(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "OPENAI_API_KEY"
+            | "ANTHROPIC_API_KEY"
+            | "GEMINI_API_KEY"
+            | "GOOGLE_API_KEY"
+            | "DEEPSEEK_API_KEY"
+            | "TAVILY_API_KEY"
+            | "OPENROUTER_API_KEY"
+    ) {
+        return true;
+    }
+    upper.starts_with("GXAGENT_")
+        && ["KEY", "SECRET", "TOKEN", "PASSWORD"]
+            .iter()
+            .any(|needle| upper.contains(needle))
+}
+
+fn scrub_sensitive_env(command: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+        if let Some(name) = key.to_str() {
+            if should_scrub_env_var(name) {
+                command.env_remove(name);
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 fn configure_process(command: &mut Command) {
+    scrub_sensitive_env(command);
     command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
 }
 
 #[cfg(not(windows))]
 fn configure_process(command: &mut Command) {
+    scrub_sensitive_env(command);
     command.process_group(0);
 }
 

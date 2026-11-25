@@ -15,6 +15,7 @@ const DEFAULT_CHAT_SYSTEM_PROMPT: &str = "You are a helpful AI assistant. Be car
 pub(super) const CHAT_READ_ONLY_TOOLS: &[&str] = &[
     "get_current_time",
     "web_search",
+    "web_fetch",
     "read_file",
     "list_dir",
     "grep",
@@ -139,6 +140,7 @@ pub(super) fn plan_mode_allows_tool(name: &str) -> bool {
             | "read_file"
             | "list_dir"
             | "web_search"
+            | "web_fetch"
             | "grep"
             | "glob"
             | "todo_write"

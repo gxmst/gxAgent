@@ -56,5 +56,8 @@ describe("useUIStore", () => {
     useUIStore.getState().openSettings("tools");
     expect(useUIStore.getState().settingsTab).toBe("tools");
     expect(useAppStore.getState().settingsOpen).toBe(true);
+
+    useUIStore.getState().setCommandPaletteOpen(true);
+    expect(useUIStore.getState().commandPaletteOpen).toBe(true);
   });
 });

@@ -156,6 +156,11 @@ pub fn load_config() -> Result<AppConfig, String> {
             // code mode without changing any existing tool choices.
             config.tools_enabled.push("get_current_time".to_string());
         }
+        if config.tools_migration_version < 6
+            && !config.tools_enabled.iter().any(|tool| tool == "web_fetch")
+        {
+            config.tools_enabled.push("web_fetch".to_string());
+        }
         config.tools_migration_version = config::CURRENT_TOOLS_MIGRATION_VERSION;
         config_changed = true;
     }
