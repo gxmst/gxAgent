@@ -1,0 +1,193 @@
+use crate::workspace;
+use chrono::{Local, Utc};
+use serde_json::Value;
+use std::path::Path;
+
+pub(super) const FILE_SIZE_LIMIT: usize = 1024 * 1024; // 1MB
+
+const BLOCKED_PATH_PREFIXES: &[&str] = &[
+    r"\Windows\System32",
+    r"\Windows\SysWOW64",
+    r"\Windows\System32\config",
+    r"\ProgramData",
+    r"\Users\All Users",
+    r"\.ssh",
+    r"\.gnupg",
+    r"\.aws",
+    r"\.kube",
+    r"\.config\gcloud",
+    r"\AppData\Roaming\Microsoft\Credentials",
+    r"\AppData\Local\Microsoft\Credentials",
+];
+
+/// Resolve a path against the working directory.
+/// When `work_dir` is set, ALL paths (absolute or relative) must resolve within
+/// the work_dir boundary. This prevents both traversal attacks and absolute-path
+/// sandbox escapes (e.g. reading `C:\Users\...\.ssh\id_rsa`).
+pub(super) fn resolve_path(path: &str, work_dir: &str) -> Result<String, String> {
+    let resolved = workspace::resolve_within_workspace(path, work_dir)?;
+    let resolved = resolved.to_string_lossy().to_string();
+    check_blocked_path(&resolved)?;
+    Ok(resolved)
+}
+
+fn check_blocked_path(resolved: &str) -> Result<(), String> {
+    let lower = resolved.to_lowercase();
+    for prefix in BLOCKED_PATH_PREFIXES {
+        if lower.contains(&prefix.to_lowercase()) {
+            return Err(format!(
+                "Access denied: path '{}' is in a protected system directory",
+                resolved
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn run_read_file(path: &str, work_dir: &str) -> Result<String, String> {
+    let full_path = resolve_path(path, work_dir)?;
+
+    let metadata = tokio::fs::metadata(&full_path)
+        .await
+        .map_err(|e| format!("Cannot access file: {}", e))?;
+
+    if metadata.len() as usize > FILE_SIZE_LIMIT {
+        use tokio::io::AsyncReadExt;
+        let file = tokio::fs::File::open(&full_path)
+            .await
+            .map_err(|e| format!("Failed to open file: {}", e))?;
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut buffer = vec![0u8; FILE_SIZE_LIMIT];
+        let bytes_read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+        buffer.truncate(bytes_read);
+        let content = String::from_utf8(buffer)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+        Ok(format!(
+            "{}\n\n[File truncated at {}KB]",
+            &content,
+            FILE_SIZE_LIMIT / 1024
+        ))
+    } else {
+        tokio::fs::read_to_string(&full_path)
+            .await
+            .map_err(|e| format!("Failed to read file: {}", e))
+    }
+}
+
+pub(super) async fn run_write_file(
+    path: &str,
+    content: &str,
+    work_dir: &str,
+) -> Result<(), String> {
+    let full_path = resolve_path(path, work_dir)?;
+    if let Some(parent) = Path::new(&full_path).parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+    tokio::fs::write(&full_path, content)
+        .await
+        .map_err(|e| format!("Failed to write file: {}", e))
+}
+
+pub(super) async fn run_list_dir(path: &str, work_dir: &str) -> Result<String, String> {
+    let full_path = resolve_path(path, work_dir)?;
+
+    let path_obj = Path::new(&full_path);
+    if !path_obj.exists() {
+        return Err(format!("Directory not found: {}", full_path));
+    }
+
+    let mut entries = tokio::fs::read_dir(&full_path)
+        .await
+        .map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    let mut result = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            result.push(format!("{}/", name));
+        } else {
+            result.push(name);
+        }
+    }
+
+    if result.is_empty() {
+        Ok("(empty directory)".to_string())
+    } else {
+        Ok(result.join("\n"))
+    }
+}
+
+pub(super) fn run_current_time(args: &Value) -> String {
+    let timezone = args["timezone"]
+        .as_str()
+        .unwrap_or("local")
+        .trim()
+        .to_ascii_lowercase();
+    let local = Local::now();
+    let utc = Utc::now();
+    match timezone.as_str() {
+        "local" | "" => format!(
+            "Current local time: {}\nUTC: {}",
+            local.format("%Y-%m-%d %H:%M:%S %:z"),
+            utc.format("%Y-%m-%d %H:%M:%S %:z")
+        ),
+        "utc" => format!(
+            "Current UTC time: {}\nLocal time: {}",
+            utc.format("%Y-%m-%d %H:%M:%S %:z"),
+            local.format("%Y-%m-%d %H:%M:%S %:z")
+        ),
+        other => format!(
+            "Error: Unsupported timezone '{}'. Use 'local' or 'utc'.",
+            other
+        ),
+    }
+}
+
+/// Render an agent-managed todo list into a compact checklist.
+pub(super) fn run_todo_write(args: &Value) -> String {
+    let todos = match args["todos"].as_array() {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return "Error: todos must be a non-empty array of { content, status } items."
+                .to_string()
+        }
+    };
+
+    let mut out = String::from("Todo list updated:\n");
+    let mut pending = 0usize;
+    let mut in_progress = 0usize;
+    let mut completed = 0usize;
+    for item in todos {
+        let content = item["content"].as_str().unwrap_or("").trim();
+        if content.is_empty() {
+            continue;
+        }
+        let status = item["status"].as_str().unwrap_or("pending");
+        let (marker, label) = match status {
+            "completed" => {
+                completed += 1;
+                ("[x]", "")
+            }
+            "in_progress" => {
+                in_progress += 1;
+                ("[~]", " (in progress)")
+            }
+            _ => {
+                pending += 1;
+                ("[ ]", "")
+            }
+        };
+        out.push_str(&format!("{} {}{}\n", marker, content, label));
+    }
+    out.push_str(&format!(
+        "\n{} done · {} in progress · {} pending.",
+        completed, in_progress, pending
+    ));
+    out
+}

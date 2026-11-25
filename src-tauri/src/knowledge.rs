@@ -232,8 +232,10 @@ pub async fn index_knowledge_file(
         .unwrap_or("")
         .to_ascii_lowercase();
     let text = match extension.as_str() {
-        "pdf" => crate::extract_pdf_text(&path).await?,
-        "docx" | "xlsx" | "pptx" => crate::extract_office_text(&path, &extension).await?,
+        "pdf" => crate::commands::files::extract_pdf_text(&path).await?,
+        "docx" | "xlsx" | "pptx" => {
+            crate::commands::files::extract_office_text(&path, &extension).await?
+        }
         "md" | "txt" | "markdown" | "csv" | "json" | "rst" => tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| e.to_string())?,
