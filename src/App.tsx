@@ -1,8 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 // Order matters: tokens first, responsive overrides last.
-// tailwind.css sits right after tokens so its @theme can alias those vars,
-// and so its utilities stay below the legacy rules in the cascade.
 import "./styles/tokens.css";
 import "./styles/tailwind.css";
 import "./styles/enhancements.css";
@@ -16,11 +14,12 @@ import "./styles/onboarding.css";
 import "./styles/workspace.css";
 import "./styles/integrations.css";
 import "./styles/workbench.css";
-import { ROLE_PRESETS, RolePreset } from "./rolePresets";
-import { useGlobalHotkeys } from "./components/shared/CommandSuggestions";
+import "./styles/learning.css";
+import "./styles/settings.css";
+
+import { ROLE_PRESETS } from "./rolePresets";
 import { exportAllSessions, importSessions, getToolStats } from "./utils/sessionHelpers";
 import { ContextMenu, useContextMenu } from "./components/shared/ContextMenu";
-import { useSessionStorage } from "./hooks/useSessionStorage";
 import { resolveRequestConfig } from "./utils/requestConfig";
 import { compareSidebarSessions, moveSessionInSidebar } from "./utils/sessionOrder";
 import { searchSessions, type SearchSnippet } from "./utils/sessionSearch";
@@ -29,268 +28,162 @@ import { SettingsModal } from "./components/settings/SettingsModal";
 import { SessionSettingsPanel } from "./components/settings/SessionSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { WorkspacePanel } from "./components/workspace/WorkspacePanel";
-import "./styles/learning.css";
-import "./styles/settings.css";
 import { WindowTitleBar } from "./components/workspace/WindowTitleBar";
 import { EMPTY_FILE_VIEW, useWorkspaceViewStore } from "./store/workspaceViewStore";
-import { ConfirmDialog, type ConfirmationOptions } from "./components/shared/ConfirmDialog";
+import { ConfirmDialog } from "./components/shared/ConfirmDialog";
 import { t } from "./i18n";
 import { ChatMessageList } from "./components/chat/ChatMessageList";
 import { Composer } from "./components/chat/Composer";
 import { ChatHeader } from "./components/chat/ChatHeader";
 import { ToastStack } from "./components/shared/ToastStack";
 import { ToolStatsModal } from "./components/shared/ToolStatsModal";
+import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
+import { SETTINGS_TAB_ORDER, settingsTabLabel } from "./components/settings/settingsNavigation";
+
 import { useAttachments } from "./hooks/useAttachments";
 import { useWorkspaceActions } from "./hooks/useWorkspaceActions";
 import { useOnboarding } from "./hooks/useOnboarding";
 import { useConfigActions } from "./hooks/useConfigActions";
 import { useAgentRequest } from "./hooks/useAgentRequest";
 import { useSessionLifecycle } from "./hooks/useSessionLifecycle";
-import { workbenchLayout } from "./utils/workbenchLayout";
+import { useConfirmation } from "./hooks/useConfirmation";
+import { useConfigSync } from "./hooks/useConfigSync";
+import { useSessionPersistence } from "./hooks/useSessionPersistence";
+import { useWorkbenchLayout } from "./hooks/useWorkbenchLayout";
+import { useWorkbenchHotkeys } from "./hooks/useWorkbenchHotkeys";
+
 import { connectionModels } from "./utils/connections";
-import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
-
-import { SETTINGS_TAB_ORDER, settingsTabLabel, type SettingsTab } from "./components/settings/settingsNavigation";
-
-
-// ==========================================
-// Types
-// ==========================================
-
-import {
-  AppConfig,
-  ProviderPreset,
-  ModelInfo,
-  ToolAction,
-  ChatSession,
-  SessionConfig,
-} from "./types";
-
+import { ChatSession, SessionConfig, ToolAction } from "./types";
 import {
   createEmptyWorkspaceState,
-  DEFAULT_CONFIG,
   createDefaultSession,
   normalizeSessions,
-  FONT_OPTIONS,
-  normalizeTheme,
-  themeMode,
   modelCatalogForConfig,
-  type ToolStatsDialog,
 } from "./appDefaults";
-
 import { useAppStore } from "./store/appStore";
+import { useUIStore } from "./store/uiStore";
 import { runtime, uiCallbacks } from "./services/agentRuntime";
-import {
-  addLog,
-  notify,
-  refreshWorkspace,
-} from "./services/agentEvents";
-
+import { addLog, notify, refreshWorkspace } from "./services/agentEvents";
 
 function App() {
-  // ==========================================
-  // Config & State
-  // ==========================================
+  const {
+    config,
+    setConfig,
+    configReady,
+    configSaveStatus,
+    setConfigSaveStatus,
+    lastSavedConfigRef,
+    presets,
+    models,
+    setModels,
+    modelCatalogSourceKey,
+    setModelCatalogSourceKey,
+    setModelsLoading,
+  } = useConfigSync();
 
-  const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
-  const [configReady, setConfigReady] = useState(false);
-  const [configSaveStatus, setConfigSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const lastSavedConfigRef = useRef("");
+  const lang = config.language || "zh";
+  const sessions = useAppStore((s) => s.sessions);
+  const setSessions = useAppStore((s) => s.setSessions);
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setCurrentSessionId = useAppStore((s) => s.setCurrentSessionId);
-
-  const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>(() => {
-    try {
-      const saved = localStorage.getItem("gx_drafts");
-      if (saved) return JSON.parse(saved);
-      const legacy = localStorage.getItem("gx_draft");
-      if (legacy) return { [localStorage.getItem("gx_current_session") || "default"]: legacy };
-    } catch { /* ignore corrupt drafts */ }
-    return {};
-  });
-  const prompt = draftsBySession[currentSessionId] || "";
-  const setPrompt = useCallback((next: string | ((previous: string) => string)) => {
-    setDraftsBySession((previous) => {
-      const current = previous[currentSessionId] || "";
-      const value = typeof next === "function" ? next(current) : next;
-      return { ...previous, [currentSessionId]: value };
-    });
-  }, [currentSessionId]);
-
-  // Global hotkeys
-  useGlobalHotkeys(() => createNewSession());
-
-  const { menu, handleContextMenu, closeMenu } = useContextMenu();
-
-  // Auto-save drafts per session — debounced so each keystroke does not hit localStorage.
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem("gx_drafts", JSON.stringify(draftsBySession));
-        localStorage.removeItem("gx_draft");
-      } catch { /* ignore */ }
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [draftsBySession]);
-
-  const [presets, setPresets] = useState<ProviderPreset[]>([]);
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [modelCatalogSourceKey, setModelCatalogSourceKey] = useState<string | null>(null);
-  const [, setModelsLoading] = useState(false);
-  const [customGlobalContextBudget, setCustomGlobalContextBudget] = useState(false);
-  const [customSessionContextBudget, setCustomSessionContextBudget] = useState<Record<string, boolean>>({});
-  const mcpStatusByName = useAppStore((s) => s.mcpStatusByName);
-
   const activeRunSessionId = useAppStore((s) => s.activeRunSessionId);
   const preparingRequestSessionId = useAppStore((s) => s.preparingRequestSessionId);
-  const runtimeBySession = useAppStore((s) => s.runtimeBySession);
-  const hasActiveRequest = activeRunSessionId !== null;
-  const hasPendingRequest = hasActiveRequest || preparingRequestSessionId !== null;
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
+  const mcpStatusByName = useAppStore((s) => s.mcpStatusByName);
+  const runtimeBySession = useAppStore((s) => s.runtimeBySession);
+  const workspaceBySession = useAppStore((s) => s.workspaceBySession);
   const setPreviewBySession = useAppStore((s) => s.setPreviewBySession);
   const setModifiedFilesBySession = useAppStore((s) => s.setModifiedFilesBySession);
-  const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [navigationOpen, setNavigationOpen] = useState(() => window.innerWidth > 800);
-  const [mobilePane, setMobilePane] = useState<"conversation" | "review">("conversation");
-  const [selectedRunBySession, setSelectedRunBySession] = useState<Record<string, string | undefined>>({});
-  const showRun = useCallback((messageId?: string) => {
-    useWorkspaceViewStore.getState().setTab(currentSessionId, "activity");
-    setSelectedRunBySession(previous => ({ ...previous, [currentSessionId]: messageId }));
-    setRightPanelOpen(true);
-    setMobilePane("review");
-  }, [currentSessionId]);
-  const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
-  const [customPresets, setCustomPresets] = useState<RolePreset[]>(() => {
-    try {
-      const saved = localStorage.getItem("gx_custom_presets");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch { /* ignore */ }
-    return [];
-  });
-  const [sessionSearch, setSessionSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const workspaceBySession = useAppStore((s) => s.workspaceBySession);
   const setTerminalLogsBySession = useAppStore((s) => s.setTerminalLogsBySession);
-  const [confirmation, setConfirmation] = useState<ConfirmationOptions | null>(null);
-  const confirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
-  const confirmationReturnFocusRef = useRef<HTMLElement | null>(null);
-  const settleConfirmation = useCallback((confirmed: boolean) => {
-    confirmationResolverRef.current?.(confirmed);
-    confirmationResolverRef.current = null;
-    setConfirmation(null);
-    const returnFocus = confirmationReturnFocusRef.current;
-    confirmationReturnFocusRef.current = null;
-    requestAnimationFrame(() => returnFocus?.focus());
-  }, []);
-  const requestConfirmation = useCallback((options: ConfirmationOptions) => {
-    confirmationResolverRef.current?.(false);
-    confirmationReturnFocusRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    setConfirmation(options);
-    return new Promise<boolean>((resolve) => {
-      confirmationResolverRef.current = resolve;
-    });
-  }, []);
+
+  const hasActiveRequest = activeRunSessionId !== null;
+  const hasPendingRequest = hasActiveRequest || preparingRequestSessionId !== null;
+
+  const navigationOpen = useUIStore((s) => s.navigationOpen);
+  const setNavigationOpen = useUIStore((s) => s.setNavigationOpen);
+  const rightPanelOpen = useUIStore((s) => s.rightPanelOpen);
+  const setRightPanelOpen = useUIStore((s) => s.setRightPanelOpen);
+  const mobilePane = useUIStore((s) => s.mobilePane);
+  const setMobilePane = useUIStore((s) => s.setMobilePane);
+  const sidebarNav = useUIStore((s) => s.sidebarNav);
+  const setSidebarNav = useUIStore((s) => s.setSidebarNav);
+  const settingsTab = useUIStore((s) => s.settingsTab);
+  const setSettingsTab = useUIStore((s) => s.setSettingsTab);
+  const sessionSettingsOpen = useUIStore((s) => s.sessionSettingsOpen);
+  const setSessionSettingsOpen = useUIStore((s) => s.setSessionSettingsOpen);
+  const toolStatsDialog = useUIStore((s) => s.toolStatsDialog);
+  const setToolStatsDialog = useUIStore((s) => s.setToolStatsDialog);
+  const selectedRunBySession = useUIStore((s) => s.selectedRunBySession);
+  const setExpandedActions = useUIStore((s) => s.setExpandedActions);
+  const setEditingMessageIdxBySession = useUIStore((s) => s.setEditingMessageIdxBySession);
+  const editTextBySession = useUIStore((s) => s.editTextBySession);
+  const setEditTextBySession = useUIStore((s) => s.setEditTextBySession);
+  const draftsBySession = useUIStore((s) => s.draftsBySession);
+  const setDraftsBySession = useUIStore((s) => s.setDraftsBySession);
+  const setPromptForSession = useUIStore((s) => s.setPromptForSession);
+  const customPresets = useUIStore((s) => s.customPresets);
+  const setCustomPresets = useUIStore((s) => s.setCustomPresets);
+
+  const prompt = draftsBySession[currentSessionId] || "";
+  const setPrompt = useCallback(
+    (next: string | ((previous: string) => string)) => setPromptForSession(currentSessionId, next),
+    [currentSessionId, setPromptForSession],
+  );
+  const editText = editTextBySession[currentSessionId] || "";
+  const setEditingMessageIdx = useCallback(
+    (value: number | null) => setEditingMessageIdxBySession((previous) => ({ ...previous, [currentSessionId]: value })),
+    [currentSessionId, setEditingMessageIdxBySession],
+  );
+
+  const { menu, handleContextMenu, closeMenu } = useContextMenu();
+  const { confirmation, requestConfirmation, settleConfirmation } = useConfirmation();
   const {
     saveSession,
     saveSessions,
-    loadSessions,
-    deleteSession: deleteStoredSession,
-  } = useSessionStorage();
-
-  const sessions = useAppStore((s) => s.sessions);
-  const setSessions = useAppStore((s) => s.setSessions);
-  const [sessionStorageReady, setSessionStorageReady] = useState(false);
-  const [sessionLoadAttempt, setSessionLoadAttempt] = useState(0);
+    deleteStoredSession,
+    sessionStorageReady,
+    sessionSaveStatus,
+    setSessionLoadAttempt,
+    sessionPersistenceEpochRef,
+    lastPersistedSessionsRef,
+    sessionObjCacheRef,
+    sessionJsonCacheRef,
+    persistLatestRef,
+  } = useSessionPersistence(lang, hasActiveRequest);
   const sessionMutationLocked = !sessionStorageReady || hasPendingRequest;
-  const [sessionSaveStatus, setSessionSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const [expandedActions, setExpandedActions] = useState<Record<string, boolean>>({});
-  const pendingApprovalsBySession = useAppStore((s) => s.pendingApprovalsBySession);
-  const [sessionSettingsOpen, setSessionSettingsOpen] = useState(false);
-  const [toolStatsDialog, setToolStatsDialog] = useState<ToolStatsDialog | null>(null);
-  const [sidebarNav, setSidebarNav] = useState<"chat" | "code">("chat");
-  const [editingMessageIdxBySession, setEditingMessageIdxBySession] = useState<Record<string, number | null>>({});
-  const editingMessageIdx = editingMessageIdxBySession[currentSessionId] ?? null;
-  const setEditingMessageIdx = useCallback((value: number | null) => {
-    setEditingMessageIdxBySession((previous) => ({ ...previous, [currentSessionId]: value }));
-  }, [currentSessionId]);
-  const [editTextBySession, setEditTextBySession] = useState<Record<string, string>>({});
-  const editText = editTextBySession[currentSessionId] || "";
-  const setEditText = useCallback((value: string) => {
-    setEditTextBySession((previous) => ({ ...previous, [currentSessionId]: value }));
-  }, [currentSessionId]);
 
-  // Resize state
-  const [sidebarWidth, setSidebarWidth] = useState(() => {
-    try { const v = Number(localStorage.getItem("gx_sidebar_width")); return v > 0 && Number.isFinite(v) ? v : 280; } catch { return 280; }
-  });
-  const [rightPanelWidth, setRightPanelWidth] = useState(() => {
-    try { const v = Number(localStorage.getItem("gx_right_panel_width")); return v > 0 && Number.isFinite(v) ? Math.max(320, v) : 480; } catch { return 480; }
-  });
-  const [draggingSidebar, setDraggingSidebar] = useState(false);
-  const [draggingRight, setDraggingRight] = useState(false);
-  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
-  const layout = workbenchLayout(viewportWidth, sidebarWidth, rightPanelWidth, navigationOpen, rightPanelOpen);
+  const {
+    layout,
+    draggingSidebar,
+    draggingRight,
+    handleSidebarDrag,
+    handleRightDrag,
+    nudgeSidebarWidth,
+    nudgeRightPanelWidth,
+  } = useWorkbenchLayout();
   const { maxSidebarWidth, maxReviewWidth } = layout;
-  const restoreNavigationRef = useRef(false);
-  useEffect(() => {
-    if (layout.navigationOverlay) {
-      restoreNavigationRef.current = navigationOpen;
-      setNavigationOpen(false);
-    } else if (restoreNavigationRef.current) {
-      restoreNavigationRef.current = false;
-      setNavigationOpen(true);
-    }
-    // Capture visibility only when entering the drawer layout, so manual opens stay open.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout.navigationOverlay]);
+
+  const [customGlobalContextBudget, setCustomGlobalContextBudget] = useState(false);
+  const [customSessionContextBudget, setCustomSessionContextBudget] = useState<Record<string, boolean>>({});
+  const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
+  const [sessionSearch, setSessionSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
   const historyListRef = useRef<HTMLDivElement>(null);
   const settingsBodyRef = useRef<HTMLDivElement>(null);
   const sessionSettingsPanelRef = useRef<HTMLDivElement>(null);
   const sessionSettingsToggleRef = useRef<HTMLButtonElement>(null);
-  const sidebarNavRef = useRef(sidebarNav);
   const requestStartingRef = useRef(false);
-  const switchSessionModeRef = useRef<(mode: SessionConfig["mode"]) => void>(() => {});
-  // Same latest-value pattern as switchSessionModeRef: the window keydown
-  // effect's dependency array only tracks modal state, so calling
-  // createNewSession directly there captures a stale sidebarNav/session list.
-  const createNewSessionRef = useRef<() => void>(() => {});
-  const lastPersistedSessionsRef = useRef<Record<string, string>>({});
-  // Incremental persistence caches: last-seen object identity and its JSON.
-  // Identity mismatch marks a session dirty; only dirty sessions re-serialize.
-  const sessionObjCacheRef = useRef<Record<string, ChatSession>>({});
-  const sessionJsonCacheRef = useRef<Record<string, string>>({});
-  // Set when the localStorage mirror write was skipped mid-stream, so the
-  // next idle persist refreshes it even if nothing else changed.
-  const mirrorPendingRef = useRef(false);
-  const persistLatestRef = useRef<((throwOnError?: boolean) => Promise<void>) | null>(null);
-  useEffect(() => {
-    const repaired = () => setSessionLoadAttempt(attempt => attempt + 1);
-    window.addEventListener("gx-session-storage-repaired", repaired);
-    return () => window.removeEventListener("gx-session-storage-repaired", repaired);
-  }, []);
-  const sessionPersistenceEpochRef = useRef(0);
+
   const closeSessionSettings = useCallback((restoreFocus = false) => {
     setSessionSettingsOpen(false);
     if (restoreFocus) {
       requestAnimationFrame(() => sessionSettingsToggleRef.current?.focus());
     }
-  }, []);
+  }, [setSessionSettingsOpen]);
 
-  useEffect(() => {
-    sidebarNavRef.current = sidebarNav;
-  }, [sidebarNav]);
-
-  // Keep the module-level runtime mirror in sync with the reactive state so
-  // the once-registered event handlers always see current values.
   useEffect(() => {
     runtime.isStreaming = hasActiveRequest;
   }, [hasActiveRequest]);
@@ -303,25 +196,20 @@ function App() {
 
   const currentSession = useMemo(
     () => sessions.find((s) => s.id === currentSessionId) || sessions[0] || createDefaultSession(),
-    [sessions, currentSessionId]
+    [sessions, currentSessionId],
   );
   const currentMode = currentSession.sessionConfig.mode || "chat";
 
-  // Sidebar list state. Without a query: the normal list plus the collapsed
-  // archived section. With a query: full-text matches across ALL messages of
-  // every session — archived matches surface directly in the results (tagged)
-  // and the separate archived section disappears for the duration.
   const { visibleSessions, archivedSessions, searchSnippets } = useMemo(() => {
     const query = debouncedSearch.trim();
-    const modeSessions = sessions;
     if (!query) {
       return {
-        visibleSessions: modeSessions.filter((session) => !session.archived).sort(compareSidebarSessions),
-        archivedSessions: modeSessions.filter((session) => session.archived).sort(compareSidebarSessions),
+        visibleSessions: sessions.filter((session) => !session.archived).sort(compareSidebarSessions),
+        archivedSessions: sessions.filter((session) => session.archived).sort(compareSidebarSessions),
         searchSnippets: {} as Record<string, SearchSnippet | null>,
       };
     }
-    const matches = searchSessions(modeSessions, query);
+    const matches = searchSessions(sessions, query);
     return {
       visibleSessions: matches.map((match) => match.session).sort(compareSidebarSessions),
       archivedSessions: [] as ChatSession[],
@@ -339,7 +227,7 @@ function App() {
       .find((item) => item.dataset.sessionId === currentSessionId);
     activeItem?.scrollIntoView({ block: "nearest" });
   }, [currentSessionId, sidebarNav, visibleSessions.length]);
-  const lang = config.language || "zh";
+
   const {
     attachments,
     setAttachments,
@@ -353,6 +241,7 @@ function App() {
     addFilesAsAttachments,
     pickAndParseAttachments,
   } = useAttachments({ sessionStorageReady, lang });
+
   const searchMode = currentSession.sessionConfig.searchMode || "auto";
   const webSearchAvailable = config.tools_enabled.includes("web_search");
   const effectiveSearchMode = webSearchAvailable ? searchMode : "off";
@@ -360,135 +249,32 @@ function App() {
     () => resolveRequestConfig(config, currentSession.sessionConfig, effectiveSearchMode),
     [config, currentSession.sessionConfig, effectiveSearchMode],
   );
-  const modelsForCurrentConfig = connectionModels(resolvedCurrentConfig.model, config.profiles[resolvedCurrentConfig.active_profile || ""]?.models, modelCatalogForConfig(models, modelCatalogSourceKey, resolvedCurrentConfig));
+  const modelsForCurrentConfig = connectionModels(
+    resolvedCurrentConfig.model,
+    config.profiles[resolvedCurrentConfig.active_profile || ""]?.models,
+    modelCatalogForConfig(models, modelCatalogSourceKey, resolvedCurrentConfig),
+  );
   const effectiveWorkDir = resolvedCurrentConfig.default_work_dir;
   const currentWorkspace = workspaceBySession[currentSessionId] || createEmptyWorkspaceState();
 
-  useEffect(() => {
-    runtime.effectiveWorkDir = effectiveWorkDir;
-  }, [effectiveWorkDir]);
-
-  useEffect(() => {
-    runtime.lang = lang;
-  }, [lang]);
-
-  // The listeners' focus-composer callback needs the textarea ref, which only
-  // exists inside React. Register it once.
+  useEffect(() => { runtime.effectiveWorkDir = effectiveWorkDir; }, [effectiveWorkDir]);
+  useEffect(() => { runtime.lang = lang; }, [lang]);
   useEffect(() => {
     uiCallbacks.focusComposer = () => chatTextareaRef.current?.focus();
-    return () => {
-      uiCallbacks.focusComposer = () => {};
-    };
+    return () => { uiCallbacks.focusComposer = () => {}; };
   }, []);
 
   useEffect(() => {
     setRightPanelOpen(false);
     setMobilePane("conversation");
     setSidebarNav(currentMode);
-  }, [currentMode]);
+  }, [currentMode, setMobilePane, setRightPanelOpen, setSidebarNav]);
 
   useEffect(() => {
     setMobilePane("conversation");
     if (window.innerWidth <= 800) setNavigationOpen(false);
     closeSessionSettings();
-  }, [currentSessionId, closeSessionSettings]);
-
-  useEffect(() => {
-    const query = window.matchMedia("(min-width: 801px)");
-    const onChange = () => setNavigationOpen(query.matches);
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
-  }, []);
-
-  // ==========================================
-  // Theme
-  // ==========================================
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
-      if (e.key === "Escape" && confirmation) {
-        e.preventDefault();
-        settleConfirmation(false);
-        return;
-      }
-      const ctrl = e.ctrlKey || e.metaKey;
-      if (ctrl && e.shiftKey && (e.key === "N" || e.key === "n")) {
-        e.preventDefault();
-        switchSessionModeRef.current(sidebarNavRef.current === "chat" ? "code" : "chat");
-        return;
-      }
-      if (ctrl && !e.shiftKey && e.key === "n") {
-        e.preventDefault();
-        createNewSessionRef.current();
-      }
-      if (ctrl && e.key === ",") {
-        e.preventDefault();
-        setSettingsOpen(true);
-      }
-      if (e.key === "Escape") {
-        if (contextMenu) { setContextMenu(null); return; }
-        if (toolStatsDialog) { setToolStatsDialog(null); return; }
-        if (settingsOpen) return; // The dialog owns Escape, including draft/save guards.
-        if (sessionSettingsOpen) { closeSessionSettings(true); return; }
-        if (navigationOpen && layout.navigationOverlay) { setNavigationOpen(false); return; }
-        if (rightPanelOpen && window.matchMedia("(max-width: 980px)").matches) {
-          setRightPanelOpen(false);
-          return;
-        }
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [confirmation, contextMenu, rightPanelOpen, sessionSettingsOpen, settingsOpen, settleConfirmation, toolStatsDialog, navigationOpen, layout.navigationOverlay]);
-
-  useEffect(() => () => {
-    confirmationResolverRef.current?.(false);
-    confirmationResolverRef.current = null;
-  }, []);
-
-  useEffect(() => {
-    const normalized = normalizeTheme(config.theme || "light");
-    const apply = () => {
-      const mode = themeMode(normalized);
-      document.documentElement.setAttribute("data-theme", mode);
-      // data-mode drives the light/dark component tweaks so explicit and system
-      // themes resolve through a single pair of modes.
-      document.documentElement.setAttribute("data-mode", mode);
-      document.documentElement.style.backgroundColor = mode === "dark" ? "#111215" : "#f6f7f9";
-      // Mirror for the pre-paint inline script in index.html: the real config
-      // lives in Rust and loads asynchronously, so without this mirror dark
-      // themes flash a white frame on every cold start.
-      try {
-        localStorage.setItem("gx_theme", normalized);
-        localStorage.setItem("gx_theme_mode", mode);
-      } catch { /* ignore */ }
-    };
-    apply();
-    if (normalized !== "system" || typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia("(prefers-color-scheme: dark)");
-    query.addEventListener("change", apply);
-    return () => query.removeEventListener("change", apply);
-  }, [config.theme]);
-
-  useEffect(() => {
-    document.documentElement.lang = config.language || "zh";
-  }, [config.language]);
-
-  useEffect(() => {
-    document.documentElement.style.setProperty("--dynamic-font-size", `${config.font_size || 14}px`);
-  }, [config.font_size]);
-
-  useEffect(() => {
-    const selected = FONT_OPTIONS.find((font) => font.value === (config.font_family || "system")) || FONT_OPTIONS[0];
-    document.documentElement.style.setProperty("--app-font-family", selected.css);
-  }, [config.font_family]);
-
-
-  // ==========================================
-  // Init logs with language
-  // ==========================================
+  }, [currentSessionId, closeSessionSettings, setMobilePane, setNavigationOpen]);
 
   useEffect(() => {
     const sessionId = useAppStore.getState().currentSessionId;
@@ -499,273 +285,8 @@ function App() {
         { text: t("log.backend", lang), type: "info" },
       ],
     }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // ==========================================
-  // Resize handlers
-  // ==========================================
-
-  const handleSidebarDrag = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setDraggingSidebar(true);
-    const startX = e.clientX;
-    const startWidth = layout.sidebarWidth;
-    let latestWidth = startWidth;
-
-    const onMouseMove = (ev: MouseEvent) => {
-      const delta = ev.clientX - startX;
-      const newWidth = Math.max(180, Math.min(maxSidebarWidth, startWidth + delta));
-      latestWidth = newWidth;
-      setSidebarWidth(newWidth);
-    };
-    const onMouseUp = () => {
-      setDraggingSidebar(false);
-      try { localStorage.setItem("gx_sidebar_width", String(latestWidth)); } catch { /* ignore */ }
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, [layout.sidebarWidth, maxSidebarWidth]);
-
-  const handleRightDrag = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setDraggingRight(true);
-    const startX = e.clientX;
-    const startWidth = layout.reviewWidth;
-    let latestWidth = startWidth;
-
-    const onMouseMove = (ev: MouseEvent) => {
-      const delta = startX - ev.clientX;
-      const newWidth = Math.max(320, Math.min(maxReviewWidth, startWidth + delta));
-      latestWidth = newWidth;
-      setRightPanelWidth(newWidth);
-    };
-    const onMouseUp = () => {
-      setDraggingRight(false);
-      try { localStorage.setItem("gx_right_panel_width", String(latestWidth)); } catch { /* ignore */ }
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, [layout.reviewWidth, maxReviewWidth]);
-
-  // Fit the viewport without overwriting the user's preferred panel widths.
-  useEffect(() => {
-    const resize = () => setViewportWidth(window.innerWidth);
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
-  }, []);
-
-  // ==========================================
-  // Init: Load config & presets
-  // ==========================================
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const [loadedConfig, loadedPresets] = await Promise.all([
-          invoke<AppConfig>("load_config"),
-          invoke<ProviderPreset[]>("get_provider_presets"),
-        ]);
-        const nextConfig = { ...DEFAULT_CONFIG, ...loadedConfig };
-        lastSavedConfigRef.current = JSON.stringify(nextConfig);
-        setConfig(nextConfig);
-        setPresets(loadedPresets);
-      } catch (e) {
-        console.error("Failed to load config:", e);
-        try {
-          const loadedPresets = await invoke<ProviderPreset[]>("get_provider_presets");
-          setPresets(loadedPresets);
-        } catch { /* ignore */ }
-      } finally {
-        setConfigReady(true);
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    if (!configReady) return;
-    const serialized = JSON.stringify(config);
-    if (serialized === lastSavedConfigRef.current) return;
-
-    setConfigSaveStatus("saving");
-    const timer = window.setTimeout(async () => {
-      try {
-        await invoke("save_config", { config });
-        lastSavedConfigRef.current = serialized;
-        setConfigSaveStatus("saved");
-      } catch (error) {
-        console.error("Failed to auto-save config:", error);
-        setConfigSaveStatus("error");
-      }
-    }, 650);
-    return () => window.clearTimeout(timer);
-  }, [config, configReady]);
-
-  // Populate the model picker on startup so the user does not have to open
-  // Settings and press the refresh button first.
-  useEffect(() => {
-    if (!configReady || !config.base_url) return;
-    void fetchModelList();
-  }, [configReady]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      const loadedSessions = await loadSessions();
-      if (cancelled) return;
-      if (loadedSessions === null) {
-        setSessionStorageReady(false);
-        setSessionSaveStatus("error");
-        notify(lang === "zh" ? "会话读取失败，已暂停保存。" : "Could not load sessions. Saving is paused.", "error", {
-          actionLabel: lang === "zh" ? "重试" : "Retry",
-          onAction: () => setSessionLoadAttempt((attempt) => attempt + 1),
-          duration: 0,
-        });
-        return;
-      }
-      const storedSessions = normalizeSessions(loadedSessions);
-      const rawById = Object.fromEntries(loadedSessions
-        .filter((session): session is ChatSession => Boolean(session && typeof session === "object" && typeof session.id === "string"))
-        .map((session) => [session.id, JSON.stringify(session)]));
-      lastPersistedSessionsRef.current = rawById;
-      sessionJsonCacheRef.current = Object.fromEntries(
-        storedSessions.map((session) => [session.id, JSON.stringify(session)]),
-      );
-      // Keep migrated sessions dirty so backfilled stable message ids and
-      // token-budget conversions are written to the authoritative backend.
-      sessionObjCacheRef.current = Object.fromEntries(storedSessions
-        .filter((session) => rawById[session.id] === JSON.stringify(session))
-        .map((session) => [session.id, session]));
-      setSessions(storedSessions);
-      setCurrentSessionId((prev) =>
-        storedSessions.some((session) => session.id === prev) ? prev : storedSessions[0].id
-      );
-      try {
-        localStorage.setItem("gx_sessions", JSON.stringify(storedSessions));
-      } catch { /* backend remains authoritative */ }
-
-      setSessionStorageReady(true);
-      setSessionSaveStatus("idle");
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [loadSessions, sessionLoadAttempt]);
-
-  useEffect(() => {
-    if (!sessionStorageReady) return;
-
-    let cancelled = false;
-    const persistenceEpoch = sessionPersistenceEpochRef.current;
-    const persist = async (throwOnError = false) => {
-      if (persistenceEpoch !== sessionPersistenceEpochRef.current) return;
-
-      // Incremental change detection: session objects are immutable-per-change
-      // (setSessions only replaces the sessions it touches), so an identity
-      // check finds the dirty ones for free. Only those get re-serialized —
-      // stringifying the whole store on every change was a main-thread stall
-      // that grew linearly with total history size.
-      const dirty = sessions.filter((session) => sessionObjCacheRef.current[session.id] !== session);
-      if (dirty.length === 0 && !mirrorPendingRef.current
-        && sessions.every(session => lastPersistedSessionsRef.current[session.id] === sessionJsonCacheRef.current[session.id])) return;
-      for (const session of dirty) {
-        sessionJsonCacheRef.current[session.id] = JSON.stringify(session);
-        sessionObjCacheRef.current[session.id] = session;
-      }
-
-      // localStorage mirror (startup cache only; the backend is authoritative).
-      // Assembled from the per-session cache and skipped entirely while a
-      // request is streaming — the post-stream persist writes it once.
-      if (hasActiveRequest) {
-        if (dirty.length > 0) mirrorPendingRef.current = true;
-      } else {
-        mirrorPendingRef.current = false;
-        try {
-          const parts = sessions.map((session) =>
-            sessionJsonCacheRef.current[session.id]
-            ?? (sessionJsonCacheRef.current[session.id] = JSON.stringify(session)));
-          const data = `[${parts.join(",")}]`;
-          if (data.length > 4 * 1024 * 1024) {
-            const trimmed = sessions.map((s: ChatSession) => ({
-              ...s,
-              messages: s.messages.slice(-20).map((m) => (
-                m.attachments
-                  ? {
-                      ...m,
-                      attachments: m.attachments.map((att) =>
-                        att.type === "image" ? { ...att, data: "" } : att
-                      ),
-                    }
-                  : m
-              )),
-            }));
-            localStorage.setItem("gx_sessions", JSON.stringify(trimmed));
-          } else {
-            localStorage.setItem("gx_sessions", data);
-          }
-        } catch {
-          try { localStorage.removeItem("gx_sessions"); } catch { /* quota exceeded, nothing to do */ }
-        }
-      }
-
-      // Scan all sessions (cached strings, so this is cheap) rather than just
-      // the dirty ones, so a previously failed save retries on the next
-      // persist instead of waiting for that session to change again.
-      const changed = sessions
-        .map((session) => ({
-          session,
-          serialized: sessionJsonCacheRef.current[session.id]
-            ?? (sessionJsonCacheRef.current[session.id] = JSON.stringify(session)),
-        }))
-        .filter(({ session, serialized }) => lastPersistedSessionsRef.current[session.id] !== serialized);
-      if (changed.length === 0) return;
-
-      setSessionSaveStatus("saving");
-      try {
-        await Promise.all(changed.map(({ session }) => saveSession(session)));
-        if (cancelled || persistenceEpoch !== sessionPersistenceEpochRef.current) return;
-        for (const { session, serialized } of changed) {
-          lastPersistedSessionsRef.current[session.id] = serialized;
-        }
-        setSessionSaveStatus("saved");
-      } catch (error) {
-        if (!cancelled) setSessionSaveStatus("error");
-        console.error("Failed to persist changed sessions:", error);
-        if (throwOnError) throw error;
-      }
-    };
-
-    persistLatestRef.current = persist;
-    const delay = hasActiveRequest ? 1500 : 400;
-    const timer = setTimeout(() => { void persist(); }, delay);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [saveSession, sessionStorageReady, sessions, hasActiveRequest]);
-
-  useEffect(() => {
-    if (!sessionStorageReady) return;
-    const timer = window.setInterval(() => { void persistLatestRef.current?.(); }, 5000);
-    return () => { window.clearInterval(timer); persistLatestRef.current = null; };
-  }, [sessionStorageReady]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem("gx_current_session", currentSessionId);
-    } catch { /* ignore */ }
-  }, [currentSessionId]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem("gx_custom_presets", JSON.stringify(customPresets));
-    } catch { /* ignore */ }
-  }, [customPresets]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(sessionSearch), 200);
@@ -774,16 +295,10 @@ function App() {
 
   const ALL_PRESETS = useMemo(() => [...ROLE_PRESETS, ...customPresets], [customPresets]);
   const activeRolePresetFingerprint = useMemo(
-    () => sessions
-      .map((session) => `${session.id}:${session.sessionConfig.activeRolePresetId || ""}`)
-      .join("\u0000"),
+    () => sessions.map((session) => `${session.id}:${session.sessionConfig.activeRolePresetId || ""}`).join("\u0000"),
     [sessions],
   );
 
-  // A preset id is the source of truth while a role is active. Keep the
-  // session snapshot current after loading/importing sessions or editing a
-  // custom preset, and remove stale ids instead of showing a false "active"
-  // state in the UI.
   useEffect(() => {
     setSessions((previous) => {
       let changed = false;
@@ -796,20 +311,12 @@ function App() {
           changed = true;
           return {
             ...session,
-            sessionConfig: {
-              ...session.sessionConfig,
-              activeRolePresetId: null,
-            },
+            sessionConfig: { ...session.sessionConfig, activeRolePresetId: null },
           };
         }
-
-        if (
-          session.sessionConfig.systemPrompt === preset.prompt
-          && session.sessionConfig.temperature === preset.temperature
-        ) {
+        if (session.sessionConfig.systemPrompt === preset.prompt && session.sessionConfig.temperature === preset.temperature) {
           return session;
         }
-
         changed = true;
         return {
           ...session,
@@ -822,7 +329,7 @@ function App() {
       });
       return changed ? next : previous;
     });
-  }, [ALL_PRESETS, activeRolePresetFingerprint]);
+  }, [ALL_PRESETS, activeRolePresetFingerprint, setSessions]);
 
   useEffect(() => {
     const previousWorkspace = workspaceBySession[currentSessionId];
@@ -836,11 +343,8 @@ function App() {
       views.setFile(currentSessionId, { ...EMPTY_FILE_VIEW, workDir: effectiveWorkDir });
     }
     if (currentMode === "code" || rightPanelOpen) void refreshWorkspace(currentSessionId, effectiveWorkDir);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionId, effectiveWorkDir]);
-
-  // ==========================================
-  // Helpers
-  // ==========================================
 
   const workspaceActions = useWorkspaceActions({
     lang,
@@ -872,6 +376,12 @@ function App() {
     setConfigSaveStatus,
     lastSavedConfigRef,
   });
+
+  useEffect(() => {
+    if (!configReady || !config.base_url) return;
+    void fetchModelList();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configReady]);
 
   const {
     formatTokenCount,
@@ -931,24 +441,22 @@ function App() {
     setEditTextBySession,
     setExpandedActions,
   });
-  createNewSessionRef.current = createNewSession;
-  switchSessionModeRef.current = switchSessionMode;
 
-  const toggleActionExpanded = (id: string) => {
-    setExpandedActions((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
+  useWorkbenchHotkeys({
+    confirmation,
+    settleConfirmation,
+    contextMenu,
+    closeSessionContextMenu: () => setContextMenu(null),
+    navigationOverlay: layout.navigationOverlay,
+    closeSessionSettings,
+    createNewSession,
+    switchSessionMode,
+  });
 
-  /** The one canonical way to write session-level overrides. Every quick
-   *  control and settings field goes through here so "override vs inherit"
-   *  semantics stay identical everywhere; null always means inherit. */
   const patchSessionConfig = (patch: Partial<SessionConfig>) => {
     setSessions((previous) => previous.map((session) => (
       session.id === currentSessionId
-        ? {
-            ...session,
-            sessionConfig: { ...session.sessionConfig, ...patch },
-            updatedAt: Date.now(),
-          }
+        ? { ...session, sessionConfig: { ...session.sessionConfig, ...patch }, updatedAt: Date.now() }
         : session
     )));
   };
@@ -976,6 +484,7 @@ function App() {
     patchSessionConfig,
     setSidebarNav,
   });
+
   const modelsForOnboarding = sortModels(modelCatalogForConfig(models, modelCatalogSourceKey, {
     wire_format: onboardingValues.wireFormat,
     base_url: onboardingValues.baseUrl,
@@ -994,10 +503,6 @@ function App() {
     }
   };
 
-  // ==========================================
-  // Render
-  // ==========================================
-
   const handleExportSessions = () => {
     exportAllSessions(sessions);
     notify(t("session.exportedAll", lang), "success");
@@ -1010,20 +515,19 @@ function App() {
       closeMenu();
       return;
     }
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
     input.onchange = async (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
-      if (file) {
-        try {
-          const imported = await importSessions(file);
-          const normalized = normalizeSessions(imported);
-          await replaceAllSessions(normalized, currentSessionId);
-          notify(t("session.importedCount", lang, { count: String(normalized.length) }), "success");
-        } catch (err) {
-          notify(t("session.importFailed", lang), "error");
-        }
+      if (!file) return;
+      try {
+        const imported = await importSessions(file);
+        const normalized = normalizeSessions(imported);
+        await replaceAllSessions(normalized, currentSessionId);
+        notify(t("session.importedCount", lang, { count: String(normalized.length) }), "success");
+      } catch {
+        notify(t("session.importFailed", lang), "error");
       }
     };
     input.click();
@@ -1055,10 +559,7 @@ function App() {
   };
 
   const handleShowStats = () => {
-    setToolStatsDialog({
-      title: t("stats.allSessions", lang),
-      stats: getToolStats(sessions),
-    });
+    setToolStatsDialog({ title: t("stats.allSessions", lang), stats: getToolStats(sessions) });
     closeMenu();
   };
 
@@ -1084,12 +585,14 @@ function App() {
   };
 
   return (
-    <div className={`app-container workbench mode-${currentMode} ${navigationOpen ? "navigation-open" : "navigation-closed"} ${layout.navigationOverlay ? "navigation-overlay" : "navigation-inline"} mobile-pane-${mobilePane} ${rightPanelOpen ? "review-open" : "review-closed"}`} onContextMenu={(e) => {
-      // 只在空白区域显示全局菜单
-      if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains('chat-panel') || (e.target as HTMLElement).classList.contains('chat-messages')) {
-        handleContextMenu(e);
-      }
-    }}>
+    <div
+      className={`app-container workbench mode-${currentMode} ${navigationOpen ? "navigation-open" : "navigation-closed"} ${layout.navigationOverlay ? "navigation-overlay" : "navigation-inline"} mobile-pane-${mobilePane} ${rightPanelOpen ? "review-open" : "review-closed"}`}
+      onContextMenu={(e) => {
+        if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains("chat-panel") || (e.target as HTMLElement).classList.contains("chat-messages")) {
+          handleContextMenu(e);
+        }
+      }}
+    >
       <ToastStack />
       <WindowTitleBar
         lang={lang}
@@ -1099,215 +602,196 @@ function App() {
         onToggleNavigation={() => setNavigationOpen((open) => !open)}
       />
 
-      {/* ====== Sidebar ====== */}
       <div className="workbench-body">
-      {navigationOpen && layout.navigationOverlay && <button type="button" className="navigation-backdrop" aria-label={lang === "zh" ? "关闭侧栏" : "Close sidebar"} onClick={() => setNavigationOpen(false)} />}
-      <div id="workbench-navigation" className="workbench-navigation" style={{ "--sidebar-width": `${layout.sidebarWidth}px` } as React.CSSProperties}>
-      <Sidebar
-        lang={lang}
-        config={config}
-        sessions={sessions}
-        visibleSessions={visibleSessions}
-        archivedSessions={archivedSessions}
-        searchSnippets={searchSnippets}
-        currentSessionId={currentSessionId}
-        tabbableSessionId={tabbableSessionId}
-        sidebarNav={sidebarNav}
-        sidebarWidth={layout.sidebarWidth}
-        sessionSearch={sessionSearch}
-        setSessionSearch={setSessionSearch}
-        debouncedSearch={debouncedSearch}
-        sessionStorageReady={sessionStorageReady}
-        historyListRef={historyListRef}
-        runtimeBySession={runtimeBySession}
-        pendingApprovalsBySession={pendingApprovalsBySession}
-        contextMenu={contextMenu}
-        setContextMenu={setContextMenu}
-        allPresets={ALL_PRESETS}
-        addLog={addLog}
-        getModelDisplayName={getModelDisplayName}
-        createNewSession={createNewSession}
-        createProjectTask={(workDir) => { void createNewSessionInMode("code", workDir); }}
-        setCurrentSessionId={(id) => { setCurrentSessionId(id); if (layout.navigationOverlay) setNavigationOpen(false); }}
-        setSessions={setSessions}
-        deleteSession={deleteSession}
-        setSessionArchived={setSessionArchived}
-        moveSessionInList={moveSessionInList}
-        setToolStatsDialog={setToolStatsDialog}
-        setSettingsTab={setSettingsTab}
-        setSettingsOpen={setSettingsOpen}
-        setSessionSettingsOpen={setSessionSettingsOpen}
-      />
-      </div>
-
-      {/* Sidebar resize handle */}
-      <div
-        className={`resize-divider sidebar-divider ${draggingSidebar ? "dragging" : ""}`}
-        onMouseDown={handleSidebarDrag}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label={t("ui.resize-conversation-sidebar", lang)}
-        aria-valuemin={180}
-        aria-valuemax={maxSidebarWidth}
-        aria-valuenow={layout.sidebarWidth}
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-          event.preventDefault();
-          const nextWidth = Math.max(180, Math.min(maxSidebarWidth, layout.sidebarWidth + (event.key === "ArrowRight" ? 12 : -12)));
-          setSidebarWidth(nextWidth);
-          try { localStorage.setItem("gx_sidebar_width", String(nextWidth)); } catch { /* ignore */ }
-        }}
-      />
-
-      {/* ====== Main Workspace ====== */}
-      <div className="workspace-container">
-        <div className="mobile-workspace-tabs" role="group" aria-label={lang === "zh" ? "工作区视图" : "Workspace view"}>
-          <button aria-pressed={mobilePane === "conversation"} onClick={() => setMobilePane("conversation")}>{lang === "zh" ? (currentMode === "code" ? "任务" : "对话") : "Conversation"}</button>
-          <button aria-pressed={mobilePane === "review"} onClick={() => { setRightPanelOpen(true); setMobilePane("review"); }}>{lang === "zh" ? (currentMode === "code" ? "审查" : "资料") : "Workspace"}</button>
-        </div>
-        {/* LEFT: Chat */}
-        <section className="chat-panel">
-          <ChatHeader
-            key={currentSessionId}
+        {navigationOpen && layout.navigationOverlay && (
+          <button type="button" className="navigation-backdrop" aria-label={lang === "zh" ? "关闭侧栏" : "Close sidebar"} onClick={() => setNavigationOpen(false)} />
+        )}
+        <div id="workbench-navigation" className="workbench-navigation" style={{ "--sidebar-width": `${layout.sidebarWidth}px` } as React.CSSProperties}>
+          <Sidebar
             lang={lang}
-            currentSession={currentSession}
-            navigationOpen={navigationOpen}
-            onToggleNavigation={() => setNavigationOpen(open => !open)}
-            onModeChange={switchSessionMode}
-            disabled={sessionMutationLocked}
-            sessionSaveStatus={sessionSaveStatus}
-            sessionSettingsOpen={sessionSettingsOpen}
-            setSessionSettingsOpen={setSessionSettingsOpen}
-            sessionSettingsToggleRef={sessionSettingsToggleRef}
-            rightPanelOpen={rightPanelOpen}
-            setRightPanelOpen={(value) => { setRightPanelOpen(value); if (window.innerWidth <= 800) setMobilePane("review"); }}
-            onShowRun={() => showRun()}
+            config={config}
+            visibleSessions={visibleSessions}
+            archivedSessions={archivedSessions}
+            searchSnippets={searchSnippets}
+            tabbableSessionId={tabbableSessionId}
+            sidebarWidth={layout.sidebarWidth}
+            sessionSearch={sessionSearch}
+            setSessionSearch={setSessionSearch}
+            debouncedSearch={debouncedSearch}
+            sessionStorageReady={sessionStorageReady}
+            historyListRef={historyListRef}
+            contextMenu={contextMenu}
+            setContextMenu={setContextMenu}
+            allPresets={ALL_PRESETS}
+            addLog={addLog}
+            getModelDisplayName={getModelDisplayName}
+            createNewSession={createNewSession}
+            createProjectTask={(workDir) => { void createNewSessionInMode("code", workDir); }}
+            onSelectSession={(id) => { setCurrentSessionId(id); if (layout.navigationOverlay) setNavigationOpen(false); }}
+            deleteSession={deleteSession}
+            setSessionArchived={setSessionArchived}
+            moveSessionInList={moveSessionInList}
           />
-          {!sessionStorageReady && <div className={`session-load-state ${sessionSaveStatus === "error" ? "error" : ""}`} role="status">
-            <span>{sessionSaveStatus === "error" ? (lang === "zh" ? "会话读取失败，保存已暂停。" : "Session loading failed. Saving is paused.") : (lang === "zh" ? "正在读取会话…" : "Loading conversations...")}</span>
-            {sessionSaveStatus === "error" && <button className="btn" onClick={() => setSessionLoadAttempt(attempt => attempt + 1)}>{lang === "zh" ? "重试" : "Retry"}</button>}
-          </div>}
+        </div>
 
-          {/* Session Settings Panel */}
-          {sessionSettingsOpen && (
-            <SessionSettingsPanel
+        <div
+          className={`resize-divider sidebar-divider ${draggingSidebar ? "dragging" : ""}`}
+          onMouseDown={handleSidebarDrag}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("ui.resize-conversation-sidebar", lang)}
+          aria-valuemin={180}
+          aria-valuemax={maxSidebarWidth}
+          aria-valuenow={layout.sidebarWidth}
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            nudgeSidebarWidth(event.key === "ArrowRight" ? 12 : -12);
+          }}
+        />
+
+        <div className="workspace-container">
+          <div className="mobile-workspace-tabs" role="group" aria-label={lang === "zh" ? "工作区视图" : "Workspace view"}>
+            <button aria-pressed={mobilePane === "conversation"} onClick={() => setMobilePane("conversation")}>
+              {lang === "zh" ? (currentMode === "code" ? "任务" : "对话") : "Conversation"}
+            </button>
+            <button aria-pressed={mobilePane === "review"} onClick={() => { setRightPanelOpen(true); setMobilePane("review"); }}>
+              {lang === "zh" ? (currentMode === "code" ? "审查" : "资料") : "Workspace"}
+            </button>
+          </div>
+
+          <section className="chat-panel">
+            <ChatHeader
+              key={currentSessionId}
+              lang={lang}
+              currentSession={currentSession}
+              onModeChange={switchSessionMode}
+              disabled={sessionMutationLocked}
+              sessionSaveStatus={sessionSaveStatus}
+              sessionSettingsToggleRef={sessionSettingsToggleRef}
+            />
+            {!sessionStorageReady && (
+              <div className={`session-load-state ${sessionSaveStatus === "error" ? "error" : ""}`} role="status">
+                <span>
+                  {sessionSaveStatus === "error"
+                    ? (lang === "zh" ? "会话读取失败，保存已暂停。" : "Session loading failed. Saving is paused.")
+                    : (lang === "zh" ? "正在读取会话…" : "Loading conversations...")}
+                </span>
+                {sessionSaveStatus === "error" && (
+                  <button className="btn" onClick={() => setSessionLoadAttempt((attempt) => attempt + 1)}>
+                    {lang === "zh" ? "重试" : "Retry"}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {sessionSettingsOpen && (
+              <SessionSettingsPanel
+                lang={lang}
+                config={config}
+                currentSession={currentSession}
+                currentSessionId={currentSessionId}
+                resolvedCurrentConfig={resolvedCurrentConfig}
+                models={modelsForCurrentConfig}
+                runtimeBySession={runtimeBySession}
+                sessionMutationLocked={sessionMutationLocked}
+                customSessionContextBudget={customSessionContextBudget}
+                setCustomSessionContextBudget={setCustomSessionContextBudget}
+                sessionSettingsPanelRef={sessionSettingsPanelRef}
+                closeSessionSettings={closeSessionSettings}
+                patchSessionConfig={patchSessionConfig}
+                setSessions={setSessions}
+                undoCompact={undoCompact}
+                requestConfirmation={requestConfirmation}
+                customPresets={customPresets}
+                setCustomPresets={setCustomPresets}
+              />
+            )}
+
+            <ChatMessageList
               lang={lang}
               config={config}
+              setConfig={setConfig}
               currentSession={currentSession}
-              currentSessionId={currentSessionId}
-              resolvedCurrentConfig={resolvedCurrentConfig}
-              models={modelsForCurrentConfig}
-              runtimeBySession={runtimeBySession}
               sessionMutationLocked={sessionMutationLocked}
-              customSessionContextBudget={customSessionContextBudget}
-              setCustomSessionContextBudget={setCustomSessionContextBudget}
-              sessionSettingsPanelRef={sessionSettingsPanelRef}
-              closeSessionSettings={closeSessionSettings}
+              statusLabel={statusLabel}
+              formatTokenCount={formatTokenCount}
+              getModelDisplayName={getModelDisplayName}
+              handleRetry={handleRetry}
+              handleEditBranch={handleEditBranch}
+              handleBranchFromMessage={handleBranchFromMessage}
+              attachments={attachments}
+              resolvedCurrentConfig={resolvedCurrentConfig}
+              models={models}
+              modelCatalogSourceKey={modelCatalogSourceKey}
+              chatTextareaRef={chatTextareaRef}
+            />
+
+            <Composer
+              lang={lang}
+              config={config}
+              setConfig={setConfig}
+              currentSession={currentSession}
+              resolvedCurrentConfig={resolvedCurrentConfig}
+              sessionStorageReady={sessionStorageReady}
+              isAttachmentLoading={isAttachmentLoading}
+              attachments={attachments}
+              setAttachments={setAttachments}
+              prompt={prompt}
+              setPrompt={setPrompt}
+              chatTextareaRef={chatTextareaRef}
+              handleSendMessage={handleSendMessage}
+              handleStopStreaming={handleStopStreaming}
+              handleSteeringMessage={handleSteeringMessage}
+              addFilesAsAttachments={addFilesAsAttachments}
+              pickAndParseAttachments={pickAndParseAttachments}
               patchSessionConfig={patchSessionConfig}
-              setSessions={setSessions}
-              undoCompact={undoCompact}
-              requestConfirmation={requestConfirmation}
-              customPresets={customPresets}
-              setCustomPresets={setCustomPresets}
+              getModelDisplayName={getModelDisplayName}
+              modelsForCurrentConfig={modelsForCurrentConfig}
+              onSettings={() => setSessionSettingsOpen(true)}
+              effectiveWorkDir={effectiveWorkDir}
+              branch={currentWorkspace.branch}
+            />
+          </section>
+
+          {rightPanelOpen && (
+            <div
+              className={`resize-divider review-divider ${draggingRight ? "dragging" : ""}`}
+              onMouseDown={handleRightDrag}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label={t("ui.resize-workspace-panel", lang)}
+              aria-valuemin={320}
+              aria-valuemax={maxReviewWidth}
+              aria-valuenow={layout.reviewWidth}
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                event.preventDefault();
+                nudgeRightPanelWidth(event.key === "ArrowLeft" ? 12 : -12);
+              }}
             />
           )}
 
-          <ChatMessageList
+          <WorkspacePanel
+            key={`${currentSessionId}:${effectiveWorkDir}`}
             lang={lang}
             config={config}
-            setConfig={setConfig}
-            currentSession={currentSession}
-            sessionMutationLocked={sessionMutationLocked}
-            editingMessageIdx={editingMessageIdx}
-            setEditingMessageIdx={setEditingMessageIdx}
-            editText={editText}
-            setEditText={setEditText}
-            expandedActions={expandedActions}
-            toggleActionExpanded={toggleActionExpanded}
-            statusLabel={statusLabel}
-            formatTokenCount={formatTokenCount}
-            getModelDisplayName={getModelDisplayName}
-            handleRetry={handleRetry}
-            handleEditBranch={handleEditBranch}
-            handleBranchFromMessage={handleBranchFromMessage}
-            attachments={attachments}
-            resolvedCurrentConfig={resolvedCurrentConfig}
-            models={models}
-            modelCatalogSourceKey={modelCatalogSourceKey}
-            setPrompt={setPrompt}
-            chatTextareaRef={chatTextareaRef}
-            onShowRun={showRun}
+            session={currentSession}
+            open={rightPanelOpen}
+            width={layout.reviewWidth}
+            onClose={() => { setRightPanelOpen(false); setMobilePane("conversation"); }}
+            workspace={currentWorkspace}
+            onRefresh={() => { void refreshWorkspace(currentSessionId, effectiveWorkDir); }}
+            actions={workspaceActions}
+            attachmentsLoading={isAttachmentLoading}
+            disabled={sessionMutationLocked}
+            selectedRunId={selectedRunBySession[currentSessionId]}
           />
-
-          <Composer
-            lang={lang}
-            config={config}
-            setConfig={setConfig}
-            currentSession={currentSession}
-            resolvedCurrentConfig={resolvedCurrentConfig}
-            sessionStorageReady={sessionStorageReady}
-            isAttachmentLoading={isAttachmentLoading}
-            attachments={attachments}
-            setAttachments={setAttachments}
-            prompt={prompt}
-            setPrompt={setPrompt}
-            chatTextareaRef={chatTextareaRef}
-            handleSendMessage={handleSendMessage}
-            handleStopStreaming={handleStopStreaming}
-            handleSteeringMessage={handleSteeringMessage}
-            addFilesAsAttachments={addFilesAsAttachments}
-            pickAndParseAttachments={pickAndParseAttachments}
-            patchSessionConfig={patchSessionConfig}
-            getModelDisplayName={getModelDisplayName}            modelsForCurrentConfig={modelsForCurrentConfig}
-            onSettings={() => setSessionSettingsOpen(true)}
-            effectiveWorkDir={effectiveWorkDir}
-            branch={currentWorkspace.branch}
-          />
-        </section>
-
-        {/* Right panel resize handle */}
-        {rightPanelOpen && (
-          <div
-            className={`resize-divider review-divider ${draggingRight ? "dragging" : ""}`}
-            onMouseDown={handleRightDrag}
-            role="separator"
-            aria-orientation="vertical"
-            aria-label={t("ui.resize-workspace-panel", lang)}
-            aria-valuemin={320}
-            aria-valuemax={maxReviewWidth}
-            aria-valuenow={layout.reviewWidth}
-            tabIndex={0}
-            onKeyDown={(event) => {
-              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-              event.preventDefault();
-              const nextWidth = Math.max(320, Math.min(maxReviewWidth, layout.reviewWidth + (event.key === "ArrowLeft" ? 12 : -12)));
-              setRightPanelWidth(nextWidth);
-              try { localStorage.setItem("gx_right_panel_width", String(nextWidth)); } catch { /* ignore */ }
-            }}
-          />
-        )}
-
-        {/* RIGHT: Workspace */}
-        <WorkspacePanel
-          key={`${currentSessionId}:${effectiveWorkDir}`}
-          lang={lang}
-          config={config}
-          session={currentSession}
-          open={rightPanelOpen}
-          width={layout.reviewWidth}
-          onClose={() => { setRightPanelOpen(false); setMobilePane("conversation"); }}
-          workspace={currentWorkspace}
-          onRefresh={() => { void refreshWorkspace(currentSessionId, effectiveWorkDir); }}
-          actions={workspaceActions}
-          attachmentsLoading={isAttachmentLoading}
-          disabled={sessionMutationLocked}
-          selectedRunId={selectedRunBySession[currentSessionId]}
-        />
-      </div>
+        </div>
       </div>
 
-      {/* ====== Settings Modal ====== */}
       {settingsOpen && (
         <SettingsModal
           lang={lang}
@@ -1318,7 +802,8 @@ function App() {
           setSettingsOpen={setSettingsOpen}
           settingsBodyRef={settingsBodyRef}
           handleSettingsTabKeyDown={handleSettingsTabKeyDown}
-          currentSettingsTabLabel={currentSettingsTabLabel}          saveConfig={saveConfig}
+          currentSettingsTabLabel={currentSettingsTabLabel}
+          saveConfig={saveConfig}
           configSaveStatus={configSaveStatus}
           addLog={addLog}
           notify={notify}
@@ -1329,7 +814,8 @@ function App() {
           mcpStatusByName={mcpStatusByName}
           testMcpServer={testMcpServer}
           deleteMcpServer={deleteMcpServer}
-          presets={presets}          sessionMutationLocked={sessionMutationLocked}
+          presets={presets}
+          sessionMutationLocked={sessionMutationLocked}
           createSessionSnapshot={async () => {
             if (sessionMutationLocked || !persistLatestRef.current) throw new Error(lang === "zh" ? "会话存储尚未就绪" : "Task storage is not ready");
             await persistLatestRef.current(true);

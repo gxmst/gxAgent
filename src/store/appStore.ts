@@ -62,7 +62,9 @@ interface AppStoreState {
 export const useAppStore = create<AppStoreState>((set) => ({
   sessions: readLocalSessions(),
   setSessions: (next) => set((s) => ({ sessions: resolve(next, s.sessions) })),
-  currentSessionId: localStorage.getItem("gx_current_session") || "default",
+  currentSessionId: (typeof localStorage !== "undefined" && typeof localStorage.getItem === "function"
+    ? localStorage.getItem("gx_current_session")
+    : null) || "default",
   setCurrentSessionId: (next) => set((s) => ({ currentSessionId: resolve(next, s.currentSessionId) })),
   activeRunSessionId: null,
   setActiveRunSessionId: (next) => set((s) => ({ activeRunSessionId: resolve(next, s.activeRunSessionId) })),

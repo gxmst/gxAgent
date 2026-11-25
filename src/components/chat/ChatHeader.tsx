@@ -1,46 +1,42 @@
 import { useState } from "react";
 import { CircleCheck, Loader2, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pencil, Settings2 } from "lucide-react";
-import { t } from "../../i18n";
+import { bi, t } from "../../i18n";
 import type { ChatSession, SessionConfig } from "../../types";
 import { useAppStore } from "../../store/appStore";
+import { useUIStore } from "../../store/uiStore";
 import { taskState, taskStateLabel } from "../../utils/workbench";
 
 export interface ChatHeaderProps {
   lang: string;
   currentSession: ChatSession;
-  navigationOpen: boolean;
-  onToggleNavigation: () => void;
   onModeChange: (mode: SessionConfig["mode"]) => void;
   disabled: boolean;
   sessionSaveStatus: "idle" | "saving" | "saved" | "error";
-  sessionSettingsOpen: boolean;
-  setSessionSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
   sessionSettingsToggleRef: React.RefObject<HTMLButtonElement | null>;
-  rightPanelOpen: boolean;
-  setRightPanelOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  onShowRun: () => void;
 }
 
 export function ChatHeader({
   lang,
   currentSession,
-  navigationOpen,
-  onToggleNavigation,
   onModeChange,
   disabled,
   sessionSaveStatus,
-  sessionSettingsOpen,
-  setSessionSettingsOpen,
   sessionSettingsToggleRef,
-  rightPanelOpen,
-  setRightPanelOpen,
-  onShowRun,
 }: ChatHeaderProps) {
-  const zh = lang === "zh";
   const setSessions = useAppStore((state) => state.setSessions);
   const runtime = useAppStore((state) => state.runtimeBySession[currentSession.id]);
   const approval = useAppStore((state) => state.pendingApprovalsBySession[currentSession.id]);
   const preparing = useAppStore((state) => state.preparingRequestSessionId === currentSession.id);
+
+  const navigationOpen = useUIStore((state) => state.navigationOpen);
+  const setNavigationOpen = useUIStore((state) => state.setNavigationOpen);
+  const sessionSettingsOpen = useUIStore((state) => state.sessionSettingsOpen);
+  const setSessionSettingsOpen = useUIStore((state) => state.setSessionSettingsOpen);
+  const rightPanelOpen = useUIStore((state) => state.rightPanelOpen);
+  const setRightPanelOpen = useUIStore((state) => state.setRightPanelOpen);
+  const setMobilePane = useUIStore((state) => state.setMobilePane);
+  const showRun = useUIStore((state) => state.showRun);
+
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(currentSession.title);
   const coding = currentSession.sessionConfig.mode === "code";
@@ -61,9 +57,9 @@ export function ChatHeader({
           <button
             type="button"
             className="panel-toggle-btn"
-            onClick={onToggleNavigation}
-            aria-label={zh ? "展开侧栏" : "Expand sidebar"}
-            title={zh ? "展开侧栏" : "Expand sidebar"}
+            onClick={() => setNavigationOpen((open) => !open)}
+            aria-label={bi(lang, "展开侧栏", "Expand sidebar")}
+            title={bi(lang, "展开侧栏", "Expand sidebar")}
           >
             <PanelLeftOpen size={16} />
           </button>
@@ -83,7 +79,7 @@ export function ChatHeader({
           />
         ) : (
           <h1 onDoubleClick={() => { setTitle(currentSession.title); setEditing(true); }}>
-            {currentSession.title || (coding ? (zh ? "新任务" : "New task") : t("session.new", lang))}
+            {currentSession.title || (coding ? bi(lang, "新任务", "New task") : t("session.new", lang))}
           </h1>
         )}
         <button
@@ -96,12 +92,12 @@ export function ChatHeader({
           <Pencil size={13} />
         </button>
       </div>
-      <div className="workbench-modes" role="group" aria-label={zh ? "工作模式" : "Workspace mode"}>
+      <div className="workbench-modes" role="group" aria-label={bi(lang, "工作模式", "Workspace mode")}>
         <button type="button" disabled={disabled} aria-pressed={!coding} onClick={() => onModeChange("chat")}>
-          {zh ? "聊天" : "Chat"}
+          {bi(lang, "聊天", "Chat")}
         </button>
         <button type="button" disabled={disabled} aria-pressed={coding} onClick={() => onModeChange("code")}>
-          {zh ? "工作" : "Work"}
+          {bi(lang, "工作", "Work")}
         </button>
       </div>
       <div className="task-header-actions">
@@ -112,9 +108,9 @@ export function ChatHeader({
           <button
             type="button"
             className={`panel-toggle-btn task-run-state state-${status}`}
-            onClick={onShowRun}
-            title={`${taskStateLabel(status, lang)} · ${zh ? "运行记录" : "Run history"}`}
-            aria-label={zh ? "运行记录" : "Run history"}
+            onClick={() => showRun(currentSession.id)}
+            title={`${taskStateLabel(status, lang)} · ${bi(lang, "运行记录", "Run history")}`}
+            aria-label={bi(lang, "运行记录", "Run history")}
           >
             {runtime || preparing ? <Loader2 size={15} className="spin" /> : <CircleCheck size={15} />}
           </button>
@@ -134,7 +130,10 @@ export function ChatHeader({
         <button
           type="button"
           className="panel-toggle-btn task-panel-toggle"
-          onClick={() => setRightPanelOpen(!rightPanelOpen)}
+          onClick={() => {
+            setRightPanelOpen(!rightPanelOpen);
+            if (window.innerWidth <= 800) setMobilePane("review");
+          }}
           title={rightPanelOpen ? t("ui.close-workspace-panel", lang) : t("ui.open-right-panel", lang)}
           aria-label={rightPanelOpen ? t("ui.close-workspace-panel", lang) : t("ui.open-right-panel", lang)}
           aria-expanded={rightPanelOpen}

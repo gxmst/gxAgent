@@ -188,7 +188,6 @@ export const i18n: Record<string, Record<string, string>> = {
     "settings.exported": "配置已导出",
     "settings.imported": "配置已导入",
     "settings.importFailed": "导入配置失败：",
-    "spotlight.hint": "Ctrl+Shift+G 快速唤起",
     "context.delete": "删除会话",
     "context.export": "导出会话",
     "context.editPreset": "编辑角色预设",
@@ -395,7 +394,6 @@ export const i18n: Record<string, Record<string, string>> = {
     "settings.exported": "Config exported",
     "settings.imported": "Config imported",
     "settings.importFailed": "Failed to import config: ",
-    "spotlight.hint": "Ctrl+Shift+G to quick launch",
     "context.delete": "Delete Session",
     "context.export": "Export Session",
     "context.editPreset": "Edit Role Preset",
@@ -894,3 +892,6 @@ export function t(key: string, lang: string, vars?: Record<string, string>): str
   }
   return text;
 }
+
+/** Inline bilingual helper for UI strings maintained as zh/en pairs. */
+export const bi = (lang: string, zh: string, en: string): string => (lang === "zh" ? zh : en);

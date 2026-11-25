@@ -2,6 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Popover } from "radix-ui";
 import { ChevronDown, FolderOpen, FolderPlus, GitBranch } from "lucide-react";
+import { bi } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import { groupProjectSessions, projectName } from "../../utils/workbench";
 import { notify } from "../../services/agentEvents";
@@ -9,7 +10,6 @@ import { notify } from "../../services/agentEvents";
 export function ProjectPicker({ lang, workDir, branch, disabled, onSelect }: {
   lang: string; workDir: string; branch: string; disabled: boolean; onSelect: (path: string) => void;
 }) {
-  const zh = lang === "zh";
   const sessions = useAppStore((state) => state.sessions);
   const [open, setOpen] = useState(false);
   const projects = groupProjectSessions(
@@ -25,10 +25,10 @@ export function ProjectPicker({ lang, workDir, branch, disabled, onSelect }: {
             disabled={disabled}
             className="composer-project"
             title={workDir}
-            aria-label={zh ? "选择项目" : "Choose project"}
+            aria-label={bi(lang, "选择项目", "Choose project")}
           >
             <FolderOpen size={14} />
-            <span>{projectName(workDir) || (zh ? "选择项目" : "Choose project")}</span>
+            <span>{projectName(workDir) || bi(lang, "选择项目", "Choose project")}</span>
             <ChevronDown size={12} />
           </button>
         </Popover.Trigger>
@@ -58,7 +58,7 @@ export function ProjectPicker({ lang, workDir, branch, disabled, onSelect }: {
               }}
             >
               <FolderPlus size={15} />
-              <span>{zh ? "打开其他项目" : "Open another project"}</span>
+              <span>{bi(lang, "打开其他项目", "Open another project")}</span>
             </button>
           </Popover.Content>
         </Popover.Portal>

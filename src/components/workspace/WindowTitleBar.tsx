@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Copy, Minus, Moon, PanelLeftClose, PanelLeftOpen, Pin, Square, Sun, X } from "lucide-react";
 import type { AppConfig } from "../../types";
 import { themeMode } from "../../appDefaults";
+import { bi } from "../../i18n";
 import { notify } from "../../services/agentEvents";
 import logo from "../../assets/logo.png";
 
@@ -22,7 +23,6 @@ export function WindowTitleBar({
   navigationOpen,
   onToggleNavigation,
 }: WindowTitleBarProps) {
-  const zh = lang === "zh";
   const [maximized, setMaximized] = useState(false);
   const [pinned, setPinned] = useState(false);
   const desktop = isTauri();
@@ -74,8 +74,8 @@ export function WindowTitleBar({
           onClick={onToggleNavigation}
           aria-expanded={navigationOpen}
           aria-controls="workbench-navigation"
-          aria-label={zh ? "切换侧栏" : "Toggle sidebar"}
-          title={zh ? (navigationOpen ? "收起侧栏" : "展开侧栏") : (navigationOpen ? "Collapse sidebar" : "Expand sidebar")}
+          aria-label={bi(lang, "切换侧栏", "Toggle sidebar")}
+          title={navigationOpen ? bi(lang, "收起侧栏", "Collapse sidebar") : bi(lang, "展开侧栏", "Expand sidebar")}
         >
           {navigationOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
         </button>
@@ -83,8 +83,8 @@ export function WindowTitleBar({
           type="button"
           className="panel-toggle-btn desktop-action"
           onClick={() => setConfig((previous) => ({ ...previous, theme: themeMode(previous.theme) === "dark" ? "light" : "dark" }))}
-          aria-label={zh ? "切换主题" : "Toggle theme"}
-          title={zh ? "切换主题" : "Toggle theme"}
+          aria-label={bi(lang, "切换主题", "Toggle theme")}
+          title={bi(lang, "切换主题", "Toggle theme")}
         >
           {activeMode === "dark" ? <Sun size={15} /> : <Moon size={15} />}
         </button>
@@ -96,8 +96,8 @@ export function WindowTitleBar({
             catch (error) { notify(String(error), "error"); }
           }}
           aria-pressed={pinned}
-          aria-label={zh ? "窗口置顶" : "Keep on top"}
-          title={zh ? "窗口置顶" : "Keep on top"}
+          aria-label={bi(lang, "窗口置顶", "Keep on top")}
+          title={bi(lang, "窗口置顶", "Keep on top")}
         >
           <Pin size={14} />
         </button>
@@ -105,17 +105,17 @@ export function WindowTitleBar({
       <div className="window-drag-area" data-tauri-drag-region />
       {desktop && (
         <div className="window-controls">
-          <button type="button" aria-label={zh ? "最小化" : "Minimize"} onClick={() => void operate("minimize")}>
+          <button type="button" aria-label={bi(lang, "最小化", "Minimize")} onClick={() => void operate("minimize")}>
             <Minus size={15} />
           </button>
           <button
             type="button"
-            aria-label={zh ? (maximized ? "还原窗口" : "最大化") : (maximized ? "Restore window" : "Maximize")}
+            aria-label={maximized ? bi(lang, "还原窗口", "Restore window") : bi(lang, "最大化", "Maximize")}
             onClick={() => void operate("maximize")}
           >
             {maximized ? <Copy size={13} /> : <Square size={13} />}
           </button>
-          <button type="button" className="window-close" aria-label={zh ? "关闭窗口" : "Close window"} onClick={() => void operate("close")}>
+          <button type="button" className="window-close" aria-label={bi(lang, "关闭窗口", "Close window")} onClick={() => void operate("close")}>
             <X size={16} />
           </button>
         </div>

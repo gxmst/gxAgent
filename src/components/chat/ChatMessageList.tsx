@@ -48,6 +48,7 @@ import { ApprovalCard, messageHasPendingApproval } from "./ApprovalCard";
 import { quoteExcerpt, splitLeadingQuote } from "../../utils/quote";
 import { selectMessageVariant } from "../../utils/messageHistory";
 import { useAppStore } from "../../store/appStore";
+import { useUIStore } from "../../store/uiStore";
 import { runtime } from "../../services/agentRuntime";
 import { EvidenceList } from "../workspace/ContextInspector";
 import { useWorkspaceViewStore } from "../../store/workspaceViewStore";
@@ -58,12 +59,6 @@ export interface ChatMessageListProps {
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   currentSession: ChatSession;
   sessionMutationLocked: boolean;
-  editingMessageIdx: number | null;
-  setEditingMessageIdx: (value: number | null) => void;
-  editText: string;
-  setEditText: (value: string) => void;
-  expandedActions: Record<string, boolean>;
-  toggleActionExpanded: (id: string) => void;
   statusLabel: (status: ToolAction["status"]) => string;
   formatTokenCount: (value: number) => string;
   getModelDisplayName: (modelId: string) => string;
@@ -74,9 +69,7 @@ export interface ChatMessageListProps {
   resolvedCurrentConfig: AppConfig;
   models: ModelInfo[];
   modelCatalogSourceKey: string | null;
-  setPrompt: (next: string | ((previous: string) => string)) => void;
   chatTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
-  onShowRun: (messageId?: string) => void;
 }
 
 export function ChatMessageList({
@@ -85,12 +78,6 @@ export function ChatMessageList({
   setConfig,
   currentSession,
   sessionMutationLocked,
-  editingMessageIdx,
-  setEditingMessageIdx,
-  editText,
-  setEditText,
-  expandedActions,
-  toggleActionExpanded,
   statusLabel,
   formatTokenCount,
   getModelDisplayName,
@@ -101,9 +88,7 @@ export function ChatMessageList({
   resolvedCurrentConfig,
   models,
   modelCatalogSourceKey,
-  setPrompt,
   chatTextareaRef,
-  onShowRun,
 }: ChatMessageListProps) {
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setSessions = useAppStore((s) => s.setSessions);
@@ -111,6 +96,26 @@ export function ChatMessageList({
   const activeRunSessionId = useAppStore((s) => s.activeRunSessionId);
   const currentRuntime = useAppStore((s) => s.runtimeBySession[s.currentSessionId] || null);
   const pendingApprovals = useAppStore((s) => s.pendingApprovalsBySession[s.currentSessionId] || null);
+
+  const expandedActions = useUIStore((s) => s.expandedActions);
+  const toggleActionExpanded = useUIStore((s) => s.toggleActionExpanded);
+  const editingMessageIdxBySession = useUIStore((s) => s.editingMessageIdxBySession);
+  const setEditingMessageIdxBySession = useUIStore((s) => s.setEditingMessageIdxBySession);
+  const editTextBySession = useUIStore((s) => s.editTextBySession);
+  const setEditTextBySession = useUIStore((s) => s.setEditTextBySession);
+  const setPromptForSession = useUIStore((s) => s.setPromptForSession);
+  const showRun = useUIStore((s) => s.showRun);
+
+  const editingMessageIdx = editingMessageIdxBySession[currentSessionId] ?? null;
+  const setEditingMessageIdx = (value: number | null) => {
+    setEditingMessageIdxBySession((previous) => ({ ...previous, [currentSessionId]: value }));
+  };
+  const editText = editTextBySession[currentSessionId] || "";
+  const setEditText = (value: string) => {
+    setEditTextBySession((previous) => ({ ...previous, [currentSessionId]: value }));
+  };
+  const setPrompt = (text: string) => setPromptForSession(currentSessionId, text);
+  const onShowRun = (messageId?: string) => showRun(currentSessionId, messageId);
   const isStreaming = activeRunSessionId === currentSessionId;
   const activeAssistantMessageId = isStreaming && runtime.activeRequestSessionId === currentSessionId
     ? runtime.assistantMessageIdByRequest[runtime.activeRequestId]
@@ -689,7 +694,6 @@ export function ChatMessageList({
       currentContextTokensBase,
       currentModelLimit,
       currentLocale,
-      onShowRun,
     ]
   );
 

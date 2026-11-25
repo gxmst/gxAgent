@@ -28,45 +28,39 @@ import {
 } from "lucide-react";
 import { t } from "../../i18n";
 import { DropdownMenu } from "radix-ui";
-import type { AppConfig, ChatSession, Message, SessionConfig } from "../../types";
+import type { AppConfig, ChatSession, Message } from "../../types";
 import type { RolePreset } from "../../rolePresets";
 import {
   createSession,
   newMessageId,
   normalizeMessage,
   normalizeSessionConfig,
-  type SessionRuntime,
-  type ToolStatsDialog,
 } from "../../appDefaults";
 import { getToolStats } from "../../utils/sessionHelpers";
 import type { SearchSnippet } from "../../utils/sessionSearch";
 import { PositionedContextMenu } from "../shared/PositionedContextMenu";
 import { ConnectionStatus } from "../shared/ConnectionStatus";
 import { formatCompactRelativeTime, groupProjectSessions, taskState, taskStateLabel } from "../../utils/workbench";
-import type { SettingsTab } from "../settings/settingsNavigation";
+import { useAppStore } from "../../store/appStore";
+import { useUIStore } from "../../store/uiStore";
 
 type SidebarContextMenu = { sessionId: string; x: number; y: number } | null;
 
 export interface SidebarProps {
   lang: string;
   config: AppConfig;
-  sessions: ChatSession[];
   visibleSessions: ChatSession[];
   archivedSessions: ChatSession[];
   /** Per-session snippet around the first full-text hit while a search query
    *  is active; null means the title matched (no snippet needed). */
   searchSnippets: Record<string, SearchSnippet | null>;
-  currentSessionId: string;
   tabbableSessionId: string | null;
-  sidebarNav: SessionConfig["mode"];
   sidebarWidth: number;
   sessionSearch: string;
   setSessionSearch: React.Dispatch<React.SetStateAction<string>>;
   debouncedSearch: string;
   sessionStorageReady: boolean;
   historyListRef: RefObject<HTMLDivElement | null>;
-  runtimeBySession: Record<string, SessionRuntime | null>;
-  pendingApprovalsBySession: Record<string, unknown>;
   contextMenu: SidebarContextMenu;
   setContextMenu: React.Dispatch<React.SetStateAction<SidebarContextMenu>>;
   allPresets: RolePreset[];
@@ -74,29 +68,33 @@ export interface SidebarProps {
   getModelDisplayName: (modelId: string) => string;
   createNewSession: () => void;
   createProjectTask: (workDir: string) => void;
-  setCurrentSessionId: (id: string) => void;
-  setSessions: React.Dispatch<React.SetStateAction<ChatSession[]>>;
+  onSelectSession: (id: string) => void;
   deleteSession: (id: string, e: React.MouseEvent) => void;
   setSessionArchived: (id: string, archived: boolean) => void;
   moveSessionInList: (sessionId: string, direction: "up" | "down") => void;
-  setToolStatsDialog: React.Dispatch<React.SetStateAction<ToolStatsDialog | null>>;
-  setSettingsTab: (tab: SettingsTab) => void;
-  setSettingsOpen: (open: boolean) => void;
-  setSessionSettingsOpen: (open: boolean) => void;
 }
 
 export function Sidebar(props: SidebarProps) {
   const {
-    lang, config, sessions, visibleSessions, archivedSessions, searchSnippets,
-    currentSessionId, tabbableSessionId, sidebarNav, sidebarWidth, sessionSearch,
+    lang, config, visibleSessions, archivedSessions, searchSnippets,
+    tabbableSessionId, sidebarWidth, sessionSearch,
     setSessionSearch, debouncedSearch, sessionStorageReady, historyListRef,
-    runtimeBySession, pendingApprovalsBySession, contextMenu, setContextMenu,
-    allPresets: ALL_PRESETS, addLog, getModelDisplayName,
-    createNewSession, createProjectTask, setCurrentSessionId, setSessions, deleteSession,
-    setSessionArchived, moveSessionInList, setToolStatsDialog, setSettingsTab,
-    setSettingsOpen, setSessionSettingsOpen,
+    contextMenu, setContextMenu, allPresets: ALL_PRESETS, addLog, getModelDisplayName,
+    createNewSession, createProjectTask, onSelectSession, deleteSession,
+    setSessionArchived, moveSessionInList,
   } = props;
   const zh = lang === "zh";
+
+  const sessions = useAppStore((s) => s.sessions);
+  const setSessions = useAppStore((s) => s.setSessions);
+  const currentSessionId = useAppStore((s) => s.currentSessionId);
+  const runtimeBySession = useAppStore((s) => s.runtimeBySession);
+  const pendingApprovalsBySession = useAppStore((s) => s.pendingApprovalsBySession);
+
+  const sidebarNav = useUIStore((s) => s.sidebarNav);
+  const openSettings = useUIStore((s) => s.openSettings);
+  const setToolStatsDialog = useUIStore((s) => s.setToolStatsDialog);
+  const setSessionSettingsOpen = useUIStore((s) => s.setSessionSettingsOpen);
 
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
@@ -127,7 +125,7 @@ export function Sidebar(props: SidebarProps) {
           <button
             type="button"
             className="sidebar-nav-link"
-            onClick={() => { setSettingsTab("skills"); setSettingsOpen(true); }}
+            onClick={() => openSettings("skills")}
           >
             <Sparkles size={14} />
             <span>{zh ? "技能与知识库" : "Skills & Knowledge"}</span>
@@ -135,7 +133,7 @@ export function Sidebar(props: SidebarProps) {
           <button
             type="button"
             className="sidebar-nav-link"
-            onClick={() => { setSettingsTab("tools"); setSettingsOpen(true); }}
+            onClick={() => openSettings("tools")}
           >
             <Wrench size={14} />
             <span>{zh ? "工具与 MCP" : "Tools & MCP"}</span>
@@ -185,7 +183,7 @@ export function Sidebar(props: SidebarProps) {
             const compactTime = formatCompactRelativeTime(lastTimestamp, lang);
             const state = taskState(s, runtime, awaitingApproval);
             const openSession = () => {
-              setCurrentSessionId(s.id);
+              onSelectSession(s.id);
             };
             return (
               <div
@@ -386,7 +384,7 @@ export function Sidebar(props: SidebarProps) {
                 <DropdownMenu.Item asChild>
                   <button className="context-menu-item" onClick={() => {
                     setSessionSettingsOpen(true);
-                    setCurrentSessionId(contextMenu.sessionId);
+                    onSelectSession(contextMenu.sessionId);
                     setContextMenu(null);
                   }}>
                     <Pencil size={12} /> {t("context.editPreset", lang)}
@@ -488,7 +486,7 @@ export function Sidebar(props: SidebarProps) {
                             );
                             importedSession.sessionConfig = normalizeSessionConfig(imported.sessionConfig);
                             setSessions((prev) => [...prev, importedSession]);
-                            setCurrentSessionId(importedSession.id);
+                            onSelectSession(importedSession.id);
                           }
                         } else {
                           const sections = text.split(/\n\n---\n\n/);
@@ -509,7 +507,7 @@ export function Sidebar(props: SidebarProps) {
                               msgs,
                             );
                             setSessions((prev) => [...prev, importedSession]);
-                            setCurrentSessionId(importedSession.id);
+                            onSelectSession(importedSession.id);
                           }
                         }
                       } catch (e) {
@@ -572,7 +570,7 @@ export function Sidebar(props: SidebarProps) {
         <button
           type="button"
           className="sidebar-settings-btn"
-          onClick={() => { setSettingsTab("model"); setSettingsOpen(true); }}
+          onClick={() => openSettings("model")}
           aria-label={zh ? "设置" : "Settings"}
           title={zh ? "设置" : "Settings"}
         >
@@ -586,7 +584,7 @@ export function Sidebar(props: SidebarProps) {
           detail={config.base_url
             ? `${getModelDisplayName(config.model) || config.model} · ${config.base_url}`
             : t("ui.not-configured", lang)}
-          onClick={() => { setSettingsTab("model"); setSettingsOpen(true); }}
+          onClick={() => openSettings("model")}
         />
       </div>
     </aside>
