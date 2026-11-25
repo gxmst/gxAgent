@@ -38,6 +38,11 @@ type ApprovalMap = HashMap<String, watch::Sender<Option<Vec<(String, bool)>>>>;
 static PENDING_APPROVALS: once_cell::sync::Lazy<Arc<Mutex<ApprovalMap>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(ApprovalMap::new())));
 
+type QuestionMap = HashMap<String, watch::Sender<Option<HashMap<String, Vec<String>>>>>;
+
+static PENDING_QUESTIONS: once_cell::sync::Lazy<Arc<Mutex<QuestionMap>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(QuestionMap::new())));
+
 pub(crate) async fn register_cancellation(request_id: &str) -> watch::Receiver<bool> {
     let (tx, rx) = watch::channel(false);
     let mut cancellations = AGENT_CANCELLATIONS.lock().await;
@@ -229,6 +234,67 @@ pub async fn resolve_approval(
     }
 }
 
+pub(super) async fn register_question_wait(
+    interaction_id: &str,
+) -> watch::Receiver<Option<HashMap<String, Vec<String>>>> {
+    let mut pending = PENDING_QUESTIONS.lock().await;
+    let (tx, rx) = watch::channel(None::<HashMap<String, Vec<String>>>);
+    pending.insert(interaction_id.to_string(), tx);
+    rx
+}
+
+pub(super) async fn cancel_registered_question(interaction_id: &str) {
+    PENDING_QUESTIONS.lock().await.remove(interaction_id);
+}
+
+pub(super) async fn wait_for_registered_question(
+    interaction_id: &str,
+    mut rx: watch::Receiver<Option<HashMap<String, Vec<String>>>>,
+    cancel_rx: &watch::Receiver<bool>,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    const QUESTION_TIMEOUT_SECS: u64 = 3600;
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(QUESTION_TIMEOUT_SECS));
+    tokio::pin!(timeout);
+    let mut cancel_rx = cancel_rx.clone();
+
+    loop {
+        tokio::select! {
+            result = rx.changed() => {
+                result.map_err(|_| "Question channel closed unexpectedly".to_string())?;
+                if let Some(answers) = rx.borrow().clone() {
+                    return Ok(answers);
+                }
+            }
+            _ = &mut timeout => {
+                PENDING_QUESTIONS.lock().await.remove(interaction_id);
+                return Err(format!("User question timed out after {} seconds", QUESTION_TIMEOUT_SECS));
+            }
+            _ = wait_for_cancellation(&mut cancel_rx) => {
+                PENDING_QUESTIONS.lock().await.remove(interaction_id);
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
+        }
+    }
+}
+
+/// Called by the frontend to resolve a native `ask_user_question` prompt.
+pub async fn resolve_question(
+    interaction_id: &str,
+    answers: HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let mut pending = PENDING_QUESTIONS.lock().await;
+    if let Some(tx) = pending.remove(interaction_id) {
+        tx.send(Some(answers))
+            .map_err(|_| "Failed to send user answers".to_string())?;
+        Ok(())
+    } else {
+        Err(format!(
+            "No pending question found for interaction: {}",
+            interaction_id
+        ))
+    }
+}
+
 #[cfg(test)]
 mod cancellation_tests {
     use super::*;
@@ -249,5 +315,35 @@ mod cancellation_tests {
         unregister_cancellation(&request_id).await;
         let error = cancel_agent_request(&request_id).await.unwrap_err();
         assert!(error.contains("No active agent request found"));
+    }
+
+    #[tokio::test]
+    async fn registered_question_can_be_resolved_and_cancelled() {
+        let req_id = format!("question-req-{}", uuid::Uuid::new_v4());
+        let cancel_rx = register_cancellation(&req_id).await;
+        let interaction_id = format!("ask-{}", uuid::Uuid::new_v4());
+        let rx = register_question_wait(&interaction_id).await;
+
+        let expected = HashMap::from([("scope".to_string(), vec!["Current".to_string()])]);
+        let resolver_id = interaction_id.clone();
+        let expected_clone = expected.clone();
+        tokio::spawn(async move {
+            resolve_question(&resolver_id, expected_clone)
+                .await
+                .unwrap();
+        });
+
+        let received = wait_for_registered_question(&interaction_id, rx, &cancel_rx)
+            .await
+            .unwrap();
+        assert_eq!(received, expected);
+
+        let rx2 = register_question_wait("ask-cancel").await;
+        cancel_agent_request(&req_id).await.unwrap();
+        let err = wait_for_registered_question("ask-cancel", rx2, &cancel_rx)
+            .await
+            .unwrap_err();
+        assert_eq!(err, AGENT_CANCELLED_ERROR);
+        unregister_cancellation(&req_id).await;
     }
 }

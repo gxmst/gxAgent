@@ -63,6 +63,7 @@ export interface SettingsModalProps {
   removeTrustedPattern: (toolName: string, pattern: string) => void;
   mcpStatusByName: Record<string, Pick<McpServerView, "state" | "toolCount" | "message">>;
   testMcpServer: (name: string) => void;
+  stopMcpServer: (name: string) => void;
   deleteMcpServer: (name: string) => void;
   presets: ProviderPreset[];
   sessionMutationLocked: boolean;
@@ -80,7 +81,7 @@ export function SettingsModal(props: SettingsModalProps) {
     saveConfig, configSaveStatus, addLog, notify,
     customGlobalContextBudget, setCustomGlobalContextBudget,
     toggleTool, removeTrustedPattern, mcpStatusByName, testMcpServer,
-    deleteMcpServer, presets, sessionMutationLocked,
+    stopMcpServer, deleteMcpServer, presets, sessionMutationLocked,
     hasAttachmentLoading, replaceAllSessions, requestConfirmation, createSessionSnapshot,
   } = props;
   const [connectionEditing, setConnectionEditing] = useState(false);
@@ -166,7 +167,7 @@ export function SettingsModal(props: SettingsModalProps) {
         </div>
 
         <div ref={settingsBodyRef} className="modal-body settings-modal-body">
-          {settingsTab === "tools" && <ToolsSettings lang={lang} config={config} setConfig={setConfig} toggleTool={toggleTool} statuses={mcpStatusByName} onTest={testMcpServer} onDelete={deleteMcpServer} addLog={addLog} requestConfirmation={requestConfirmation} />}
+          {settingsTab === "tools" && <ToolsSettings lang={lang} config={config} setConfig={setConfig} toggleTool={toggleTool} statuses={mcpStatusByName} onTest={testMcpServer} onStop={stopMcpServer} onDelete={deleteMcpServer} addLog={addLog} requestConfirmation={requestConfirmation} />}
           {settingsTab === "skills" && <SkillsSettings config={projectConfig} setConfig={setConfig} lang={lang} />}
           {settingsTab === "knowledge" && <KnowledgeSettings config={projectConfig} setConfig={setConfig} lang={lang} requestConfirmation={requestConfirmation} />}
           {/* ===== Tab 1: 模型与 API ===== */}

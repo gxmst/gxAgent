@@ -3,11 +3,13 @@
  * tables shared by the App shell. No component state lives here.
  */
 import {
+  BookOpen,
   CheckCircle2,
   Clock,
   FileText,
   FolderOpen,
   Globe,
+  MessageCircleQuestion,
   Pencil,
   Search,
   Settings2,
@@ -244,6 +246,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     "glob",
     "todo_write",
     "spawn_agent",
+    "ask_user_question",
+    "read_skill",
   ],
   approval_policy: "standard",
   trusted_patterns: [],
@@ -264,7 +268,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   max_tool_calls_per_request: 120,
   preview_sandbox: true,
   plan_mode: false,
-  tools_migration_version: 5,
+  tools_migration_version: 7,
 };
 
 export function createDefaultSession(): ChatSession {
@@ -566,7 +570,9 @@ export const TOOL_NAMES: { key: string; label: string; shortLabel: string; descr
   { key: "grep", label: "Grep", shortLabel: "Grep", description: "Search file contents by regex across the workspace.", risk: "low" },
   { key: "glob", label: "Find Files", shortLabel: "Glob", description: "Find files by name pattern.", risk: "low" },
   { key: "todo_write", label: "Task List", shortLabel: "Todo", description: "Track multi-step tasks as a checklist.", risk: "low" },
-  { key: "spawn_agent", label: "Subagent", shortLabel: "Agent", description: "Ask a focused read-only helper for a bounded investigation.", risk: "medium" },
+  { key: "spawn_agent", label: "Subagent", shortLabel: "Agent", description: "Delegate a multi-turn read-only investigation to a focused helper.", risk: "medium" },
+  { key: "ask_user_question", label: "Ask User", shortLabel: "Ask", description: "Request structured clarification from the user before risky or ambiguous steps.", risk: "low" },
+  { key: "read_skill", label: "Read Skill", shortLabel: "Skill", description: "Load full SKILL.md instructions or bundled skill resources on demand.", risk: "low" },
 ];
 
 export const toolIcon = (key: string, size = 11) => {
@@ -596,6 +602,10 @@ export const toolIcon = (key: string, size = 11) => {
       return <CheckCircle2 size={size} />;
     case "spawn_agent":
       return <Zap size={size} />;
+    case "ask_user_question":
+      return <MessageCircleQuestion size={size} />;
+    case "read_skill":
+      return <BookOpen size={size} />;
     default:
       return <Settings2 size={size} />;
   }

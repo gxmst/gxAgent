@@ -6,6 +6,7 @@ mod models;
 mod prompts;
 mod state;
 mod stream;
+mod subagent;
 
 use chat::run_chat_mode;
 use context_budget::{
@@ -41,7 +42,7 @@ use tokio::sync::watch;
 
 pub use context_budget::ImageAttachment;
 pub use models::fetch_models;
-pub use state::{cancel_agent_request, push_steering_message, resolve_approval};
+pub use state::{cancel_agent_request, push_steering_message, resolve_approval, resolve_question};
 pub(crate) use state::{register_cancellation, unregister_cancellation, wait_for_cancellation};
 pub(crate) use stream::new_tool_call_id;
 pub use stream::AccumulatedToolCall;
@@ -98,7 +99,7 @@ pub async fn start_agent_loop(
             )
             .await
         } else {
-            let mut mcp_manager = McpManager::new();
+            let mut mcp_manager = McpManager::pooled();
             let mcp_tool_defs = if !config.mcp_servers.is_empty() {
                 let report =
                     await_with_cancel(&cancel_rx, mcp_manager.start_all(&config.mcp_servers))
@@ -463,6 +464,7 @@ async fn start_agent_loop_inner(
         // No tool calls - conversation complete
         if !has_tool_calls {
             mcp_manager.shutdown().await;
+            crate::hooks::run_stop_hooks(&window, &request_id, &config.default_work_dir).await;
             emit_agent_complete(&window, &request_id, "success");
             return Ok(());
         }
@@ -470,6 +472,7 @@ async fn start_agent_loop_inner(
         normalize_tool_calls(&mut accumulated_tool_calls);
         if accumulated_tool_calls.is_empty() {
             mcp_manager.shutdown().await;
+            crate::hooks::run_stop_hooks(&window, &request_id, &config.default_work_dir).await;
             emit_agent_complete(&window, &request_id, "success");
             return Ok(());
         }
@@ -499,6 +502,7 @@ async fn start_agent_loop_inner(
     }
 
     mcp_manager.shutdown().await;
+    crate::hooks::run_stop_hooks(&window, &request_id, &config.default_work_dir).await;
     let budget_message = format!(
         "\n\nAgent loop limit reached ({}). I paused here to avoid runaway tool use. Send a follow-up to continue, or increase the limit in settings.",
         max_loops

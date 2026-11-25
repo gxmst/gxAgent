@@ -75,6 +75,11 @@ async function registerContextAndCodexListeners(unlisteners: (() => void)[]) {
     useCodexStore.getState().setQuestion(agentEventSessionId(event.payload), event.payload.question);
   }));
 
+  unlisteners.push(await listen<{ requestId: string; question: CodexQuestion | null }>("agent-question", (event) => {
+    if (!isCurrentRequestPayload(event.payload)) return;
+    useCodexStore.getState().setQuestion(agentEventSessionId(event.payload), event.payload.question);
+  }));
+
   unlisteners.push(await listen<void>("open-settings", () => {
     store().setSettingsOpen(true);
   }));

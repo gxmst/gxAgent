@@ -243,17 +243,27 @@ async fn run_chat_tools(
             );
         }
         let search_start = Instant::now();
-        let tool_output = execute_tool_with_control(
-            &tc.name,
-            &tc.arguments,
-            &config.default_work_dir,
-            &config.search_provider,
-            &config.search_api_key,
-            config.command_timeout,
-            Some(cancel_rx.clone()),
-            None,
-        )
-        .await;
+        let tool_output = if tc.name == "read_skill" {
+            let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+            let skill = args["skill"].as_str().unwrap_or("");
+            let resource = args["resource"].as_str();
+            match crate::skills::read_skill_entry(config, skill, resource) {
+                Ok(text) => text,
+                Err(error) => format!("Error: {}", error),
+            }
+        } else {
+            execute_tool_with_control(
+                &tc.name,
+                &tc.arguments,
+                &config.default_work_dir,
+                &config.search_provider,
+                &config.search_api_key,
+                config.command_timeout,
+                Some(cancel_rx.clone()),
+                None,
+            )
+            .await
+        };
         if tool_output == TOOL_CANCELLED_ERROR {
             return Err(AGENT_CANCELLED_ERROR.to_string());
         }

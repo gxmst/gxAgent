@@ -238,7 +238,7 @@ pub(super) fn should_scrub_env_var(name: &str) -> bool {
             .any(|needle| upper.contains(needle))
 }
 
-fn scrub_sensitive_env(command: &mut Command) {
+pub(crate) fn scrub_sensitive_env(command: &mut Command) {
     for (key, _) in std::env::vars_os() {
         if let Some(name) = key.to_str() {
             if should_scrub_env_var(name) {

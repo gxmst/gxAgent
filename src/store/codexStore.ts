@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 export interface CodexModel { id: string; model: string; displayName: string }
 export interface CodexQuestion {
+  source?: "codex" | "native";
   interactionId: string;
   questions: { id: string; header: string; question: string; isSecret?: boolean; options?: { label: string; description: string }[] | null }[];
 }

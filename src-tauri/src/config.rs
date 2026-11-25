@@ -210,7 +210,7 @@ fn default_plan_mode() -> bool {
 /// (the `#[serde(default)]` on the field) and are migrated on load; after
 /// migration the version is stored, so a tool the user later disables stays
 /// disabled instead of being re-enabled on every launch.
-pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 6;
+pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 7;
 
 /// Pre-v2 defaults for the agent limits, used by the one-time migration in
 /// load_config to tell "user never touched this" (exact old default) apart
@@ -225,13 +225,24 @@ pub struct TrustedPattern {
     pub created_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn default_mcp_transport() -> String {
+    "stdio".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,6 +416,8 @@ impl Default for AppConfig {
                 "glob".into(),
                 "todo_write".into(),
                 "spawn_agent".into(),
+                "ask_user_question".into(),
+                "read_skill".into(),
             ],
             approval_policy: "standard".into(),
             trusted_patterns: default_trusted_patterns(),

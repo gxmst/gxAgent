@@ -161,6 +161,13 @@ pub fn load_config() -> Result<AppConfig, String> {
         {
             config.tools_enabled.push("web_fetch".to_string());
         }
+        if config.tools_migration_version < 7 {
+            for tool in ["ask_user_question", "read_skill"] {
+                if !config.tools_enabled.iter().any(|existing| existing == tool) {
+                    config.tools_enabled.push(tool.to_string());
+                }
+            }
+        }
         config.tools_migration_version = config::CURRENT_TOOLS_MIGRATION_VERSION;
         config_changed = true;
     }
@@ -289,29 +296,49 @@ fn persist_config(config: &AppConfig) -> Result<(), String> {
 }
 
 /// Save or update an MCP server configuration
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn save_mcp_server(
+pub async fn save_mcp_server(
     current_config: AppConfig,
     name: String,
-    command: String,
-    args: Vec<String>,
-    env: HashMap<String, String>,
+    transport: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    url: Option<String>,
+    headers: Option<HashMap<String, String>>,
 ) -> Result<AppConfig, String> {
     let mut config = current_config;
-    let server = config::McpServerConfig { command, args, env };
-    if name.trim().is_empty() || config.mcp_servers.contains_key(name.trim()) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || config.mcp_servers.contains_key(trimmed) {
         return Err("MCP server name is empty or already exists".into());
     }
+    let server = config::McpServerConfig {
+        transport: transport
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "stdio".to_string()),
+        command: command.unwrap_or_default(),
+        args: args.unwrap_or_default(),
+        env: env.unwrap_or_default(),
+        url: url.unwrap_or_default(),
+        headers: headers.unwrap_or_default(),
+    };
     mcp::validate_server_config(&server)?;
-    config.mcp_servers.insert(name.trim().to_string(), server);
+    mcp::stop_pooled_server(trimmed).await;
+    config.mcp_servers.insert(trimmed.to_string(), server);
     persist_config(&config)?;
     Ok(config)
 }
 
 /// Delete an MCP server configuration by name
 #[tauri::command]
-pub fn delete_mcp_server(current_config: AppConfig, name: String) -> Result<AppConfig, String> {
+pub async fn delete_mcp_server(
+    current_config: AppConfig,
+    name: String,
+) -> Result<AppConfig, String> {
     let mut config = current_config;
+    mcp::stop_pooled_server(name.trim()).await;
     config.mcp_servers.remove(&name);
     persist_config(&config)?;
     Ok(config)
@@ -323,16 +350,25 @@ pub fn delete_mcp_server(current_config: AppConfig, name: String) -> Result<AppC
 #[tauri::command]
 pub async fn test_mcp_server(
     name: String,
-    command: String,
+    transport: Option<String>,
+    command: Option<String>,
     args: Option<Vec<String>>,
     env: Option<HashMap<String, String>>,
+    url: Option<String>,
+    headers: Option<HashMap<String, String>>,
 ) -> mcp::McpServerStatus {
     mcp::test_server(
         name,
         config::McpServerConfig {
-            command,
+            transport: transport
+                .map(|t| t.trim().to_ascii_lowercase())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "stdio".to_string()),
+            command: command.unwrap_or_default(),
             args: args.unwrap_or_default(),
             env: env.unwrap_or_default(),
+            url: url.unwrap_or_default(),
+            headers: headers.unwrap_or_default(),
         },
     )
     .await

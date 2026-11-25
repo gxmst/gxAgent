@@ -21,3 +21,21 @@ export function parseMcpEnvironment(text: string): Record<string, string> {
   }
   return env;
 }
+
+export function parseMcpHeaders(text: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const colon = line.indexOf(":");
+    if (colon <= 0) {
+      throw new Error("Headers must use Name: value, one per line");
+    }
+    const name = line.slice(0, colon).trim();
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
+      throw new Error(`Invalid HTTP header name: ${name}`);
+    }
+    headers[name] = line.slice(colon + 1).trim();
+  }
+  return headers;
+}

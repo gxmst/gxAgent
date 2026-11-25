@@ -206,14 +206,70 @@ pub fn get_all_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "spawn_agent",
-                "description": "Ask a focused read-only subagent to investigate a bounded task and return a concise report. Subagents have no tools and cannot create nested agents.",
+                "description": "Delegate a bounded, read-only investigation or analysis subtask to an autonomous subagent (up to 10 turns with read_file, grep, glob, list_dir, web_search, web_fetch, get_current_time) and receive a concise report. Subagents cannot edit files, run commands, or spawn nested agents.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "task": { "type": "string", "description": "The focused task for the subagent." },
-                        "context_hint": { "type": "string", "description": "Optional context or files that may help the subagent." }
+                        "task": { "type": "string", "description": "The focused investigation task for the subagent." },
+                        "context_hint": { "type": "string", "description": "Optional context, starting paths, or clues to focus the subagent." }
                     },
                     "required": ["task"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "ask_user_question",
+                "description": "Ask the user 1 to 4 structured clarifying questions in the UI and wait for their answers before making ambiguous architectural, configuration, or destructive choices.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "description": "Questions to present to the user (1-4 items).",
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string", "description": "Optional short identifier (auto-generated if omitted)." },
+                                    "header": { "type": "string", "description": "Optional short category/header label." },
+                                    "question": { "type": "string", "description": "The clear question for the user to answer." },
+                                    "is_secret": { "type": "boolean", "description": "Mask input when collecting tokens or secrets." },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "Optional suggested answer choices.",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": { "type": "string" },
+                                                "description": { "type": "string" }
+                                            },
+                                            "required": ["label"]
+                                        }
+                                    }
+                                },
+                                "required": ["question"]
+                            }
+                        }
+                    },
+                    "required": ["questions"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "read_skill",
+                "description": "Load the full instructions (SKILL.md) or a bundled resource file for an available skill listed in the skill catalog.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill": { "type": "string", "description": "Skill name or id from the available skill catalog." },
+                        "resource": { "type": "string", "description": "Optional relative file path inside the skill folder (e.g. 'references/guide.md'). Omit to read the full SKILL.md instructions." }
+                    },
+                    "required": ["skill"]
                 }
             }
         }),

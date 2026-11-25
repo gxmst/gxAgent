@@ -252,29 +252,55 @@ pub async fn list_skills(config: AppConfig) -> Result<Catalog, String> {
         .map_err(|e| e.to_string())
 }
 
+pub fn read_skill_entry(
+    config: &AppConfig,
+    skill_query: &str,
+    resource: Option<&str>,
+) -> Result<String, String> {
+    let query = skill_query.trim();
+    if query.is_empty() {
+        return Err("Skill name or id is required".into());
+    }
+    let catalog = discover(config);
+    let skill = catalog
+        .skills
+        .iter()
+        .find(|s| s.id == query || s.name.eq_ignore_ascii_case(query))
+        .ok_or_else(|| format!("Skill '{}' is not available", query))?;
+
+    if let Some(res) = resource.map(str::trim).filter(|r| !r.is_empty()) {
+        let root = Path::new(&skill.path)
+            .parent()
+            .ok_or("Invalid skill path")?;
+        let canonical_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+        let path = std::fs::canonicalize(canonical_root.join(res)).map_err(|e| e.to_string())?;
+        if !path.starts_with(&canonical_root) || !path.is_file() {
+            return Err("Resource must be inside the skill directory".into());
+        }
+        if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > 256 * 1024 {
+            return Err("Resource exceeds 256 KB".into());
+        }
+        return std::fs::read_to_string(path).map_err(|e| e.to_string());
+    }
+
+    let resources_line = if skill.resources.is_empty() {
+        "none".to_string()
+    } else {
+        skill.resources.join(", ")
+    };
+    Ok(format!(
+        "[Skill: {} ({})]\nSource: {}\nResources: {}\n\n{}",
+        skill.name, skill.scope, skill.path, resources_line, skill.body
+    ))
+}
+
 #[tauri::command]
 pub fn read_skill_resource(
     config: AppConfig,
     skill_id: String,
     resource: String,
 ) -> Result<String, String> {
-    let catalog = discover(&config);
-    let skill = catalog
-        .skills
-        .iter()
-        .find(|s| s.id == skill_id)
-        .ok_or("Skill is no longer available")?;
-    let root = Path::new(&skill.path)
-        .parent()
-        .ok_or("Invalid skill path")?;
-    let path = std::fs::canonicalize(root.join(resource)).map_err(|e| e.to_string())?;
-    if !path.starts_with(root) || !path.is_file() {
-        return Err("Resource must be inside the skill directory".into());
-    }
-    if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > 256 * 1024 {
-        return Err("Resource exceeds 256 KB".into());
-    }
-    std::fs::read_to_string(path).map_err(|e| e.to_string())
+    read_skill_entry(&config, &skill_id, Some(&resource))
 }
 
 #[cfg(test)]

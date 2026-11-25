@@ -11,7 +11,8 @@ export function AgentQuestion({ question, sessionId, lang }: { question: CodexQu
   return <form className="agent-question" onSubmit={async event => {
     event.preventDefault(); setSubmitting(true); setError("");
     try {
-      await invoke("answer_codex_question", { interactionId: question.interactionId, answers: Object.fromEntries(question.questions.map(item => [item.id, [answers[item.id]]])) });
+      const command = question.source === "native" ? "answer_agent_question" : "answer_codex_question";
+      await invoke(command, { interactionId: question.interactionId, answers: Object.fromEntries(question.questions.map(item => [item.id, [answers[item.id]]])) });
       const state = useCodexStore.getState();
       if (state.questions[sessionId]?.interactionId === question.interactionId) state.setQuestion(sessionId, null);
     } catch (reason) { setError(String(reason)); }

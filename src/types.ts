@@ -37,7 +37,14 @@ export interface AppConfig {
   language: string;
   profiles: Record<string, ApiProfile>;
   active_profile: string | null;
-  mcp_servers: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
+  mcp_servers: Record<string, {
+    transport?: "stdio" | "http";
+    command: string;
+    args?: string[];
+    env?: Record<string, string>;
+    url?: string;
+    headers?: Record<string, string>;
+  }>;
   search_provider: string;
   search_api_key: string;
   font_size: number;

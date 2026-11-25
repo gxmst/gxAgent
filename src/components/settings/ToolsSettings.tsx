@@ -8,7 +8,7 @@ import { McpAddForm } from "../mcp/McpAddForm";
 import { McpInspector } from "../mcp/McpInspector";
 import type { ConfirmationOptions } from "../shared/ConfirmDialog";
 
-export function ToolsSettings({ lang, config, setConfig, toggleTool, statuses, onTest, onDelete, addLog, requestConfirmation }: {
+export function ToolsSettings({ lang, config, setConfig, toggleTool, statuses, onTest, onStop, onDelete, addLog, requestConfirmation }: {
   requestConfirmation: (options: ConfirmationOptions) => Promise<boolean>;
   lang: string;
   config: AppConfig;
@@ -16,6 +16,7 @@ export function ToolsSettings({ lang, config, setConfig, toggleTool, statuses, o
   toggleTool: (tool: string) => void;
   statuses: Record<string, McpStatus>;
   onTest: (name: string) => void;
+  onStop?: (name: string) => void;
   onDelete: (name: string) => void;
   addLog: (text: string, type?: "info" | "success" | "error" | "cmd", showToast?: boolean) => void;
 }) {
@@ -27,7 +28,7 @@ export function ToolsSettings({ lang, config, setConfig, toggleTool, statuses, o
       </label>)}
     </fieldset>
     <div className="settings-panel settings-wide"><div className="settings-panel-header"><span><Server size={14} /> MCP</span><span>{Object.keys(config.mcp_servers).length}</span></div>
-      <McpServerManager lang={lang} servers={Object.entries(config.mcp_servers).map(([name, server]) => ({ name, command: server.command, args: server.args || [], state: statuses[name]?.state || "stopped", toolCount: statuses[name]?.toolCount, message: statuses[name]?.message }))} onTest={onTest} onDelete={async name => { if (await requestConfirmation({ title: lang === "zh" ? "删除 MCP 服务" : "Delete MCP server", message: name, confirmLabel: lang === "zh" ? "删除" : "Delete", cancelLabel: lang === "zh" ? "取消" : "Cancel", danger: true })) onDelete(name); }} />
+      <McpServerManager lang={lang} servers={Object.entries(config.mcp_servers).map(([name, server]) => ({ name, command: server.transport === "http" ? (server.url || "") : server.command, args: server.transport === "http" ? [] : (server.args || []), state: statuses[name]?.state || "stopped", toolCount: statuses[name]?.toolCount, message: statuses[name]?.message }))} onTest={onTest} onStop={onStop} onDelete={async name => { if (await requestConfirmation({ title: lang === "zh" ? "删除 MCP 服务" : "Delete MCP server", message: name, confirmLabel: lang === "zh" ? "删除" : "Delete", cancelLabel: lang === "zh" ? "取消" : "Cancel", danger: true })) onDelete(name); }} />
       <McpAddForm setConfig={setConfig} addLog={addLog} lang={lang} t={t} config={config} />
     </div>
     <McpInspector config={config} lang={lang} requestConfirmation={requestConfirmation} />

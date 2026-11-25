@@ -1,22 +1,21 @@
 use super::prompts::{configured_max_tool_calls, plan_mode_allows_tool, sanitize_args_for_log};
 use super::state::{
-    await_with_cancel, cancel_registered_approval, ensure_not_cancelled, is_agent_cancelled_error,
-    register_approval_wait, wait_for_cancellation, wait_for_registered_approval,
+    await_with_cancel, cancel_registered_approval, cancel_registered_question,
+    ensure_not_cancelled, is_agent_cancelled_error, register_approval_wait, register_question_wait,
+    wait_for_cancellation, wait_for_registered_approval, wait_for_registered_question,
     wait_for_steering_interrupt, AGENT_CANCELLED_ERROR, AGENT_STEERING_INTERRUPTED_OUTPUT,
-    CHECKPOINTED_REQUESTS, SUBAGENT_SLOTS,
+    CHECKPOINTED_REQUESTS,
 };
-use super::stream::{emit_request_event, send_model_request_with_retry, AccumulatedToolCall};
+use super::stream::{emit_request_event, AccumulatedToolCall};
 use crate::audit::AuditLogger;
 use crate::config::AppConfig;
 use crate::mcp::McpManager;
 use crate::policy::{check_approval, ApprovalLevel};
-use crate::provider;
 use crate::tools::{execute_tool_with_control, ExecutionChunk, TOOL_CANCELLED_ERROR};
 use crate::workspace;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::{Emitter, Window};
 use tokio::sync::{oneshot, watch};
 
@@ -296,72 +295,7 @@ async fn execute_parallel_read_with_steering(
     }
 }
 
-async fn run_spawn_agent(
-    window: &Window,
-    request_id: &str,
-    args_str: &str,
-    config: &AppConfig,
-    cancel_rx: &watch::Receiver<bool>,
-) -> Result<String, String> {
-    let permit = SUBAGENT_SLOTS.clone().try_acquire_owned().map_err(|_| {
-        "The subagent concurrency limit (3) is already in use. Continue this task directly."
-            .to_string()
-    })?;
-    let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
-    let task = args["task"].as_str().unwrap_or("").trim();
-    if task.is_empty() {
-        drop(permit);
-        return Err("spawn_agent requires a non-empty task.".to_string());
-    }
-    let context_hint = args["context_hint"].as_str().unwrap_or("").trim();
-    let child_system = format!(
-        "You are a focused gxAgent subagent. Investigate the bounded task below using only your own reasoning and the supplied context. You have no tools, cannot modify files, and cannot spawn another agent. Return a concise factual report with findings, risks, and a recommended next step.\n\nTask:\n{}{}",
-        task,
-        if context_hint.is_empty() {
-            String::new()
-        } else {
-            format!("\n\nContext hint:\n{}", context_hint)
-        }
-    );
-    let messages = vec![
-        json!({ "role": "system", "content": child_system }),
-        json!({ "role": "user", "content": task }),
-    ];
-    let wire = provider::Wire::from_config(config);
-    let mut child_config = config.clone();
-    child_config.tools_enabled.clear();
-    child_config.streaming = false;
-    let body = provider::build_body(wire, &config.model, &messages, &[], &child_config, false);
-    let url = provider::build_url(wire, &config.base_url, &config.model, false);
-    let child_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .read_timeout(Duration::from_secs(300))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-    let builder = provider::apply_auth(wire, child_client.post(&url), &config.api_key);
-    let response =
-        send_model_request_with_retry(window, request_id, cancel_rx, builder.json(&body)).await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        drop(permit);
-        return Err(format!("Subagent API error ({}): {}", status, text));
-    }
-    let response_body: Value = await_with_cancel(cancel_rx, response.json())
-        .await?
-        .map_err(|error| format!("Failed to parse subagent response: {}", error))?;
-    let (content, _reasoning, _calls, _prompt_tokens, _completion_tokens) =
-        provider::parse_full_response(wire, &response_body);
-    drop(permit);
-    if content.trim().is_empty() {
-        return Err("Subagent returned an empty report.".to_string());
-    }
-    Ok(content)
-}
-
-/// Apply the same request-scoped steering interrupt to the subagent request.
-/// The subagent has no tools of its own, but its network call can still be
-/// expensive and should stop when the user changes direction.
+/// Apply the same request-scoped steering interrupt to the multi-turn read-only subagent.
 async fn run_spawn_agent_with_steering(
     window: &Window,
     request_id: &str,
@@ -371,8 +305,208 @@ async fn run_spawn_agent_with_steering(
     steering_rx: &watch::Receiver<bool>,
 ) -> Result<String, String> {
     let (stop_rx, reason_rx, watcher) = spawn_steering_watcher(cancel_rx, steering_rx);
-    let output = run_spawn_agent(window, request_id, args_str, config, &stop_rx).await;
+    let output =
+        super::subagent::run_spawn_agent(window, request_id, args_str, config, &stop_rx).await;
     resolve_steering_output(output, reason_rx, watcher).await
+}
+
+async fn run_ask_user_question_with_steering(
+    window: &Window,
+    request_id: &str,
+    args_str: &str,
+    cancel_rx: &watch::Receiver<bool>,
+    steering_rx: &watch::Receiver<bool>,
+) -> Result<String, String> {
+    let args: Value = serde_json::from_str(args_str)
+        .map_err(|_| "ask_user_question requires a JSON object argument.".to_string())?;
+    let raw_questions = args["questions"]
+        .as_array()
+        .filter(|arr| !arr.is_empty())
+        .ok_or_else(|| "ask_user_question requires a non-empty questions array.".to_string())?;
+
+    let mut normalized_questions = Vec::new();
+    for (idx, item) in raw_questions.iter().take(4).enumerate() {
+        let prompt = item["question"].as_str().unwrap_or("").trim();
+        if prompt.is_empty() {
+            return Err("Each question in ask_user_question must be non-empty.".to_string());
+        }
+        let id = item["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("q{}", idx + 1));
+        let header = item["header"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        let is_secret = item["is_secret"].as_bool().unwrap_or(false);
+        let options = item["options"].as_array().map(|opts| {
+            opts.iter()
+                .filter_map(|opt| {
+                    let label = opt["label"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())?;
+                    let description = opt["description"].as_str().unwrap_or("").trim();
+                    Some(json!({ "label": label, "description": description }))
+                })
+                .collect::<Vec<_>>()
+        });
+        normalized_questions.push(json!({
+            "id": id,
+            "header": header,
+            "question": prompt,
+            "isSecret": is_secret,
+            "options": options,
+        }));
+    }
+
+    let interaction_id = format!("ask-{}", uuid::Uuid::new_v4());
+    let rx = register_question_wait(&interaction_id).await;
+    emit_request_event(
+        window,
+        "agent-question",
+        request_id,
+        json!({
+            "question": {
+                "source": "native",
+                "interactionId": interaction_id,
+                "questions": normalized_questions,
+            }
+        }),
+    );
+
+    let mut wait_future = Box::pin(wait_for_registered_question(&interaction_id, rx, cancel_rx));
+    let mut steering_watch = steering_rx.clone();
+    let result = tokio::select! {
+        res = &mut wait_future => res,
+        _ = wait_for_steering_interrupt(&mut steering_watch) => {
+            cancel_registered_question(&interaction_id).await;
+            Ok(HashMap::from([("__interrupted".to_string(), vec![AGENT_STEERING_INTERRUPTED_OUTPUT.to_string()])]))
+        }
+    };
+
+    emit_request_event(
+        window,
+        "agent-question",
+        request_id,
+        json!({ "question": Value::Null }),
+    );
+
+    match result {
+        Ok(map) if map.contains_key("__interrupted") => {
+            Ok(AGENT_STEERING_INTERRUPTED_OUTPUT.to_string())
+        }
+        Ok(answers) => {
+            Ok(serde_json::to_string_pretty(&json!({ "answers": answers })).unwrap_or_default())
+        }
+        Err(error) => {
+            cancel_registered_question(&interaction_id).await;
+            Err(error)
+        }
+    }
+}
+
+fn run_read_skill(config: &AppConfig, args_str: &str) -> String {
+    let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
+    let skill = args["skill"].as_str().unwrap_or("");
+    let resource = args["resource"].as_str();
+    match crate::skills::read_skill_entry(config, skill, resource) {
+        Ok(text) => text,
+        Err(error) => format!("Error: {}", error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_sequential_tool(
+    window: &Window,
+    request_id: &str,
+    tc: &AccumulatedToolCall,
+    config: &AppConfig,
+    mcp_manager: &mut McpManager,
+    cancel_rx: &watch::Receiver<bool>,
+    steering_rx: &watch::Receiver<bool>,
+) -> Result<String, String> {
+    if let crate::hooks::PreHookDecision::Block(reason) = crate::hooks::run_pre_tool_hooks(
+        window,
+        request_id,
+        &config.default_work_dir,
+        &tc.name,
+        &tc.arguments,
+    )
+    .await
+    {
+        return Ok(format!("Error: {}", reason));
+    }
+
+    let mut result = if tc.name == "spawn_agent" {
+        match run_spawn_agent_with_steering(
+            window,
+            request_id,
+            &tc.arguments,
+            config,
+            cancel_rx,
+            steering_rx,
+        )
+        .await
+        {
+            Ok(output) => Ok(output),
+            Err(error) if is_agent_cancelled_error(&error) => Err(error),
+            Err(error) => Ok(format!("Error: {}", error)),
+        }
+    } else if tc.name == "ask_user_question" {
+        match run_ask_user_question_with_steering(
+            window,
+            request_id,
+            &tc.arguments,
+            cancel_rx,
+            steering_rx,
+        )
+        .await
+        {
+            Ok(output) => Ok(output),
+            Err(error) if is_agent_cancelled_error(&error) => Err(error),
+            Err(error) => Ok(format!("Error: {}", error)),
+        }
+    } else if tc.name == "read_skill" {
+        Ok(run_read_skill(config, &tc.arguments))
+    } else {
+        execute_tool_with_steering(
+            window,
+            request_id,
+            &tc.id,
+            &tc.name,
+            &tc.arguments,
+            config,
+            mcp_manager,
+            cancel_rx,
+            steering_rx,
+        )
+        .await
+    };
+
+    if let Ok(ref mut output) = result {
+        if output != AGENT_STEERING_INTERRUPTED_OUTPUT {
+            if let Some(note) = crate::hooks::run_post_tool_hooks(
+                window,
+                request_id,
+                &config.default_work_dir,
+                &tc.name,
+                &tc.arguments,
+                output,
+            )
+            .await
+            {
+                output.push('\n');
+                output.push_str(&note);
+            }
+        }
+    }
+
+    result
 }
 
 async fn read_mutation_target(
@@ -640,6 +774,11 @@ pub(super) async fn process_tool_calls(
     let mut steering_interrupted = *steering_rx.borrow();
 
     if !parallel_reads.is_empty() && !steering_interrupted {
+        let has_hooks = crate::hooks::load_project_hooks(&config.default_work_dir)
+            .ok()
+            .flatten()
+            .is_some();
+        let mut allowed_reads = Vec::new();
         for tc in &parallel_reads {
             emit_request_event(
                 window,
@@ -652,11 +791,34 @@ pub(super) async fn process_tool_calls(
                     "displayArguments": sanitize_args_for_log(&tc.arguments)
                 }),
             );
+            if has_hooks {
+                if let crate::hooks::PreHookDecision::Block(reason) =
+                    crate::hooks::run_pre_tool_hooks(
+                        window,
+                        request_id,
+                        &config.default_work_dir,
+                        &tc.name,
+                        &tc.arguments,
+                    )
+                    .await
+                {
+                    let err_output = format!("Error: {}", reason);
+                    emit_request_event(
+                        window,
+                        "agent-tool-output",
+                        request_id,
+                        json!({ "id": tc.id, "name": tc.name, "output": err_output }),
+                    );
+                    outputs_by_id.insert(tc.id.clone(), err_output);
+                    continue;
+                }
+            }
+            allowed_reads.push(*tc);
         }
 
         // Run all read-only calls concurrently on the blocking-friendly async
         // path. The controlled executor only needs cloned config fields.
-        let futures = parallel_reads.iter().map(|tc| {
+        let futures = allowed_reads.iter().map(|tc| {
             let name = tc.name.clone();
             let args = tc.arguments.clone();
             let work_dir = config.default_work_dir.clone();
@@ -681,8 +843,8 @@ pub(super) async fn process_tool_calls(
         });
         let outputs = futures_util::future::join_all(futures).await;
 
-        for (tc, output) in parallel_reads.iter().zip(outputs) {
-            let output = match output {
+        for (tc, output) in allowed_reads.iter().zip(outputs) {
+            let mut output = match output {
                 Ok(output) => output,
                 Err(error) => {
                     if let Some((approval_request_id, _)) = pending_approval.as_ref() {
@@ -691,6 +853,21 @@ pub(super) async fn process_tool_calls(
                     return Err(error);
                 }
             };
+            if has_hooks && output != AGENT_STEERING_INTERRUPTED_OUTPUT {
+                if let Some(note) = crate::hooks::run_post_tool_hooks(
+                    window,
+                    request_id,
+                    &config.default_work_dir,
+                    &tc.name,
+                    &tc.arguments,
+                    &output,
+                )
+                .await
+                {
+                    output.push('\n');
+                    output.push_str(&note);
+                }
+            }
             emit_request_event(
                 window,
                 "agent-tool-output",
@@ -715,35 +892,16 @@ pub(super) async fn process_tool_calls(
                 tool_executing_payload(tc, config).await,
             );
 
-            let output = if tc.name == "spawn_agent" {
-                match run_spawn_agent_with_steering(
-                    window,
-                    request_id,
-                    &tc.arguments,
-                    config,
-                    cancel_rx,
-                    steering_rx,
-                )
-                .await
-                {
-                    Ok(output) => Ok(output),
-                    Err(error) if is_agent_cancelled_error(&error) => Err(error),
-                    Err(error) => Ok(format!("Error: {}", error)),
-                }
-            } else {
-                execute_tool_with_steering(
-                    window,
-                    request_id,
-                    &tc.id,
-                    &tc.name,
-                    &tc.arguments,
-                    config,
-                    &mut *mcp_manager,
-                    cancel_rx,
-                    steering_rx,
-                )
-                .await
-            };
+            let output = run_sequential_tool(
+                window,
+                request_id,
+                tc,
+                config,
+                &mut *mcp_manager,
+                cancel_rx,
+                steering_rx,
+            )
+            .await;
             let output = match output {
                 Ok(output) => output,
                 Err(error) => {
@@ -915,35 +1073,16 @@ pub(super) async fn process_tool_calls(
                         tool_executing_payload(tc, config).await,
                     );
 
-                    let output = if tc.name == "spawn_agent" {
-                        match run_spawn_agent_with_steering(
-                            window,
-                            request_id,
-                            &tc.arguments,
-                            config,
-                            cancel_rx,
-                            steering_rx,
-                        )
-                        .await
-                        {
-                            Ok(output) => Ok(output),
-                            Err(error) if is_agent_cancelled_error(&error) => return Err(error),
-                            Err(error) => Ok(format!("Error: {}", error)),
-                        }
-                    } else {
-                        execute_tool_with_steering(
-                            window,
-                            request_id,
-                            &tc.id,
-                            &tc.name,
-                            &tc.arguments,
-                            config,
-                            &mut *mcp_manager,
-                            cancel_rx,
-                            steering_rx,
-                        )
-                        .await
-                    }?;
+                    let output = run_sequential_tool(
+                        window,
+                        request_id,
+                        tc,
+                        config,
+                        &mut *mcp_manager,
+                        cancel_rx,
+                        steering_rx,
+                    )
+                    .await?;
 
                     let was_steering_interrupted = output == AGENT_STEERING_INTERRUPTED_OUTPUT;
                     emit_request_event(

@@ -20,6 +20,7 @@ pub(super) const CHAT_READ_ONLY_TOOLS: &[&str] = &[
     "list_dir",
     "grep",
     "glob",
+    "read_skill",
 ];
 pub(super) const CHAT_MODE_INSTRUCTION: &str = "Ordinary chat has a lightweight read-only tool set: current time, web search, and workspace file inspection. Do not modify files, run commands, run Python, or spawn agents in ordinary chat; those actions require Code mode.";
 const ROLE_PRESET_BEGIN_MARKER: &str = "<<<GXAGENT_ACTIVE_ROLE_PRESET_BEGIN>>>";
@@ -145,6 +146,8 @@ pub(super) fn plan_mode_allows_tool(name: &str) -> bool {
             | "glob"
             | "todo_write"
             | "spawn_agent"
+            | "ask_user_question"
+            | "read_skill"
     )
 }
 

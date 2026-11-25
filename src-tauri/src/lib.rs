@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod context;
 mod crypto;
+mod hooks;
 mod knowledge;
 mod mcp;
 mod policy;
@@ -135,6 +136,8 @@ pub fn run() {
             knowledge::run_knowledge_evaluation,
             mcp::inspect_mcp_tools,
             mcp::call_mcp_debug,
+            mcp::stop_mcp_server,
+            hooks::list_project_hooks,
             storage::list_session_backups,
             storage::create_session_backup,
             storage::read_session_backup,
@@ -180,6 +183,7 @@ pub fn run() {
             commands::config::test_mcp_server,
             commands::agent::fetch_ollama_models,
             commands::agent::push_steering_message,
+            commands::agent::answer_agent_question,
             commands::config::export_config,
             commands::config::import_config,
             commands::config::clear_all_sessions,

@@ -11,7 +11,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 pub use process::check_python_available;
-pub(crate) use process::terminate_process_tree;
+pub(crate) use process::{scrub_sensitive_env, terminate_process_tree};
 pub use schema::get_enabled_tool_definitions;
 
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300; // 5 minutes

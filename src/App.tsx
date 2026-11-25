@@ -366,6 +366,7 @@ function App() {
     fetchModelList,
     getModelDisplayName,
     testMcpServer,
+    stopMcpServer,
     deleteMcpServer,
     saveConfig,
     toggleTool,
@@ -819,6 +820,7 @@ function App() {
           removeTrustedPattern={removeTrustedPattern}
           mcpStatusByName={mcpStatusByName}
           testMcpServer={testMcpServer}
+          stopMcpServer={stopMcpServer}
           deleteMcpServer={deleteMcpServer}
           presets={presets}
           sessionMutationLocked={sessionMutationLocked}

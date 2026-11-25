@@ -75,9 +75,12 @@ export function useConfigActions({
         error?: string | null;
       }>("test_mcp_server", {
         name,
-        command: server.command,
+        transport: server.transport || "stdio",
+        command: server.command || "",
         args: server.args || [],
         env: server.env || {},
+        url: server.url || "",
+        headers: server.headers || {},
       });
       setMcpStatusByName((previous) => ({
         ...previous,
@@ -89,6 +92,15 @@ export function useConfigActions({
       }));
     } catch (error) {
       setMcpStatusByName((previous) => ({ ...previous, [name]: { state: "error", message: String(error) } }));
+    }
+  };
+
+  const stopMcpServer = async (name: string) => {
+    try {
+      await invoke("stop_mcp_server", { name });
+      setMcpStatusByName((previous) => ({ ...previous, [name]: { state: "stopped" } }));
+    } catch (error) {
+      addLog(String(error), "error", true);
     }
   };
 
@@ -154,6 +166,7 @@ export function useConfigActions({
     fetchModelList,
     getModelDisplayName,
     testMcpServer,
+    stopMcpServer,
     deleteMcpServer,
     saveConfig,
     toggleTool,

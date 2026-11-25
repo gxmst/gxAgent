@@ -153,3 +153,12 @@ pub async fn push_steering_message(message: String, request_id: String) -> Resul
     agent::push_steering_message(request_id, message).await;
     Ok(())
 }
+
+/// Answer a native `ask_user_question` tool prompt
+#[tauri::command]
+pub async fn answer_agent_question(
+    interaction_id: String,
+    answers: std::collections::HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    agent::resolve_question(&interaction_id, answers).await
+}

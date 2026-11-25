@@ -279,6 +279,8 @@ pub fn check_approval(
             | "glob"
             | "todo_write"
             | "spawn_agent"
+            | "ask_user_question"
+            | "read_skill"
     );
     if read_only {
         return ApprovalLevel::AutoApprove;
