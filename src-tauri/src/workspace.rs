@@ -84,6 +84,16 @@ pub struct GitCheckpoint {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeInfo {
+    pub path: String,
+    pub head: String,
+    pub branch: Option<String>,
+    pub is_main: bool,
+    pub bare: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunChange {
@@ -1009,6 +1019,210 @@ pub async fn restore_git_checkpoint(
     Ok(())
 }
 
+fn normalize_comparable_path(raw: &str) -> String {
+    let resolved = std::fs::canonicalize(raw)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| raw.trim().to_string());
+    let stripped = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
+    let forward = stripped
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    if cfg!(windows) {
+        forward.to_lowercase()
+    } else {
+        forward
+    }
+}
+
+pub fn parse_worktree_porcelain(raw: &str) -> Vec<GitWorktreeInfo> {
+    let mut entries = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut head = String::new();
+    let mut branch: Option<String> = None;
+    let mut bare = false;
+
+    let flush = |entries: &mut Vec<GitWorktreeInfo>,
+                 path: &mut Option<String>,
+                 head: &mut String,
+                 branch: &mut Option<String>,
+                 bare: &mut bool| {
+        if let Some(p) = path.take() {
+            let is_main = entries.is_empty();
+            entries.push(GitWorktreeInfo {
+                path: p,
+                head: std::mem::take(head),
+                branch: branch.take(),
+                is_main,
+                bare: *bare,
+            });
+            *bare = false;
+        }
+    };
+
+    for raw_line in raw.lines().chain(std::iter::once("")) {
+        let line = raw_line.trim_end_matches('\r');
+        if line.is_empty() {
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut head,
+                &mut branch,
+                &mut bare,
+            );
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut head,
+                &mut branch,
+                &mut bare,
+            );
+            current_path = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("HEAD ") {
+            head = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            let trimmed = rest.trim();
+            branch = Some(
+                trimmed
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(trimmed)
+                    .to_string(),
+            );
+        } else if line == "bare" {
+            bare = true;
+        }
+    }
+    entries
+}
+
+fn validate_branch_name(branch: &str) -> Result<&str, String> {
+    let trimmed = branch.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 100
+        || trimmed.starts_with('-')
+        || trimmed.starts_with('/')
+        || trimmed.ends_with('/')
+        || trimmed.contains("..")
+        || trimmed.contains("//")
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+    {
+        return Err("Invalid git branch name".into());
+    }
+    Ok(trimmed)
+}
+
+#[tauri::command]
+pub async fn list_git_worktrees(
+    work_dir: Option<String>,
+    default_work_dir: Option<String>,
+) -> Result<Vec<GitWorktreeInfo>, String> {
+    let selected = selected_workspace(work_dir, default_work_dir)?;
+    let root = repository_root(&selected).await?;
+    let raw = git_output_raw(&root, &["worktree", "list", "--porcelain"]).await?;
+    Ok(parse_worktree_porcelain(&raw))
+}
+
+async fn create_git_worktree_in_base(
+    root: &Path,
+    branch_name: &str,
+    base_ref: Option<&str>,
+    worktrees_base: &Path,
+) -> Result<GitWorktreeInfo, String> {
+    let branch = validate_branch_name(branch_name)?;
+    let slug: String = branch
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let suffix = &uuid::Uuid::new_v4().to_string()[..6];
+    let target_dir = worktrees_base.join(format!("{slug}-{suffix}"));
+    if let Some(parent) = target_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let target_str = target_dir.to_string_lossy().into_owned();
+
+    let branch_exists = git_output(
+        root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .await
+    .is_ok();
+
+    if branch_exists {
+        git_output(root, &["worktree", "add", &target_str, branch]).await?;
+    } else if let Some(base) = base_ref.map(str::trim).filter(|b| !b.is_empty()) {
+        if base.starts_with('-') {
+            return Err("Invalid base ref".into());
+        }
+        git_output(root, &["worktree", "add", "-b", branch, &target_str, base]).await?;
+    } else {
+        git_output(root, &["worktree", "add", "-b", branch, &target_str]).await?;
+    }
+
+    let raw = git_output_raw(root, &["worktree", "list", "--porcelain"]).await?;
+    let norm_target = normalize_comparable_path(&target_str);
+    parse_worktree_porcelain(&raw)
+        .into_iter()
+        .find(|w| normalize_comparable_path(&w.path) == norm_target)
+        .ok_or_else(|| "Worktree created but missing from git worktree list".to_string())
+}
+
+#[tauri::command]
+pub async fn create_git_worktree(
+    work_dir: Option<String>,
+    default_work_dir: Option<String>,
+    branch_name: String,
+    base_ref: Option<String>,
+) -> Result<GitWorktreeInfo, String> {
+    use sha2::{Digest, Sha256};
+    let selected = selected_workspace(work_dir, default_work_dir)?;
+    let root = repository_root(&selected).await?;
+    let data = crate::app_paths::data_dir().ok_or("Data directory is unavailable")?;
+    let root_norm = normalize_comparable_path(&root.to_string_lossy());
+    let digest = Sha256::digest(root_norm.as_bytes());
+    let repo_key = hex::encode(&digest[..6]);
+    let base = data.join("worktrees").join(repo_key);
+    create_git_worktree_in_base(&root, &branch_name, base_ref.as_deref(), &base).await
+}
+
+#[tauri::command]
+pub async fn remove_git_worktree(
+    work_dir: Option<String>,
+    default_work_dir: Option<String>,
+    worktree_path: String,
+    force: Option<bool>,
+) -> Result<(), String> {
+    let selected = selected_workspace(work_dir, default_work_dir)?;
+    let root = repository_root(&selected).await?;
+    let raw = git_output_raw(&root, &["worktree", "list", "--porcelain"]).await?;
+    let target_norm = normalize_comparable_path(&worktree_path);
+    let matched = parse_worktree_porcelain(&raw)
+        .into_iter()
+        .find(|w| !w.is_main && normalize_comparable_path(&w.path) == target_norm)
+        .ok_or_else(|| "Target worktree not found or is the main repository".to_string())?;
+    if force.unwrap_or(false) {
+        git_output(&root, &["worktree", "remove", "--force", &matched.path]).await?;
+    } else {
+        git_output(&root, &["worktree", "remove", &matched.path]).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1299,5 +1513,65 @@ mod tests {
         .unwrap();
         assert!(!dir.join("中文 file.txt").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parses_git_worktree_porcelain_output() {
+        let raw = concat!(
+            "worktree /repo/main\n",
+            "HEAD abc1234\n",
+            "branch refs/heads/main\n\n",
+            "worktree /tmp/wt-feat\n",
+            "HEAD def5678\n",
+            "branch refs/heads/feat/test\n\n",
+        );
+        let entries = parse_worktree_porcelain(raw);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].is_main);
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert!(!entries[1].is_main);
+        assert_eq!(entries[1].branch.as_deref(), Some("feat/test"));
+    }
+
+    #[tokio::test]
+    async fn worktree_create_list_and_remove_roundtrip() {
+        if StdCommand::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = temp_path("git-wt-repo");
+        let base = temp_path("git-wt-store");
+        std::fs::create_dir_all(&dir).unwrap();
+        test_git(&dir, &["init"]);
+        test_git(&dir, &["config", "user.email", "test@example.com"]);
+        test_git(&dir, &["config", "user.name", "Test"]);
+        std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+        test_git(&dir, &["add", "."]);
+        test_git(&dir, &["commit", "-m", "init"]);
+
+        let created = create_git_worktree_in_base(&dir, "feat/isolated-wt", None, &base)
+            .await
+            .unwrap();
+        assert_eq!(created.branch.as_deref(), Some("feat/isolated-wt"));
+        assert!(!created.is_main);
+        assert!(Path::new(&created.path).join("README.md").is_file());
+
+        let listed = list_git_worktrees(Some(dir.to_string_lossy().into_owned()), None)
+            .await
+            .unwrap();
+        assert!(listed
+            .iter()
+            .any(|w| w.branch.as_deref() == Some("feat/isolated-wt")));
+
+        remove_git_worktree(
+            Some(dir.to_string_lossy().into_owned()),
+            None,
+            created.path.clone(),
+            Some(false),
+        )
+        .await
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(base);
     }
 }

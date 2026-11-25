@@ -248,6 +248,13 @@ export const DEFAULT_CONFIG: AppConfig = {
     "spawn_agent",
     "ask_user_question",
     "read_skill",
+    "start_background_process",
+    "read_background_output",
+    "stop_background_process",
+    "list_background_processes",
+    "save_memory",
+    "delete_memory",
+    "list_memories",
   ],
   approval_policy: "standard",
   trusted_patterns: [],
@@ -268,7 +275,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   max_tool_calls_per_request: 120,
   preview_sandbox: true,
   plan_mode: false,
-  tools_migration_version: 7,
+  tools_migration_version: 8,
 };
 
 export function createDefaultSession(): ChatSession {
@@ -573,11 +580,22 @@ export const TOOL_NAMES: { key: string; label: string; shortLabel: string; descr
   { key: "spawn_agent", label: "Subagent", shortLabel: "Agent", description: "Delegate a multi-turn read-only investigation to a focused helper.", risk: "medium" },
   { key: "ask_user_question", label: "Ask User", shortLabel: "Ask", description: "Request structured clarification from the user before risky or ambiguous steps.", risk: "low" },
   { key: "read_skill", label: "Read Skill", shortLabel: "Skill", description: "Load full SKILL.md instructions or bundled skill resources on demand.", risk: "low" },
+  { key: "start_background_process", label: "Start Background Process", shortLabel: "BG Start", description: "Launch a long-running dev server or watcher in the background.", risk: "high" },
+  { key: "read_background_output", label: "Read Background Output", shortLabel: "BG Log", description: "Read tail output from a managed background process.", risk: "low" },
+  { key: "stop_background_process", label: "Stop Background Process", shortLabel: "BG Stop", description: "Stop a managed background process.", risk: "medium" },
+  { key: "list_background_processes", label: "List Background Processes", shortLabel: "BG List", description: "List active and exited managed background processes.", risk: "low" },
+  { key: "save_memory", label: "Save Memory", shortLabel: "Mem+", description: "Save a durable workspace preference or convention across sessions.", risk: "low" },
+  { key: "delete_memory", label: "Delete Memory", shortLabel: "Mem-", description: "Remove a stored workspace memory entry.", risk: "low" },
+  { key: "list_memories", label: "List Memories", shortLabel: "Mem", description: "Inspect stored workspace memories.", risk: "low" },
 ];
 
 export const toolIcon = (key: string, size = 11) => {
   switch (key) {
     case "execute_command":
+    case "start_background_process":
+    case "read_background_output":
+    case "stop_background_process":
+    case "list_background_processes":
       return <TerminalIcon size={size} />;
     case "read_file":
       return <FileText size={size} />;

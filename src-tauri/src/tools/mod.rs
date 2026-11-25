@@ -1,3 +1,4 @@
+pub mod background;
 mod edit;
 mod fs;
 mod process;
@@ -266,6 +267,54 @@ pub async fn execute_tool_with_control(
             }
         }
         "todo_write" => fs::run_todo_write(&args),
+        "start_background_process" => {
+            let command = args["command"].as_str().unwrap_or("");
+            let label = args["label"].as_str();
+            match background::start_background_process(command, work_dir, label).await {
+                Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "read_background_output" => {
+            let process_id = args["process_id"].as_str().unwrap_or("");
+            let tail_lines = args["tail_lines"].as_u64().unwrap_or(100) as usize;
+            match background::read_background_output(process_id, tail_lines).await {
+                Ok(out) => serde_json::to_string_pretty(&out).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "stop_background_process" => {
+            let process_id = args["process_id"].as_str().unwrap_or("");
+            match background::stop_background_process(process_id).await {
+                Ok(msg) => msg,
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "list_background_processes" => {
+            let list = background::list_background_processes_internal().await;
+            serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".to_string())
+        }
+        "save_memory" => {
+            let category = args["category"].as_str().unwrap_or("project");
+            let key = args["key"].as_str().unwrap_or("");
+            let content = args["content"].as_str().unwrap_or("");
+            match crate::memory::upsert_memory(work_dir, category, key, content) {
+                Ok(entry) => serde_json::to_string_pretty(&entry).unwrap_or_default(),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "delete_memory" => {
+            let key_or_id = args["key_or_id"].as_str().unwrap_or("");
+            match crate::memory::remove_memory(work_dir, key_or_id) {
+                Ok(true) => format!("Deleted memory '{}'.", key_or_id),
+                Ok(false) => format!("No memory matched '{}'.", key_or_id),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+        "list_memories" => match crate::memory::load_memories(work_dir) {
+            Ok(list) => serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".to_string()),
+            Err(e) => format!("Error: {}", e),
+        },
         _ => format!("Unknown tool: {}", name),
     }
 }

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type WorkspaceTab = "changes" | "files" | "activity" | "preview" | "context";
+export type WorkspaceTab = "changes" | "files" | "activity" | "preview" | "context" | "runtime";
 export interface WorkspaceFileView {
   workDir: string;
   path: string | null;

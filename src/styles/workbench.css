@@ -1579,12 +1579,14 @@
 
 .review-tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, auto)) 30px;
+  grid-template-columns: repeat(6, minmax(0, auto)) 30px;
   align-items: center;
   gap: 0;
   padding: 0 10px;
   border-bottom: 1px solid var(--border-light);
   flex: 0 0 48px;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 
 .review-tabs > [role="tab"] {
@@ -1786,9 +1788,54 @@
 
 .review-diff-line {
   display: grid;
-  grid-template-columns: 32px 32px minmax(0, 1fr);
+  grid-template-columns: 32px 32px minmax(0, 1fr) auto;
   min-width: 100%;
   font: 12px/1.8 var(--font-mono);
+}
+
+.diff-line-add-comment {
+  opacity: 0;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
+.review-diff-line:hover .diff-line-add-comment,
+.diff-line-add-comment:focus-visible {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.diff-comment-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 10px 4px 68px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.diff-comment-draft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 10px 6px 68px;
+}
+
+.diff-comment-draft .input-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 4px 8px;
 }
 
 .review-diff-line code {
@@ -2358,5 +2405,147 @@
   .workbench-popover select {
     font-size: 16px;
   }
-  .review-tabs { grid-template-columns: repeat(5, minmax(0, auto)) 40px; }
+  .review-tabs { grid-template-columns: repeat(6, minmax(0, auto)) 40px; }
+}
+
+.runtime-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.runtime-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.runtime-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
+.runtime-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.runtime-card-header > span {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.runtime-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.runtime-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.runtime-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-light);
+}
+
+.runtime-row.active {
+  border-color: var(--accent);
+}
+
+.runtime-row-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.runtime-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.runtime-row-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.runtime-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  background: var(--bg-card-hover);
+  color: var(--text-secondary);
+}
+
+.runtime-badge.active {
+  color: var(--accent);
+}
+
+.runtime-inline-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.runtime-inline-form .input-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.runtime-memory-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.runtime-log-tail {
+  margin: 0;
+  padding: 8px;
+  max-height: 180px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg-app);
+  font: 11px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

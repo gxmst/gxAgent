@@ -281,6 +281,12 @@ pub fn check_approval(
             | "spawn_agent"
             | "ask_user_question"
             | "read_skill"
+            | "read_background_output"
+            | "list_background_processes"
+            | "stop_background_process"
+            | "save_memory"
+            | "delete_memory"
+            | "list_memories"
     );
     if read_only {
         return ApprovalLevel::AutoApprove;
@@ -328,7 +334,7 @@ pub fn check_approval(
 
 /// Check if a command is high-risk and should be blocked.
 fn is_high_risk(tool_name: &str, args_str: &str) -> bool {
-    if tool_name != "execute_command" {
+    if !matches!(tool_name, "execute_command" | "start_background_process") {
         return false;
     }
 
@@ -1194,5 +1200,46 @@ mod tests {
                 None
             ));
         }
+    }
+
+    #[test]
+    fn start_background_process_enforces_high_risk_and_confirmation() {
+        let dangerous = r#"{"command":"format-volume C:"}"#;
+        assert!(matches!(
+            check_approval(
+                "start_background_process",
+                dangerous,
+                "unrestricted",
+                &[],
+                "."
+            ),
+            ApprovalLevel::Blocked
+        ));
+
+        let dev_server = r#"{"command":"npm run dev"}"#;
+        assert!(matches!(
+            check_approval("start_background_process", dev_server, "standard", &[], "."),
+            ApprovalLevel::NeedsConfirmation
+        ));
+        assert!(matches!(
+            check_approval(
+                "read_background_output",
+                r#"{"process_id":"bg-1"}"#,
+                "standard",
+                &[],
+                "."
+            ),
+            ApprovalLevel::AutoApprove
+        ));
+        assert!(matches!(
+            check_approval(
+                "save_memory",
+                r#"{"key":"k","content":"v"}"#,
+                "standard",
+                &[],
+                "."
+            ),
+            ApprovalLevel::AutoApprove
+        ));
     }
 }

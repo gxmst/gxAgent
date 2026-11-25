@@ -44,3 +44,23 @@ it('discards a late response from an earlier checkpoint', async () => {
   expect(screen.queryByText('obsolete difference')).toBeNull();
   expect(screen.getByText('current difference')).toBeTruthy();
 });
+
+it('collects inline diff review comments and sends formatted feedback to chat', async () => {
+  const onSendComments = vi.fn();
+  const initial = { ...props(), onSendComments };
+  const patch = '@@ -1,2 +1,2 @@\n-const a = 1;\n+const a = 2;\n export { a };\n';
+  vi.mocked(invoke).mockResolvedValueOnce(review(patch));
+  render(<RunReviewPanel {...initial} />);
+
+  const addButton = await screen.findByRole('button', { name: 'Comment on new line 1' });
+  fireEvent.click(addButton);
+  const input = screen.getByPlaceholderText('Comment on line 1...');
+  fireEvent.change(input, { target: { value: 'Keep constant immutable' } });
+  fireEvent.submit(input.closest('form')!);
+
+  const sendButton = screen.getByRole('button', { name: 'Send 1 comment to chat' });
+  fireEvent.click(sendButton);
+  expect(onSendComments).toHaveBeenCalledTimes(1);
+  expect(onSendComments.mock.calls[0][0]).toContain('src/app.ts:1 (new)');
+  expect(onSendComments.mock.calls[0][0]).toContain('Keep constant immutable');
+});

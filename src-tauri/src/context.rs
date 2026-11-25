@@ -184,6 +184,17 @@ pub async fn enrich(
     prompt: &mut String,
     config: &mut AppConfig,
 ) -> Result<(), String> {
+    let mem_dir = config.default_work_dir.clone();
+    let memories = tokio::task::spawn_blocking(move || {
+        crate::memory::load_memories(&mem_dir).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    if !memories.is_empty() {
+        config
+            .system_prompt
+            .push_str(&crate::memory::format_memories_for_prompt(&memories));
+    }
     if config.learning.enabled_skills.is_empty() && !config.learning.knowledge_enabled {
         return Ok(());
     }

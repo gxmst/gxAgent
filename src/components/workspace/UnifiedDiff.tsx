@@ -1,10 +1,42 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { parsePatch } from "diff";
-import { Copy, WrapText } from "lucide-react";
+import { Copy, MessageSquarePlus, Trash2, WrapText } from "lucide-react";
 import { notify } from "../../services/agentEvents";
 
-export function UnifiedDiff({ diff, lang, label }: { diff: string; lang: string; label?: string }) {
+export interface DiffReviewComment {
+  id: string;
+  path: string;
+  lineNumber: number;
+  side: "old" | "new";
+  lineText: string;
+  text: string;
+}
+
+export function UnifiedDiff({
+  diff,
+  lang,
+  label,
+  filePath,
+  comments,
+  onAddComment,
+  onDeleteComment,
+}: {
+  diff: string;
+  lang: string;
+  label?: string;
+  filePath?: string;
+  comments?: DiffReviewComment[];
+  onAddComment?: (comment: Omit<DiffReviewComment, "id">) => void;
+  onDeleteComment?: (id: string) => void;
+}) {
   const [wrap, setWrap] = useState(true);
+  const [draftTarget, setDraftTarget] = useState<{
+    key: string;
+    lineNumber: number;
+    side: "old" | "new";
+    lineText: string;
+  } | null>(null);
+  const [draftText, setDraftText] = useState("");
   const patches = useMemo(() => { try { return parsePatch(diff); } catch { return []; } }, [diff]);
   const hasHunks = patches.some(patch => patch.hunks.length > 0);
   const zh = lang === "zh";
@@ -30,10 +62,83 @@ export function UnifiedDiff({ diff, lang, label }: { diff: string; lang: string;
               const annotation = line.startsWith("\\");
               const before = annotation || kind === "add" ? "" : oldLine++;
               const after = annotation || kind === "remove" ? "" : newLine++;
-              return <div className={`review-diff-line ${kind}`} key={index}>
-                <span className="diff-line-number" aria-hidden="true">{before}</span><span className="diff-line-number" aria-hidden="true">{after}</span>
-                <code>{line || " "}</code>
-              </div>;
+              const side: "old" | "new" = kind === "remove" ? "old" : "new";
+              const lineNumber = typeof after === "number" ? after : typeof before === "number" ? before : 0;
+              const lineKey = `${patchIndex}:${hunkIndex}:${index}`;
+              const targetPath = filePath || label || "file";
+              const lineComments = (comments || []).filter(
+                (c) => c.lineNumber === lineNumber && c.side === side && lineNumber > 0
+              );
+              return <Fragment key={lineKey}>
+                <div className={`review-diff-line ${kind}`}>
+                  <span className="diff-line-number" aria-hidden="true">{before}</span>
+                  <span className="diff-line-number" aria-hidden="true">{after}</span>
+                  <code>{line || " "}</code>
+                  {onAddComment && !annotation && lineNumber > 0 && (
+                    <button
+                      type="button"
+                      className="diff-line-add-comment"
+                      aria-label={zh ? `批注${side === "old" ? "旧" : "新"}第 ${lineNumber} 行` : `Comment on ${side} line ${lineNumber}`}
+                      title={zh ? "添加行内批注" : "Add inline comment"}
+                      onClick={() => {
+                        setDraftTarget({ key: lineKey, lineNumber, side, lineText: line });
+                        setDraftText("");
+                      }}
+                    >
+                      <MessageSquarePlus size={12} />
+                    </button>
+                  )}
+                </div>
+                {lineComments.map((comment) => (
+                  <div key={comment.id} className="diff-comment-item">
+                    <span>{comment.text}</span>
+                    {onDeleteComment && (
+                      <button
+                        type="button"
+                        className="panel-toggle-btn"
+                        aria-label={zh ? "删除批注" : "Delete comment"}
+                        onClick={() => onDeleteComment(comment.id)}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {draftTarget?.key === lineKey && onAddComment && (
+                  <form
+                    className="diff-comment-draft"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const clean = draftText.trim();
+                      if (!clean) return;
+                      onAddComment({
+                        path: targetPath,
+                        lineNumber: draftTarget.lineNumber,
+                        side: draftTarget.side,
+                        lineText: draftTarget.lineText,
+                        text: clean,
+                      });
+                      setDraftTarget(null);
+                      setDraftText("");
+                    }}
+                  >
+                    <input
+                      className="input-text"
+                      type="text"
+                      autoFocus
+                      placeholder={zh ? `批注第 ${lineNumber} 行...` : `Comment on line ${lineNumber}...`}
+                      value={draftText}
+                      onChange={(event) => setDraftText(event.target.value)}
+                    />
+                    <button className="btn" type="submit" disabled={!draftText.trim()}>
+                      {zh ? "添加" : "Add"}
+                    </button>
+                    <button className="btn" type="button" onClick={() => setDraftTarget(null)}>
+                      {zh ? "取消" : "Cancel"}
+                    </button>
+                  </form>
+                )}
+              </Fragment>;
             })}
           </div>;
         })}

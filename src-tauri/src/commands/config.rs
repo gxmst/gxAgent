@@ -168,6 +168,21 @@ pub fn load_config() -> Result<AppConfig, String> {
                 }
             }
         }
+        if config.tools_migration_version < 8 {
+            for tool in [
+                "start_background_process",
+                "read_background_output",
+                "stop_background_process",
+                "list_background_processes",
+                "save_memory",
+                "delete_memory",
+                "list_memories",
+            ] {
+                if !config.tools_enabled.iter().any(|existing| existing == tool) {
+                    config.tools_enabled.push(tool.to_string());
+                }
+            }
+        }
         config.tools_migration_version = config::CURRENT_TOOLS_MIGRATION_VERSION;
         config_changed = true;
     }

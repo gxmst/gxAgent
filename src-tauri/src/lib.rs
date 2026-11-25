@@ -10,6 +10,7 @@ mod crypto;
 mod hooks;
 mod knowledge;
 mod mcp;
+mod memory;
 mod policy;
 mod provider;
 mod skills;
@@ -163,6 +164,15 @@ pub fn run() {
             workspace::list_git_checkpoints,
             workspace::delete_git_checkpoint,
             workspace::restore_git_checkpoint,
+            workspace::list_git_worktrees,
+            workspace::create_git_worktree,
+            workspace::remove_git_worktree,
+            tools::background::list_background_processes,
+            tools::background::read_background_output_cmd,
+            tools::background::stop_background_process_cmd,
+            memory::list_project_memories,
+            memory::save_project_memory,
+            memory::delete_project_memory,
             commands::config::add_trusted_patterns,
             commands::config::remove_trusted_pattern,
             commands::agent::check_python_available,

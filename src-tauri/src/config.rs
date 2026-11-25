@@ -210,7 +210,7 @@ fn default_plan_mode() -> bool {
 /// (the `#[serde(default)]` on the field) and are migrated on load; after
 /// migration the version is stored, so a tool the user later disables stays
 /// disabled instead of being re-enabled on every launch.
-pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 7;
+pub const CURRENT_TOOLS_MIGRATION_VERSION: u32 = 8;
 
 /// Pre-v2 defaults for the agent limits, used by the one-time migration in
 /// load_config to tell "user never touched this" (exact old default) apart
@@ -418,6 +418,13 @@ impl Default for AppConfig {
                 "spawn_agent".into(),
                 "ask_user_question".into(),
                 "read_skill".into(),
+                "start_background_process".into(),
+                "read_background_output".into(),
+                "stop_background_process".into(),
+                "list_background_processes".into(),
+                "save_memory".into(),
+                "delete_memory".into(),
+                "list_memories".into(),
             ],
             approval_policy: "standard".into(),
             trusted_patterns: default_trusted_patterns(),

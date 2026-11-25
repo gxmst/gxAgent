@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createTwoFilesPatch } from "diff";
-import { Check, FileCode2, GitCompareArrows, Loader2, RefreshCw, Undo2 } from "lucide-react";
+import { Check, FileCode2, GitCompareArrows, Loader2, RefreshCw, Send, Undo2 } from "lucide-react";
 import type { RunCheckpoint, WorkspaceViewState } from "../../appDefaults";
 import type { ModifiedFileEntry } from "../../store/appStore";
 import type { GitStatusEntry } from "./WorkspaceChanges";
 import { WorkspaceChanges } from "./WorkspaceChanges";
-import { UnifiedDiff } from "./UnifiedDiff";
+import { UnifiedDiff, type DiffReviewComment } from "./UnifiedDiff";
 
 export interface RunChange { path: string; status: string; diff: string; truncated?: boolean }
 interface RunReview { repositoryRoot: string; version: string; entries: RunChange[] }
 
-export function RunReviewPanel({ lang, checkpoint, workspace, modifiedFiles, disabled, onRefresh, onSelectGit, onRestoreGit, onKeep, onRestore }: {
+export function RunReviewPanel({ lang, checkpoint, workspace, modifiedFiles, disabled, onRefresh, onSelectGit, onRestoreGit, onKeep, onRestore, onSendComments }: {
   lang: string;
   checkpoint: RunCheckpoint | null;
   workspace: WorkspaceViewState;
@@ -22,6 +22,7 @@ export function RunReviewPanel({ lang, checkpoint, workspace, modifiedFiles, dis
   onRestoreGit: (entry: GitStatusEntry) => void;
   onKeep: () => void;
   onRestore: () => void;
+  onSendComments?: (markdown: string) => void;
 }) {
   const zh = lang === "zh";
   const [scope, setScope] = useState<"run" | "workspace">("run");
@@ -30,7 +31,8 @@ export function RunReviewPanel({ lang, checkpoint, workspace, modifiedFiles, dis
   const [loading, setLoading] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [reviewed, setReviewed] = useState<Record<string, string>>({});
-  useEffect(() => { setReviewed({}); setSelectedPath(null); setReview(null); }, [checkpoint?.reference]);
+  const [comments, setComments] = useState<DiffReviewComment[]>([]);
+  useEffect(() => { setReviewed({}); setComments([]); setSelectedPath(null); setReview(null); }, [checkpoint?.reference]);
   useEffect(() => {
     let cancelled = false;
     if (!checkpoint) { setReview(null); setLoading(false); setError(""); return; }
@@ -70,11 +72,44 @@ export function RunReviewPanel({ lang, checkpoint, workspace, modifiedFiles, dis
             <FileCode2 size={14} /><span>{entry.path}</span><small className={`change-kind ${entry.status}`}>{entry.status}</small>{reviewed[entry.path] === entry.diff && <Check size={13} className="review-check" />}
           </button>)}
         </div>
-        {selected && <UnifiedDiff lang={lang} label={selected.path} diff={selected.diff} />}
+        {selected && (
+          <UnifiedDiff
+            lang={lang}
+            label={selected.path}
+            filePath={selected.path}
+            diff={selected.diff}
+            comments={comments.filter((c) => c.path === selected.path)}
+            onAddComment={onSendComments ? (comment) => {
+              const id = `c-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              setComments((prev) => [...prev, { ...comment, id }]);
+            } : undefined}
+            onDeleteComment={(id) => setComments((prev) => prev.filter((c) => c.id !== id))}
+          />
+        )}
         {selected?.truncated && <div className="workspace-inline-state">{zh ? "差异过大，仅显示前 1 MB" : "Diff exceeds 1 MB; showing a partial view"}</div>}
       </>}
       <div className="review-footer">
         <span>{reviewedCount} / {entries.length} {zh ? "已审查" : "reviewed"}</span>
+        {comments.length > 0 && onSendComments && (
+          <button
+            className="btn"
+            onClick={() => {
+              const header = zh
+                ? "请处理以下行内代码审查意见："
+                : "Please address these inline diff review comments:";
+              const lines = comments.map(
+                (c) => `- \`${c.path}:${c.lineNumber} (${c.side})\`: ${c.text}\n  > \`${c.lineText.trim()}\``
+              );
+              onSendComments(`${header}\n${lines.join("\n")}`);
+              setComments([]);
+            }}
+          >
+            <Send size={13} />
+            {zh
+              ? `发送 ${comments.length} 条批注到对话`
+              : `Send ${comments.length} comment${comments.length === 1 ? "" : "s"} to chat`}
+          </button>
+        )}
         {selected && <button className="btn" disabled={loading || disabled || !!selected.truncated} onClick={() => setReviewed(previous => ({ ...previous, [selected.path]: previous[selected.path] === selected.diff ? "" : selected.diff }))}><Check size={13} />{reviewed[selected.path] === selected.diff ? (zh ? "取消标记" : "Unmark") : (zh ? "标记已审查" : "Mark reviewed")}</button>}
       </div>
       {checkpoint && <div className="review-checkpoint-actions">

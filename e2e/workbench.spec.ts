@@ -159,7 +159,7 @@ test('settings and review remain contained on desktop and narrow Chinese layouts
     await page.keyboard.press('Escape');
     await page.locator('.mobile-workspace-tabs').getByRole('button', { name: language === 'zh' ? '审查' : 'Workspace', exact: true }).click();
     await expect(page.locator('.review-panel')).toBeVisible();
-    for (const id of ['changes', 'files', 'activity', 'context', 'preview']) {
+    for (const id of ['changes', 'files', 'activity', 'context', 'preview', 'runtime']) {
       await page.locator(`#workspace-tab-${id}`).click();
       await expect(page.locator(`#workspace-panel-${id}`)).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);

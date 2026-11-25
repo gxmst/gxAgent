@@ -795,6 +795,11 @@ function App() {
             attachmentsLoading={isAttachmentLoading}
             disabled={sessionMutationLocked}
             selectedRunId={selectedRunBySession[currentSessionId]}
+            onSelectWorkDir={(nextDir) => patchSessionConfig({ workDir: nextDir })}
+            onSendReviewComments={(markdown) => {
+              setPrompt((previous) => (previous.trim() ? `${previous.trim()}\n\n${markdown}` : markdown));
+              requestAnimationFrame(() => chatTextareaRef.current?.focus());
+            }}
           />
         </div>
       </div>

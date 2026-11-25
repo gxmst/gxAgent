@@ -10,6 +10,7 @@ import { RunReviewPanel } from "./RunReviewPanel";
 import { RunActivity } from "./RunActivity";
 import { HtmlPreview } from "./HtmlPreview";
 import { ContextInspector } from "./ContextInspector";
+import { WorkspaceRuntimePanel } from "./WorkspaceRuntimePanel";
 
 const EMPTY_LOGS: never[] = [];
 const EMPTY_CHANGES = {};
@@ -26,9 +27,11 @@ export interface WorkspacePanelProps {
   attachmentsLoading: boolean;
   disabled: boolean;
   selectedRunId?: string;
+  onSelectWorkDir?: (workDir: string) => void;
+  onSendReviewComments?: (markdown: string) => void;
 }
 
-export function WorkspacePanel({ lang, config, session, open, width, onClose, workspace, onRefresh, actions, attachmentsLoading, disabled, selectedRunId }: WorkspacePanelProps) {
+export function WorkspacePanel({ lang, config, session, open, width, onClose, workspace, onRefresh, actions, attachmentsLoading, disabled, selectedRunId, onSelectWorkDir, onSendReviewComments }: WorkspacePanelProps) {
   const sessionId = session.id;
   const activeTab = useWorkspaceViewStore((state) => state.tabs[sessionId] || "changes");
   const setTab = useWorkspaceViewStore((state) => state.setTab);
@@ -42,6 +45,7 @@ export function WorkspacePanel({ lang, config, session, open, width, onClose, wo
     { id: "activity", label: bi(lang, "运行", "Runs") },
     { id: "context", label: bi(lang, "上下文", "Context") },
     { id: "preview", label: bi(lang, "预览", "Preview") },
+    { id: "runtime", label: bi(lang, "环境", "Env") },
   ];
   return (
     <section className={`review-panel ${open ? "" : "collapsed"}`} style={{ width }} aria-label={bi(lang, "任务工作区", "Task workspace")}>
@@ -73,7 +77,7 @@ export function WorkspacePanel({ lang, config, session, open, width, onClose, wo
       </div>
       <div className="review-panel-body">
         <div role="tabpanel" id="workspace-panel-changes" aria-labelledby="workspace-tab-changes" hidden={activeTab !== "changes"}>
-          <RunReviewPanel lang={lang} checkpoint={checkpoint} workspace={workspace} modifiedFiles={modified} disabled={disabled} onRefresh={onRefresh} onSelectGit={actions.selectGitEntry} onRestoreGit={actions.restoreGitEntry} onKeep={actions.acceptRunCheckpoint} onRestore={actions.restoreRunCheckpoint} />
+          <RunReviewPanel lang={lang} checkpoint={checkpoint} workspace={workspace} modifiedFiles={modified} disabled={disabled} onRefresh={onRefresh} onSelectGit={actions.selectGitEntry} onRestoreGit={actions.restoreGitEntry} onKeep={actions.acceptRunCheckpoint} onRestore={actions.restoreRunCheckpoint} onSendComments={onSendReviewComments} />
         </div>
         <div className="workspace-files" role="tabpanel" id="workspace-panel-files" aria-labelledby="workspace-tab-files" hidden={activeTab !== "files"}>
           <div className="workspace-file-tree">
@@ -121,6 +125,9 @@ export function WorkspacePanel({ lang, config, session, open, width, onClose, wo
         </div>
         <div role="tabpanel" id="workspace-panel-context" aria-labelledby="workspace-tab-context" hidden={activeTab !== "context"}>
           <ContextInspector key={`${sessionId}:${selectedRunId || "latest"}`} session={session} lang={lang} selectedMessageId={selectedRunId} />
+        </div>
+        <div role="tabpanel" id="workspace-panel-runtime" aria-labelledby="workspace-tab-runtime" hidden={activeTab !== "runtime"}>
+          <WorkspaceRuntimePanel lang={lang} workDir={workspace.workDir} disabled={disabled} onSelectWorkDir={onSelectWorkDir} />
         </div>
       </div>
     </section>

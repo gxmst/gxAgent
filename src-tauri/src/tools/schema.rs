@@ -273,6 +273,102 @@ pub fn get_all_tool_definitions() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "start_background_process",
+                "description": "Start a long-running shell process (such as a dev server, file watcher, or test runner) in the background and return its process id for inspecting logs or stopping it later.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Shell command to launch in the background." },
+                        "label": { "type": "string", "description": "Optional short human-readable label (e.g. 'vite dev')." }
+                    },
+                    "required": ["command"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "read_background_output",
+                "description": "Read the latest buffered stdout/stderr lines and running status from a managed background process.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "process_id": { "type": "string", "description": "Background process id (e.g. 'bg-1a2b3c4d')." },
+                        "tail_lines": { "type": "integer", "description": "Maximum trailing lines to return (default 100, max 500)." }
+                    },
+                    "required": ["process_id"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "stop_background_process",
+                "description": "Terminate a managed background process and its child process tree.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "process_id": { "type": "string", "description": "Background process id to terminate." }
+                    },
+                    "required": ["process_id"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "list_background_processes",
+                "description": "List all managed background processes, their PIDs, running state, and exit codes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "save_memory",
+                "description": "Persist a durable workspace memory (user preference, architectural convention, workflow feedback, or external reference) across sessions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": { "type": "string", "enum": ["user", "project", "feedback", "reference"], "description": "Memory category." },
+                        "key": { "type": "string", "description": "Short unique identifier key (updating an existing key overwrites it cleanly)." },
+                        "content": { "type": "string", "description": "Concise factual note to remember across future conversations (max 1000 chars)." }
+                    },
+                    "required": ["key", "content"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "delete_memory",
+                "description": "Remove an outdated or incorrect workspace memory by id or key.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key_or_id": { "type": "string", "description": "Memory key or id to remove." }
+                    },
+                    "required": ["key_or_id"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "list_memories",
+                "description": "List all persistent memories stored for the current workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        }),
     ]
 }
 
