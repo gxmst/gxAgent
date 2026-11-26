@@ -20,8 +20,16 @@ export function AgentQuestion({ question, sessionId, lang }: { question: CodexQu
   }}>
     <div className="agent-question-title"><MessageCircleQuestion size={16} />{zh ? "需要你的决定" : "Your input is needed"}</div>
     {question.questions.map(item => <fieldset key={item.id} disabled={submitting}><legend>{item.question}</legend>
+      {question.source === "native" && item.isSecret ? <>
+        <p>{zh ? "请在对应服务的凭据设置中填写密钥，然后选择状态。" : "Enter the credential in the service’s settings, then select its status."}</p>
+        {(["configured", "skipped"] as const).map(status => <label key={status} className="agent-question-option">
+          <input type="radio" name={item.id} checked={answers[item.id] === status} onChange={() => setAnswers(previous => ({ ...previous, [item.id]: status }))} />
+          {status === "configured" ? (zh ? "已单独配置" : "Configured separately") : (zh ? "跳过" : "Skip")}
+        </label>)}
+      </> : <>
       {item.options?.map(option => <label className="agent-question-option" key={option.label}><input type="radio" name={item.id} checked={answers[item.id] === option.label} onChange={() => setAnswers(previous => ({ ...previous, [item.id]: option.label }))} /><span>{option.label}<small>{option.description}</small></span></label>)}
       <input className="input-text" type={item.isSecret ? "password" : "text"} aria-label={item.header || item.question} placeholder={zh ? "填写回复" : "Your answer"} value={answers[item.id] || ""} onChange={event => setAnswers(previous => ({ ...previous, [item.id]: event.target.value }))} required />
+      </>}
     </fieldset>)}
     {error && <div className="workspace-inline-state error" role="alert">{error}</div>}
     <button className="btn" type="submit" disabled={submitting || question.questions.some(item => !answers[item.id]?.trim())}><ArrowUp size={14} />{zh ? "提交回复" : "Submit answer"}</button>

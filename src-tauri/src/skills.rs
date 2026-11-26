@@ -262,12 +262,26 @@ pub fn read_skill_entry(
         return Err("Skill name or id is required".into());
     }
     let catalog = discover(config);
-    let skill = catalog
+    let enabled = catalog
         .skills
         .iter()
-        .find(|s| s.id == query || s.name.eq_ignore_ascii_case(query))
-        .ok_or_else(|| format!("Skill '{}' is not available", query))?;
+        .filter(|s| config.learning.enabled_skills.contains(&s.id));
+    if let Some(skill) = enabled.clone().find(|s| s.id == query) {
+        return read_skill_content(skill, resource);
+    }
+    let mut matches = enabled.filter(|s| s.name.eq_ignore_ascii_case(query));
+    let skill = matches
+        .next()
+        .ok_or_else(|| format!("Skill '{}' is not enabled for this session", query))?;
+    if matches.next().is_some() {
+        return Err(
+            "Multiple enabled skills have this name. Use the skill ID from the catalog.".into(),
+        );
+    }
+    read_skill_content(skill, resource)
+}
 
+fn read_skill_content(skill: &Skill, resource: Option<&str>) -> Result<String, String> {
     if let Some(res) = resource.map(str::trim).filter(|r| !r.is_empty()) {
         let root = Path::new(&skill.path)
             .parent()
@@ -300,12 +314,51 @@ pub fn read_skill_resource(
     skill_id: String,
     resource: String,
 ) -> Result<String, String> {
-    read_skill_entry(&config, &skill_id, Some(&resource))
+    let catalog = discover(&config);
+    let skill = catalog
+        .skills
+        .iter()
+        .find(|s| s.id == skill_id)
+        .ok_or("Skill is no longer available")?;
+    read_skill_content(skill, Some(&resource))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_enabled_skills_are_available_and_duplicate_names_require_an_id() {
+        let root = std::env::temp_dir().join(format!("gx-skills-{}", uuid::Uuid::new_v4()));
+        let mut config = AppConfig {
+            default_work_dir: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut ids = Vec::new();
+        for folder in ["first", "second"] {
+            let path = root.join(".agents/skills").join(folder).join("SKILL.md");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                format!("---\nname: shared-test-skill\ndescription: A test\n---\n{folder} body"),
+            )
+            .unwrap();
+            ids.push(parse_skill(&path, "project", &config).unwrap().id);
+        }
+        config.learning.enabled_skills.push(ids[1].clone());
+        assert!(read_skill_entry(&config, &ids[0], None).is_err());
+        assert!(read_skill_entry(&config, "shared-test-skill", None)
+            .unwrap()
+            .contains("second body"));
+        config.learning.enabled_skills.push(ids[0].clone());
+        assert!(read_skill_entry(&config, "shared-test-skill", None)
+            .unwrap_err()
+            .contains("skill ID"));
+        assert!(read_skill_entry(&config, &ids[0], None)
+            .unwrap()
+            .contains("first body"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn front_matter_and_mcp_dependencies_are_parsed() {
         let root = std::env::temp_dir().join(format!("gx-skill-{}", uuid::Uuid::new_v4()));

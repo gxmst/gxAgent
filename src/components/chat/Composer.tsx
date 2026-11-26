@@ -7,7 +7,6 @@ import type { AppConfig, Attachment, ChatSession, ModelInfo, SessionConfig, Skil
 import {
   MAX_ATTACHMENT_TEXT_PER_FILE,
   estimateTextTokens,
-  fitAttachmentBudget,
   isSendableAttachment,
   modelContextLimit,
   newMessageId,
@@ -41,6 +40,7 @@ export interface ComposerProps {
   isAttachmentLoading: boolean;
   attachments: Attachment[];
   setAttachments: (next: Attachment[] | ((previous: Attachment[]) => Attachment[])) => void;
+  attachMention: (load: () => Promise<Attachment | null>) => Promise<boolean>;
   prompt: string;
   setPrompt: (next: string | ((previous: string) => string)) => void;
   chatTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
@@ -71,6 +71,7 @@ export function Composer({
   isAttachmentLoading,
   attachments,
   setAttachments,
+  attachMention,
   prompt,
   setPrompt,
   chatTextareaRef,
@@ -108,6 +109,7 @@ export function Composer({
   const otherRun = sessions.find((session) => session.id === activeId && session.id !== sessionId);
   const locked = !sessionStorageReady || isAttachmentLoading || preparingId !== null;
   const canSend = !locked && !otherRun && (Boolean(prompt.trim()) || attachments.some(isSendableAttachment) || Boolean(quote));
+  const hasSteeringInput = Boolean(prompt.trim()) || attachments.some(item => item.type === "text" && isSendableAttachment(item));
   const [dragOver, setDragOver] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -163,56 +165,53 @@ export function Composer({
   }, [activeMention?.query, mentionOptions.length]);
 
   const selectMention = async (option: MentionOption) => {
-    if (!activeMention) return;
+    if (!activeMention || locked) return;
     const mentionSnapshot = activeMention;
     setMentionDismissed(false);
 
     if (option.kind === "skill" && option.skill) {
+      if (option.skill.missingDependencies?.length) {
+        const missing = option.skill.missingDependencies.join(", ");
+        notify(zh ? `请先配置此技能所需的 MCP 服务：${missing}` : `Configure the required MCP servers first: ${missing}`, "error");
+        return;
+      }
       const before = prompt.slice(0, mentionSnapshot.start);
       const after = prompt.slice(mentionSnapshot.end).replace(/^\s*/, "");
       const insertion = `[Skill: ${option.skill.name}] `;
       setPrompt(`${before}${insertion}${after}`);
       patchSessionConfig({
-        skillIds: Array.from(new Set([...(currentSession.sessionConfig.skillIds || []), option.skill.id])),
+        skillIds: Array.from(new Set([...(resolvedCurrentConfig.learning?.enabled_skills || []), option.skill.id])),
       });
       return;
     }
 
-    const appendTextAttachment = (item: Attachment) => {
-      setAttachments((prev) => {
-        const fitted = fitAttachmentBudget(prev, [item]);
-        return fitted.accepted.length ? [...prev, ...fitted.accepted] : prev;
-      });
-    };
-
-    setPrompt((prev) => stripMentionToken(prev, mentionSnapshot));
-    try {
+    setMentionDismissed(true);
+    const attached = await attachMention(async () => {
       if (option.kind === "git-diff") {
         const [staged, worktree] = await Promise.all([
-          invoke<string>("get_git_diff", { workDir: effectiveWorkDir, staged: true }).catch(() => ""),
-          invoke<string>("get_git_diff", { workDir: effectiveWorkDir, staged: false }).catch(() => ""),
+          invoke<string>("get_git_diff", { workDir: effectiveWorkDir, staged: true }),
+          invoke<string>("get_git_diff", { workDir: effectiveWorkDir, staged: false }),
         ]);
         const rawDiff = [staged, worktree].filter(Boolean).join("\n\n").trim();
         if (!rawDiff) {
           notify(zh ? "当前工作区没有可附加的 Git Diff" : "No workspace Git diff to attach", "info");
-          return;
+          return null;
         }
         const data = rawDiff.slice(0, MAX_ATTACHMENT_TEXT_PER_FILE);
-        appendTextAttachment({
+        return {
           name: "git-diff.patch",
           type: "text",
           data,
           mimeType: "text/x-diff",
           truncated: data.length < rawDiff.length,
           originalSize: rawDiff.length,
-        });
-        return;
+        };
       }
 
       if (option.kind === "file" && option.path) {
         const content = await invoke<string>("read_file_content", { path: option.path, workDir: effectiveWorkDir });
         const data = content.slice(0, MAX_ATTACHMENT_TEXT_PER_FILE);
-        appendTextAttachment({
+        return {
           name: option.label,
           path: option.path,
           type: "text",
@@ -220,10 +219,14 @@ export function Composer({
           mimeType: "text/plain",
           truncated: data.length < content.length,
           originalSize: content.length,
-        });
+        };
       }
-    } catch (error) {
-      notify(String(error), "error");
+      return null;
+    });
+    if (attached) {
+      const token = prompt.slice(mentionSnapshot.start, mentionSnapshot.end);
+      setPrompt(prev => prev.slice(mentionSnapshot.start, mentionSnapshot.end) === token
+        ? stripMentionToken(prev, mentionSnapshot) : prev);
     }
   };
 
@@ -384,6 +387,7 @@ export function Composer({
               : coding
                 ? (zh ? "描述任务，输入 @ 引用文件/Diff，或补充要求…" : "Describe a task, type @ to reference files/diff...")
                 : (zh ? "发送消息，输入 @ 引用上下文…" : "Send a message, or type @ for context...")}
+            readOnly={isAttachmentLoading}
             disabled={!sessionStorageReady || (streaming && !coding) || preparingId === sessionId}
             onKeyDown={(event) => {
               if (activeMention && mentionOptions.length > 0) {
@@ -410,7 +414,7 @@ export function Composer({
               }
               if (event.nativeEvent.isComposing || event.key !== "Enter" || event.shiftKey) return;
               event.preventDefault();
-              if (streaming && coding && prompt.trim()) void handleSteeringMessage();
+              if (streaming && coding && !locked && hasSteeringInput) void handleSteeringMessage();
               else if (canSend && !streaming) void handleSendMessage();
               else if (otherRun) notify(t("ui.another-session-is-running-view", lang), "info");
             }}
@@ -615,11 +619,11 @@ export function Composer({
                 </Popover.Portal>
               </Popover.Root>
               <div className="composer-send-actions">
-                {streaming && coding && prompt.trim() && (
+                {streaming && coding && hasSteeringInput && (
                   <button
                     type="button"
                     className="panel-toggle-btn"
-                    disabled={runtime?.status === "stopping"}
+                    disabled={locked || runtime?.status === "stopping"}
                     onClick={() => { void handleSteeringMessage(); }}
                     aria-label={zh ? "补充当前任务" : "Steer current task"}
                     title={zh ? "补充当前任务" : "Steer current task"}

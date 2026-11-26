@@ -283,9 +283,6 @@ pub fn check_approval(
             | "read_skill"
             | "read_background_output"
             | "list_background_processes"
-            | "stop_background_process"
-            | "save_memory"
-            | "delete_memory"
             | "list_memories"
     );
     if read_only {
@@ -1231,15 +1228,13 @@ mod tests {
             ),
             ApprovalLevel::AutoApprove
         ));
-        assert!(matches!(
-            check_approval(
-                "save_memory",
-                r#"{"key":"k","content":"v"}"#,
-                "standard",
-                &[],
-                "."
-            ),
-            ApprovalLevel::AutoApprove
-        ));
+        for name in ["save_memory", "delete_memory", "stop_background_process"] {
+            for policy in ["standard", "strict"] {
+                assert!(matches!(
+                    check_approval(name, "{}", policy, &[], "."),
+                    ApprovalLevel::NeedsConfirmation
+                ));
+            }
+        }
     }
 }

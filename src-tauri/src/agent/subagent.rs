@@ -90,6 +90,7 @@ pub(super) async fn run_spawn_agent(
     request_id: &str,
     args_str: &str,
     config: &AppConfig,
+    hooks: &crate::hooks::HooksConfig,
     cancel_rx: &watch::Receiver<bool>,
 ) -> Result<String, String> {
     let permit = SUBAGENT_SLOTS.clone().try_acquire_owned().map_err(|_| {
@@ -236,7 +237,13 @@ pub(super) async fn run_spawn_agent(
                 let timeout = config.command_timeout;
                 let cancel = cancel_rx.clone();
                 async move {
-                    execute_tool_with_control(
+                    if let crate::hooks::PreHookDecision::Block(reason) = hooks
+                        .run_pre_tool_hooks(window, request_id, &name, &args)
+                        .await
+                    {
+                        return format!("Error: {reason}");
+                    }
+                    let mut output = execute_tool_with_control(
                         &name,
                         &args,
                         &work_dir,
@@ -246,7 +253,17 @@ pub(super) async fn run_spawn_agent(
                         Some(cancel),
                         None,
                     )
-                    .await
+                    .await;
+                    if output != TOOL_CANCELLED_ERROR {
+                        if let Some(note) = hooks
+                            .run_post_tool_hooks(window, request_id, &name, &args, &output)
+                            .await
+                        {
+                            output.push('\n');
+                            output.push_str(&note);
+                        }
+                    }
+                    output
                 }
             });
             let outputs = futures_util::future::join_all(futures).await;

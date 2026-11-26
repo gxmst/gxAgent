@@ -1,6 +1,8 @@
-use super::web_search::is_safe_url;
+use super::web_search::{is_public_ip, is_safe_url};
 use crate::text::utf8_prefix;
 use futures_util::StreamExt;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 const MAX_FETCH_BYTES: usize = 512 * 1024;
@@ -9,6 +11,28 @@ const MIN_MAX_CHARS: usize = 500;
 const MAX_MAX_CHARS: usize = 50_000;
 const MAX_REDIRECTS: usize = 5;
 const GXAGENT_FETCH_UA: &str = "gxAgent/1.4 (+https://github.com/gxmst/gxAgent)";
+
+struct PublicDns;
+
+fn public_addresses(addresses: impl Iterator<Item = SocketAddr>) -> std::io::Result<Addrs> {
+    let addresses: Vec<_> = addresses.collect();
+    if addresses.is_empty() || addresses.iter().any(|addr| !is_public_ip(addr.ip())) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "DNS returned a blocked or missing address",
+        ));
+    }
+    Ok(Box::new(addresses.into_iter()))
+}
+
+impl Resolve for PublicDns {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((name.as_str(), 0)).await?;
+            Ok(public_addresses(addresses)?)
+        })
+    }
+}
 
 /// Fetch a public HTTP(S) page with SSRF redirect protection and return clean,
 /// token-bounded readable text or Markdown.
@@ -29,6 +53,9 @@ pub(super) async fn run_web_fetch(url: &str, max_chars: Option<usize>) -> Result
     });
 
     let client = reqwest::Client::builder()
+        // A proxy could resolve the target independently of the checked connector.
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(PublicDns))
         .redirect(redirect_policy)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
@@ -235,4 +262,21 @@ fn strip_delimited(input: &str, open: &str, close: &str) -> String {
         result.replace_range(start..end, " ");
     }
     result
+}
+
+#[cfg(test)]
+mod dns_tests {
+    use super::*;
+    #[test]
+    fn connector_uses_only_validated_answers() {
+        let public = SocketAddr::from(([8, 8, 8, 8], 0));
+        let private = SocketAddr::from(([10, 0, 0, 1], 0));
+        assert!(public_addresses([public, private].into_iter()).is_err());
+        assert_eq!(
+            public_addresses([public].into_iter())
+                .unwrap()
+                .collect::<Vec<_>>(),
+            [public]
+        );
+    }
 }

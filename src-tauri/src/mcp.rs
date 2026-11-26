@@ -48,12 +48,67 @@ enum McpTransport {
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         stderr_handle: tokio::task::JoinHandle<()>,
     },
-    Http {
-        client: reqwest::Client,
-        url: String,
-        headers: HashMap<String, String>,
-        session_id: Mutex<Option<String>>,
-    },
+    Http(HttpTransport),
+}
+
+struct HttpTransport {
+    client: reqwest::Client,
+    config: McpServerConfig,
+    session: Mutex<HttpSession>,
+}
+
+#[derive(Default)]
+enum HttpSession {
+    #[default]
+    Stateless,
+    Active(String),
+    Expired,
+    Closed,
+}
+
+impl HttpTransport {
+    async fn post(&self, message: &Value) -> Result<reqwest::Response, String> {
+        let mut request = self
+            .client
+            .post(self.config.url.trim())
+            .header("Accept", "application/json, text/event-stream");
+        for (key, value) in &self.config.headers {
+            request = request.header(key.trim(), value);
+        }
+        let mut session = self.session.lock().await;
+        match &*session {
+            HttpSession::Active(id) => request = request.header("Mcp-Session-Id", id),
+            HttpSession::Stateless => {}
+            HttpSession::Expired | HttpSession::Closed => {
+                return Err("MCP HTTP session is closed".into())
+            }
+        }
+        let response = request
+            .json(message)
+            .send()
+            .await
+            .map_err(|e| format!("MCP HTTP request failed: {e}"))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND && matches!(*session, HttpSession::Active(_)) {
+            *session = HttpSession::Expired;
+            return Err("MCP HTTP session expired (404)".into());
+        }
+        if !status.is_success() {
+            let body = read_http_bytes(response).await?;
+            return Err(format!(
+                "MCP HTTP error ({status}): {}",
+                String::from_utf8_lossy(&body)
+            ));
+        }
+        if let Some(id) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            *session = HttpSession::Active(id.to_owned());
+        }
+        Ok(response)
+    }
 }
 
 /// Running MCP server connection (stdio subprocess or Streamable HTTP/SSE) with its tool definitions
@@ -88,7 +143,7 @@ impl Drop for McpServer {
     }
 }
 
-fn is_http_transport(config: &McpServerConfig) -> bool {
+pub(crate) fn is_http_transport(config: &McpServerConfig) -> bool {
     let t = config.transport.trim();
     t.eq_ignore_ascii_case("http") || t.eq_ignore_ascii_case("sse")
 }
@@ -273,88 +328,130 @@ impl Drop for PendingRequestGuard {
     }
 }
 
-fn parse_http_rpc_response(
-    content_type: &str,
-    body_text: &str,
-    expected_id: u64,
-) -> Result<Value, String> {
-    let trimmed = body_text.trim();
-    if trimmed.is_empty() {
-        return Err("MCP HTTP endpoint returned an empty response body".into());
+fn select_rpc_response(value: Value, id: u64) -> Option<Result<Value, String>> {
+    if let Value::Array(batch) = value {
+        return batch
+            .into_iter()
+            .find_map(|item| select_rpc_response(item, id));
     }
+    if value.get("id").and_then(Value::as_u64) != Some(id) || value.get("method").is_some() {
+        return None;
+    }
+    if let Some(error) = value.get("error") {
+        return Some(Err(error.to_string()));
+    }
+    value.get("result")?;
+    Some(Ok(value))
+}
 
-    let select_message = |val: Value| -> Option<Result<Value, String>> {
-        if let Some(arr) = val.as_array() {
-            let found = arr
-                .iter()
-                .find(|item| item.get("id").and_then(Value::as_u64) == Some(expected_id))
-                .cloned()?;
-            return Some(if let Some(err) = found.get("error") {
-                Err(err.to_string())
-            } else {
-                Ok(found)
-            });
-        }
-        if val.get("method").is_some() && val.get("result").is_none() && val.get("error").is_none()
-        {
-            return None;
-        }
-        if val
-            .get("id")
-            .and_then(Value::as_u64)
-            .is_some_and(|id| id != expected_id)
-        {
-            return None;
-        }
-        Some(if let Some(err) = val.get("error") {
-            Err(err.to_string())
-        } else {
-            Ok(val)
-        })
-    };
+#[derive(Default)]
+struct SseResponse {
+    line: Vec<u8>,
+    data: Vec<u8>,
+    after_cr: bool,
+}
 
-    if content_type
-        .to_ascii_lowercase()
-        .contains("text/event-stream")
-        || trimmed.starts_with("event:")
-        || trimmed.starts_with("data:")
-    {
-        let mut data_buf = String::new();
-        let mut fallback: Option<Result<Value, String>> = None;
-        for line in body_text.lines().chain(std::iter::once("")) {
-            let clean = line.trim_end_matches('\r');
-            if clean.is_empty() {
-                if !data_buf.trim().is_empty() {
-                    if let Ok(val) = serde_json::from_str::<Value>(data_buf.trim()) {
-                        if let Some(matched) = select_message(val) {
-                            return matched;
-                        }
-                    }
-                    data_buf.clear();
-                }
+impl SseResponse {
+    fn push(&mut self, chunk: &[u8], id: u64) -> Option<Result<Value, String>> {
+        for &byte in chunk {
+            if byte == b'\n' && self.after_cr {
+                self.after_cr = false;
                 continue;
             }
-            if let Some(rest) = clean.strip_prefix("data:") {
-                if !data_buf.is_empty() {
-                    data_buf.push('\n');
+            self.after_cr = byte == b'\r';
+            if matches!(byte, b'\r' | b'\n') {
+                if let Some(response) = self.end_line(id) {
+                    return Some(response);
                 }
-                data_buf.push_str(rest.trim_start());
-                if let Ok(val) = serde_json::from_str::<Value>(rest.trim()) {
-                    if let Some(matched) = select_message(val) {
-                        fallback.get_or_insert(matched);
-                    }
-                }
+            } else {
+                self.line.push(byte);
             }
         }
-        return fallback.ok_or_else(|| {
-            "MCP SSE stream did not contain a matching JSON-RPC response".to_string()
-        })?;
+        None
     }
 
-    let val: Value = serde_json::from_str(trimmed)
+    fn end_line(&mut self, id: u64) -> Option<Result<Value, String>> {
+        if self.line.is_empty() {
+            if self.data.is_empty() {
+                return None;
+            }
+            let message = serde_json::from_slice(&self.data).ok();
+            self.data.clear();
+            return message.and_then(|value| select_rpc_response(value, id));
+        }
+        if let Some(value) = self.line.strip_prefix(b"data:") {
+            self.data
+                .extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
+            self.data.push(b'\n');
+        }
+        self.line.clear();
+        None
+    }
+
+    fn finish(&mut self, id: u64) -> Result<Value, String> {
+        self.end_line(id)
+            .or_else(|| self.end_line(id))
+            .unwrap_or_else(|| Err("MCP SSE stream omitted matching request id".into()))
+    }
+}
+
+fn check_http_size(total: usize) -> Result<(), String> {
+    if total as u64 > MCP_MAX_FRAME_BYTES {
+        Err("MCP HTTP response exceeds the 8 MB limit".into())
+    } else {
+        Ok(())
+    }
+}
+
+async fn read_http_bytes(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to read MCP body: {e}"))?
+    {
+        check_http_size(body.len().saturating_add(chunk.len()))?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn read_http_rpc(mut response: reqwest::Response, id: u64) -> Result<Value, String> {
+    let is_sse = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("text/event-stream")
+        });
+    let mut sse = SseResponse::default();
+    if is_sse {
+        let mut total = 0usize;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("Failed to read MCP event: {e}"))?
+        {
+            total = total.saturating_add(chunk.len());
+            check_http_size(total)?;
+            if let Some(result) = sse.push(&chunk, id) {
+                return result;
+            }
+        }
+        return sse.finish(id);
+    }
+    let body = read_http_bytes(response).await?;
+    let body = body.trim_ascii_start();
+    if body.starts_with(b"event:") || body.starts_with(b"data:") {
+        return sse.push(body, id).unwrap_or_else(|| sse.finish(id));
+    }
+    let message = serde_json::from_slice(body)
         .map_err(|e| format!("Invalid JSON from MCP HTTP server: {e}"))?;
-    select_message(val)
-        .ok_or_else(|| "MCP HTTP response omitted matching request id".to_string())?
+    select_rpc_response(message, id).ok_or("MCP HTTP response omitted matching request id")?
 }
 
 impl McpServer {
@@ -462,12 +559,11 @@ impl McpServer {
             .timeout(std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS))
             .build()
             .map_err(|e| format!("Failed to build MCP HTTP client: {e}"))?;
-        Ok(McpTransport::Http {
+        Ok(McpTransport::Http(HttpTransport {
             client,
-            url: config.url.trim().to_string(),
-            headers: config.headers.clone(),
-            session_id: Mutex::new(None),
-        })
+            config: config.clone(),
+            session: Mutex::default(),
+        }))
     }
 
     /// Start an MCP server connection (stdio or HTTP/SSE) and initialize it
@@ -574,7 +670,10 @@ impl McpServer {
                     None => false,
                 }
             }
-            McpTransport::Http { .. } => true,
+            McpTransport::Http(http) => matches!(
+                *http.session.lock().await,
+                HttpSession::Active(_) | HttpSession::Stateless
+            ),
         }
     }
 
@@ -632,60 +731,7 @@ impl McpServer {
                 }
                 result?
             }
-            McpTransport::Http {
-                client,
-                url,
-                headers,
-                session_id,
-            } => {
-                let mut builder = client
-                    .post(url)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json, text/event-stream");
-                for (k, v) in headers {
-                    builder = builder.header(k.trim(), v.as_str());
-                }
-                if let Some(sid) = session_id.lock().await.as_deref() {
-                    builder = builder.header("Mcp-Session-Id", sid);
-                }
-                let response = builder
-                    .json(&request)
-                    .send()
-                    .await
-                    .map_err(|e| format!("MCP HTTP request failed: {e}"))?;
-                let status = response.status();
-                if let Some(sid) = response
-                    .headers()
-                    .get("mcp-session-id")
-                    .and_then(|v| v.to_str().ok())
-                {
-                    *session_id.lock().await = Some(sid.to_string());
-                }
-                let content_type = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                let body_text = {
-                    use futures_util::StreamExt;
-                    let mut bytes = Vec::new();
-                    let mut stream = response.bytes_stream();
-                    while let Some(chunk) = stream.next().await {
-                        let chunk =
-                            chunk.map_err(|e| format!("Failed to read MCP HTTP response: {e}"))?;
-                        if (bytes.len() + chunk.len()) as u64 > MCP_MAX_FRAME_BYTES {
-                            return Err("MCP HTTP response exceeds the 8 MB limit".into());
-                        }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    String::from_utf8_lossy(&bytes).into_owned()
-                };
-                if !status.is_success() {
-                    return Err(format!("MCP HTTP error ({status}): {body_text}"));
-                }
-                parse_http_rpc_response(&content_type, &body_text, id)
-            }
+            McpTransport::Http(http) => read_http_rpc(http.post(&request).await?, id).await,
         }
     }
 
@@ -704,34 +750,7 @@ impl McpServer {
             )
             .await
             .map_err(|_| "MCP notification timed out".to_string())?,
-            McpTransport::Http {
-                client,
-                url,
-                headers,
-                session_id,
-            } => {
-                let mut builder = client
-                    .post(url)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json, text/event-stream");
-                for (k, v) in headers {
-                    builder = builder.header(k.trim(), v.as_str());
-                }
-                if let Some(sid) = session_id.lock().await.as_deref() {
-                    builder = builder.header("Mcp-Session-Id", sid);
-                }
-                let response = builder
-                    .json(&notification)
-                    .send()
-                    .await
-                    .map_err(|e| format!("MCP HTTP notification failed: {e}"))?;
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    return Err(format!("MCP HTTP notification failed ({status}): {body}"));
-                }
-                Ok(())
-            }
+            McpTransport::Http(http) => http.post(&notification).await.map(|_| ()),
         }
     }
 
@@ -829,8 +848,8 @@ impl McpServer {
                 reader_handle.abort();
                 stderr_handle.abort();
             }
-            McpTransport::Http { session_id, .. } => {
-                *session_id.lock().await = None;
+            McpTransport::Http(http) => {
+                *http.session.lock().await = HttpSession::Closed;
             }
         }
     }
@@ -863,7 +882,6 @@ fn mcp_tool_to_openai(tool: &Value) -> Value {
 struct PooledMcpEntry {
     config: McpServerConfig,
     server: std::sync::Arc<Mutex<McpServer>>,
-    tool_definitions: Vec<Value>,
 }
 
 static GLOBAL_MCP_POOL: once_cell::sync::Lazy<Mutex<HashMap<String, PooledMcpEntry>>> =
@@ -975,8 +993,7 @@ impl McpManager {
 
         if self.pooled {
             let mut stale = Vec::new();
-            let mut candidates: Vec<(String, std::sync::Arc<Mutex<McpServer>>, Vec<Value>)> =
-                Vec::new();
+            let mut candidates = Vec::new();
             {
                 let mut pool = GLOBAL_MCP_POOL.lock().await;
                 let existing_keys: Vec<String> = pool.keys().cloned().collect();
@@ -993,11 +1010,7 @@ impl McpManager {
                 for (name, config) in configs {
                     if let Some(entry) = pool.get(name) {
                         if entry.config == *config {
-                            candidates.push((
-                                name.clone(),
-                                entry.server.clone(),
-                                entry.tool_definitions.clone(),
-                            ));
+                            candidates.push((name.clone(), entry.server.clone()));
                             continue;
                         }
                     }
@@ -1007,8 +1020,11 @@ impl McpManager {
             for s in stale {
                 s.lock().await.kill().await;
             }
-            for (name, server, tools) in candidates {
-                let alive = server.lock().await.is_alive().await;
+            for (name, server) in candidates {
+                let mut guard = server.lock().await;
+                let alive = guard.is_alive().await;
+                let tools = guard.tool_definitions().to_vec();
+                drop(guard);
                 if alive {
                     self.record_server_tools(&name, server, &tools, &mut all_tools, &mut statuses);
                 } else {
@@ -1038,7 +1054,6 @@ impl McpManager {
                             PooledMcpEntry {
                                 config: config.clone(),
                                 server: arc.clone(),
-                                tool_definitions: tools.clone(),
                             },
                         );
                         if let Some(old) = replaced {
@@ -1078,7 +1093,12 @@ impl McpManager {
         let Some(server) = self.servers.get(&server_name).cloned() else {
             return Err(format!("MCP server '{}' is not connected", server_name));
         };
-        let srv = server.lock().await;
+        let mut srv = server.lock().await;
+        if let McpTransport::Http(http) = &srv.transport {
+            if matches!(*http.session.lock().await, HttpSession::Expired) {
+                *srv = McpServer::start(&http.config).await?;
+            }
+        }
         srv.call_tool(&original_tool, arguments)
             .await
             .map_err(|e| format!("MCP server '{}': {}", server_name, e))
@@ -1547,8 +1567,21 @@ mod tests {
     #[test]
     fn http_and_sse_rpc_responses_are_parsed_by_id() {
         let json_body = r#"{"jsonrpc":"2.0","id":7,"result":{"tools":[]}}"#;
-        let parsed = parse_http_rpc_response("application/json", json_body, 7).unwrap();
+        let parsed = select_rpc_response(serde_json::from_str(json_body).unwrap(), 7)
+            .unwrap()
+            .unwrap();
         assert_eq!(parsed["id"], 7);
+        assert!(select_rpc_response(json!({"result":{}}), 7).is_none());
+        assert!(select_rpc_response(json!({"id":7,"method":"ping"}), 7).is_none());
+        let mut multiline = SseResponse::default();
+        let fixture = "data: {\"id\":7,\r\ndata: \"result\":\"例\"}\r\n\r\n";
+        let parsed = fixture
+            .as_bytes()
+            .chunks(1)
+            .find_map(|chunk| multiline.push(chunk, 7))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed["result"], "例");
 
         let sse_body = concat!(
             "event: message\n",
@@ -1556,8 +1589,119 @@ mod tests {
             "event: message\n",
             "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n\n",
         );
-        let parsed_sse = parse_http_rpc_response("text/event-stream", sse_body, 7).unwrap();
+        let mut parser = SseResponse::default();
+        let parsed_sse = sse_body
+            .as_bytes()
+            .chunks(3)
+            .find_map(|chunk| parser.push(chunk, 7))
+            .unwrap()
+            .unwrap();
         assert_eq!(parsed_sse["result"]["content"][0]["text"], "ok");
+    }
+
+    #[tokio::test]
+    async fn http_streams_return_before_eof_and_expired_calls_are_not_replayed() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let fixture = tokio::spawn(async move {
+            let mut streams = Vec::new();
+            for index in 0..8 {
+                let mut stream = BufReader::new(listener.accept().await.unwrap().0);
+                let mut line = String::new();
+                let mut len = 0;
+                let mut session = None;
+                loop {
+                    line.clear();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            len = value.trim().parse().unwrap();
+                        }
+                        if name.eq_ignore_ascii_case("mcp-session-id") {
+                            session = Some(value.trim().to_owned());
+                        }
+                    }
+                }
+                let mut body = vec![0; len];
+                stream.read_exact(&mut body).await.unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                let generation = if index < 4 { "first" } else { "second" };
+                let method = [
+                    "initialize",
+                    "notifications/initialized",
+                    "tools/list",
+                    "tools/call",
+                ][index % 4];
+                assert_eq!(request["method"], method);
+                assert_eq!(
+                    session.as_deref(),
+                    (method != "initialize").then_some(generation)
+                );
+                let mut socket = stream.into_inner();
+                let id = &request["id"];
+                let response = |result| json!({"jsonrpc":"2.0", "id":id, "result":result});
+                let (status, headers, body) = match method {
+                    "initialize" => (
+                        "200 OK",
+                        format!("Mcp-Session-Id: {generation}\r\n"),
+                        response(
+                            json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}),
+                        )
+                        .to_string(),
+                    ),
+                    "notifications/initialized" => ("202 Accepted", String::new(), String::new()),
+                    "tools/list" => {
+                        let result = response(json!({"tools":[{"name":"echo"}]}));
+                        let event = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n: heartbeat\r\n\r\ndata: {{\"id\":88,\"result\":false}}\r\n\r\ndata: {result}\r\n\r\n");
+                        socket.write_all(event.as_bytes()).await.unwrap();
+                        streams.push(socket); // Leave the SSE response open while the next POST arrives.
+                        continue;
+                    }
+                    _ => {
+                        assert_eq!(request["params"]["arguments"]["value"], generation);
+                        if index == 3 {
+                            ("404 Not Found", String::new(), String::new())
+                        } else {
+                            (
+                                "200 OK",
+                                String::new(),
+                                response(json!({"content":[]})).to_string(),
+                            )
+                        }
+                    }
+                };
+                let reply = format!("HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let server: McpServerConfig =
+            serde_json::from_value(json!({"url":url, "transport":"http"})).unwrap();
+        let mut manager = McpManager::new();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            let report = manager
+                .start_all(&HashMap::from([("test".into(), server)]))
+                .await;
+            assert_eq!(report.tool_definitions.len(), 1, "{:?}", report.servers);
+            let alias = tool_alias("test", "echo");
+            let err = manager
+                .route_tool_call(&alias, json!({"value":"first"}))
+                .await
+                .unwrap_err();
+            assert!(err.contains("expired (404)"));
+            let ok = manager
+                .route_tool_call(&alias, json!({"value":"second"}))
+                .await
+                .unwrap();
+            assert!(ok.contains("content"));
+            fixture.await.unwrap();
+        })
+        .await
+        .expect("a matching SSE event must finish the request promptly");
     }
 
     #[test]

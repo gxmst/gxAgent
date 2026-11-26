@@ -108,8 +108,12 @@ export const resolveWorkspacePath = (workDir: string, path: string) => {
 };
 
 export const comparableWorkspacePath = (path: string) => {
-  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
-  return /^[a-zA-Z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
+  const normalized = path.replace(/\\/g, "/")
+    .replace(/^\/\/\?\/UNC\//i, "//")
+    .replace(/^\/\/\?\//, "");
+  const windows = /^[a-z]:\//i.test(normalized) || normalized.startsWith("//");
+  const trimmed = normalized.replace(/\/+$/, "") || (normalized.startsWith("/") ? "/" : "");
+  return windows ? trimmed.toLowerCase() : trimmed;
 };
 
 // Rough token estimate: ~4 ASCII chars per token, 1 token per non-ASCII char.

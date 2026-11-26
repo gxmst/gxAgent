@@ -101,7 +101,9 @@ export function ApprovalCard({ lang, config, setConfig, className = "" }: Approv
     <div className={`approval-card ${className}`.trim()}>
       <div className="approval-card-header">
         <ShieldAlert size={14} />
-        <span>{t("approval.title", lang)}</span>
+        <span>{pendingApprovals.source === "hooks"
+          ? (lang === "zh" ? "允许此工作区运行以下钩子？批准在本次应用运行期间有效，配置变更后需重新确认。拒绝将跳过本次钩子。" : "Allow these workspace hooks until the app exits? Changes require approval again. Decline to skip hooks for this run.")
+          : t("approval.title", lang)}</span>
       </div>
       {pendingApprovals.tool_calls.map((tc) => (
         <div key={tc.id} className="approval-item">
@@ -111,14 +113,14 @@ export function ApprovalCard({ lang, config, setConfig, className = "" }: Approv
           </pre>
         </div>
       ))}
-      {pendingApprovals.source !== "codex" && <div className="approval-trust-preview">
+      {!pendingApprovals.source && <div className="approval-trust-preview">
         {t("approval.trustPreview", lang, { patterns: trustPreview })}
       </div>}
       <div className="approval-actions">
         <button className="btn btn-approve" disabled={approvalSubmitting} onClick={() => handleApproval(true)}>
           <CheckCircle2 size={13} /> {t("approval.approve", lang)}
         </button>
-        {pendingApprovals.source !== "codex" && <button className="btn btn-approve-trust" disabled={approvalSubmitting} onClick={() => handleApproval(true, true)} title={t("approval.trustHint", lang)}>
+        {!pendingApprovals.source && <button className="btn btn-approve-trust" disabled={approvalSubmitting} onClick={() => handleApproval(true, true)} title={t("approval.trustHint", lang)}>
           <ShieldAlert size={13} /> {t("approval.approveAndTrust", lang)}
         </button>}
         <button className="btn btn-reject" disabled={approvalSubmitting} onClick={() => handleApproval(false)}>

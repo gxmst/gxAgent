@@ -127,7 +127,7 @@ export function WorkspacePanel({ lang, config, session, open, width, onClose, wo
           <ContextInspector key={`${sessionId}:${selectedRunId || "latest"}`} session={session} lang={lang} selectedMessageId={selectedRunId} />
         </div>
         <div role="tabpanel" id="workspace-panel-runtime" aria-labelledby="workspace-tab-runtime" hidden={activeTab !== "runtime"}>
-          <WorkspaceRuntimePanel lang={lang} workDir={workspace.workDir} disabled={disabled} onSelectWorkDir={onSelectWorkDir} />
+          <WorkspaceRuntimePanel key={workspace.workDir} lang={lang} workDir={workspace.workDir} repositoryRoot={workspace.repositoryRoot} disabled={disabled} onSelectWorkDir={onSelectWorkDir} />
         </div>
       </div>
     </section>

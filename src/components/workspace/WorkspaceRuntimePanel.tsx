@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { comparableWorkspacePath } from "../../appDefaults";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Brain,
@@ -47,18 +48,16 @@ interface MemoryEntry {
   updatedAt: number;
 }
 
-const samePath = (a?: string | null, b?: string | null) =>
-  (a || "").replace(/[\\/]+$/, "").toLowerCase() ===
-  (b || "").replace(/[\\/]+$/, "").toLowerCase();
-
 export function WorkspaceRuntimePanel({
   lang,
   workDir,
   disabled,
   onSelectWorkDir,
+  repositoryRoot,
 }: {
   lang: string;
   workDir: string;
+  repositoryRoot?: string;
   disabled: boolean;
   onSelectWorkDir?: (workDir: string) => void;
 }) {
@@ -90,7 +89,7 @@ export function WorkspaceRuntimePanel({
               defaultWorkDir: workDir,
             })
           : Promise.resolve([]),
-        invoke<BackgroundProcessInfo[]>("list_background_processes"),
+        workDir ? invoke<BackgroundProcessInfo[]>("list_background_processes", { workDir }) : Promise.resolve([]),
         workDir
           ? invoke<MemoryEntry[]>("list_project_memories", { workDir })
           : Promise.resolve([]),
@@ -121,6 +120,7 @@ export function WorkspaceRuntimePanel({
     setSelectedProcessId(id);
     try {
       const res = await invoke<BackgroundProcessOutput>("read_background_output_cmd", {
+        workDir,
         processId: id,
         tailLines: 120,
       });
@@ -132,7 +132,7 @@ export function WorkspaceRuntimePanel({
 
   const stopProcess = async (id: string) => {
     try {
-      await invoke("stop_background_process_cmd", { processId: id });
+      await invoke("stop_background_process_cmd", { workDir, processId: id });
       if (selectedProcessId === id) {
         setSelectedProcessId(null);
         setProcessOutput(null);
@@ -240,7 +240,7 @@ export function WorkspaceRuntimePanel({
         {worktrees.length > 0 && (
           <div className="runtime-list">
             {worktrees.map((wt) => {
-              const active = samePath(wt.path, workDir);
+              const active = comparableWorkspacePath(wt.path) === comparableWorkspacePath(repositoryRoot || workDir);
               return (
                 <div key={wt.path} className={`runtime-row ${active ? "active" : ""}`}>
                   <div className="runtime-row-info">

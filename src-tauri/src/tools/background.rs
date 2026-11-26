@@ -264,12 +264,15 @@ pub async fn start_background_process(
 }
 
 pub async fn read_background_output(
+    work_dir: &str,
     process_id: &str,
     tail_lines: usize,
 ) -> Result<BackgroundProcessOutput, String> {
+    let root = workspace::ensure_workspace_dir(work_dir, false)?;
     let mut map = GLOBAL_BG_PROCESSES.lock().await;
     let entry = map
         .get_mut(process_id.trim())
+        .filter(|entry| std::path::Path::new(&entry.work_dir) == root)
         .ok_or_else(|| format!("Background process '{}' not found", process_id))?;
     refresh_entry_status(entry);
 
@@ -290,12 +293,19 @@ pub async fn read_background_output(
     })
 }
 
-pub async fn stop_background_process(process_id: &str) -> Result<String, String> {
-    let entry = GLOBAL_BG_PROCESSES
-        .lock()
-        .await
-        .remove(process_id.trim())
-        .ok_or_else(|| format!("Background process '{}' not found", process_id))?;
+pub async fn stop_background_process(work_dir: &str, process_id: &str) -> Result<String, String> {
+    let root = workspace::ensure_workspace_dir(work_dir, false)?;
+    let entry = {
+        let mut map = GLOBAL_BG_PROCESSES.lock().await;
+        match map.entry(process_id.trim().to_owned()) {
+            std::collections::hash_map::Entry::Occupied(slot)
+                if std::path::Path::new(&slot.get().work_dir) == root =>
+            {
+                slot.remove()
+            }
+            _ => return Err(format!("Background process '{}' not found", process_id)),
+        }
+    };
     let id = entry.id.clone();
     kill_background_entry(entry).await;
     Ok(format!("Stopped background process '{}'.", id))
@@ -313,33 +323,45 @@ pub async fn stop_all_background_processes() {
     }
 }
 
-pub async fn list_background_processes_internal() -> Vec<BackgroundProcessInfo> {
+pub async fn list_background_processes_internal(
+    work_dir: &str,
+) -> Result<Vec<BackgroundProcessInfo>, String> {
+    let root = workspace::ensure_workspace_dir(work_dir, false)?;
     let mut map = GLOBAL_BG_PROCESSES.lock().await;
     let mut list = Vec::with_capacity(map.len());
-    for entry in map.values_mut() {
+    for entry in map
+        .values_mut()
+        .filter(|entry| std::path::Path::new(&entry.work_dir) == root)
+    {
         refresh_entry_status(entry);
         list.push(entry_info(entry));
     }
     list.sort_by(|a, b| b.started_at.cmp(&a.started_at).then(a.id.cmp(&b.id)));
-    list
+    Ok(list)
 }
 
 #[tauri::command]
-pub async fn list_background_processes() -> Result<Vec<BackgroundProcessInfo>, String> {
-    Ok(list_background_processes_internal().await)
+pub async fn list_background_processes(
+    work_dir: String,
+) -> Result<Vec<BackgroundProcessInfo>, String> {
+    list_background_processes_internal(&work_dir).await
 }
 
 #[tauri::command]
 pub async fn read_background_output_cmd(
+    work_dir: String,
     process_id: String,
     tail_lines: Option<usize>,
 ) -> Result<BackgroundProcessOutput, String> {
-    read_background_output(&process_id, tail_lines.unwrap_or(100)).await
+    read_background_output(&work_dir, &process_id, tail_lines.unwrap_or(100)).await
 }
 
 #[tauri::command]
-pub async fn stop_background_process_cmd(process_id: String) -> Result<String, String> {
-    stop_background_process(&process_id).await
+pub async fn stop_background_process_cmd(
+    work_dir: String,
+    process_id: String,
+) -> Result<String, String> {
+    stop_background_process(&work_dir, &process_id).await
 }
 
 #[cfg(test)]
@@ -363,7 +385,9 @@ mod tests {
 
         let mut captured = String::new();
         for _ in 0..30 {
-            let out = read_background_output(&info.id, 50).await.unwrap();
+            let out = read_background_output(dir.to_str().unwrap(), &info.id, 50)
+                .await
+                .unwrap();
             if out.output.contains("bg-hello") {
                 captured = out.output;
                 break;
@@ -372,10 +396,23 @@ mod tests {
         }
         assert!(captured.contains("bg-hello"), "captured: {captured}");
 
-        let list = list_background_processes_internal().await;
+        let other = dir.join("other");
+        std::fs::create_dir(&other).unwrap();
+        let other = other.to_str().unwrap();
+        assert!(list_background_processes_internal(other)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(read_background_output(other, &info.id, 50).await.is_err());
+        assert!(stop_background_process(other, &info.id).await.is_err());
+        let list = list_background_processes_internal(dir.to_str().unwrap())
+            .await
+            .unwrap();
         assert!(list.iter().any(|p| p.id == info.id));
 
-        let stopped = stop_background_process(&info.id).await.unwrap();
+        let stopped = stop_background_process(dir.to_str().unwrap(), &info.id)
+            .await
+            .unwrap();
         assert!(stopped.contains(&info.id));
 
         let _ = std::fs::remove_dir_all(dir);

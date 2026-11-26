@@ -252,3 +252,76 @@ for (const language of ['en', 'zh']) {
     }
   });
 }
+
+test('file mentions keep the draft and lock sending until the attachment is ready', async ({ page }) => {
+  await installFixture(page);
+  await page.goto('/');
+  const message = page.getByRole('textbox', { name: 'Message', exact: true });
+  const send = page.getByRole('button', { name: 'Send message', exact: true });
+  await page.evaluate(() => {
+    const bridge = window as any;
+    const invoke = bridge.__TAURI_INTERNALS__.invoke;
+    bridge.__TAURI_INTERNALS__.invoke = async (command: string, args: unknown) => {
+      if (command === 'read_file_content') await new Promise(resolve => { bridge.__releaseFile = resolve; });
+      return invoke(command, args);
+    };
+  });
+  await message.fill('Explain @App.tsx');
+  const option = page.getByRole('option', { name: /src\/App\.tsx/i });
+  await expect(option).toBeVisible();
+  expect((await option.boundingBox())!.width).toBeGreaterThan(100);
+  await option.click();
+  await expect(send).toBeDisabled();
+  await expect(message).toHaveValue('Explain @App.tsx');
+  await message.press('Enter');
+  expect(await page.evaluate(() => (window as any).__calls.some((call: any) => call.command === 'start_agent_session'))).toBe(false);
+  await page.evaluate(() => (window as any).__releaseFile());
+  await expect(page.locator('.attachment-chip')).toContainText('src/App.tsx');
+  await expect(message).toHaveValue('Explain');
+  await send.click();
+  expect((await requestAt(page)).prompt).toContain('export const ready = true;');
+
+  await message.fill('@diff');
+  await page.getByRole('option', { name: /Git Diff/i }).click();
+  await expect(message).toHaveValue('');
+  await page.getByRole('button', { name: 'Steer current task', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__calls.find((call: any) => call.command === 'push_steering_message')?.args.message)).toContain('diff --git');
+  await expect(page.locator('.attachment-chip')).toHaveCount(0);
+});
+
+test('a skill mention adds to inherited skills', async ({ page }) => {
+  const inherited = 'b'.repeat(64);
+  await installFixture(page, { config: { learning: { enabled_skills: [inherited] } } });
+  await page.goto('/');
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Use @docs-reader');
+  await page.getByRole('option', { name: /docs-reader/i }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  expect((await requestAt(page)).config.learning.enabled_skills).toEqual([inherited, 'a'.repeat(64)]);
+});
+
+test('native hook approval and credential status stay outside the conversation actions', async ({ page }) => {
+  await installFixture(page);
+  await page.goto('/');
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Use the configured service');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  const { requestId } = await requestAt(page);
+  await emit(page, 'agent-tool-approval-request', { requestId, request_id: 'hook-confirmation', source: 'hooks',
+    tool_calls: [{ id: 'hook-confirmation', name: 'project_hooks', arguments: '{"Stop":[{"command":"echo fixture-hook"}]}', approval_level: 'needs_confirmation' }] });
+  const card = page.locator('.approval-card-dock');
+  await expect(card).toContainText('echo fixture-hook');
+  await expect(card.locator('.btn-approve-trust')).toHaveCount(0);
+  await card.getByRole('button', { name: 'Approve', exact: true }).click();
+  await expect(card).toBeHidden();
+  await emit(page, 'agent-question', { requestId, question: { source: 'native', interactionId: 'credentials',
+    questions: [{ id: 'token', header: 'Service token', question: 'Is the service configured?', isSecret: true }] } });
+  const form = page.locator('.agent-question');
+  await expect(form.locator('input[type=password], input[type=text]')).toHaveCount(0);
+  await form.getByRole('radio', { name: 'Configured separately' }).check();
+  await form.getByRole('button', { name: 'Submit answer' }).click();
+  const answers = await page.evaluate(() => (window as any).__calls.find((call: any) => call.command === 'answer_agent_question').args.answers);
+  expect(answers).toEqual({ token: ['configured'] });
+  await emit(page, 'agent-complete', { requestId, status: 'completed' });
+  await expect(page.locator('.composer-send')).not.toHaveClass(/stopping/);
+  const sessions = await page.evaluate(() => JSON.stringify((window as any).__sessions));
+  expect(sessions).not.toContain('fixture-hook');
+});

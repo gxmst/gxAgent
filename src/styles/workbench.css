@@ -1242,8 +1242,13 @@
   background: var(--bg-card-hover);
 }
 
-.mention-suggestions {
-  max-height: 260px;
+.command-suggestions.mention-suggestions {
+  position: static;
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(260px, var(--radix-popover-content-available-height, 260px));
+  box-sizing: border-box;
+  margin: 0;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 

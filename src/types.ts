@@ -214,7 +214,7 @@ export interface UsageStats {
 }
 
 export interface PendingApproval {
-  source?: "codex";
+  source?: "codex" | "hooks";
   request_id: string;
   tool_calls: {
     id: string;

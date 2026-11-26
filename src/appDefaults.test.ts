@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import {
+  comparableWorkspacePath,
   modelCatalogForConfig,
   modelCatalogKey,
   modelContextLimitForConfig,
@@ -13,6 +14,12 @@ const connection = {
   base_url: "https://models.example.test/v1/",
 };
 const models = [{ id: "shared-model", context_length: 32_000 }];
+
+it("matches Git and Windows canonical drive and UNC paths while preserving POSIX case", () => {
+  expect(comparableWorkspacePath("\\\\?\\C:\\Work\\Tree")).toBe(comparableWorkspacePath("c:/work/tree/"));
+  expect(comparableWorkspacePath("\\\\?\\UNC\\Host\\Share")).toBe(comparableWorkspacePath("//host/share/"));
+  expect(comparableWorkspacePath("/work/A")).not.toBe(comparableWorkspacePath("/work/a"));
+});
 
 describe("provider model catalog provenance", () => {
   it("isolates account-specific catalogs on the same gateway", () => {

@@ -199,10 +199,22 @@ fn permissions(config: &AppConfig) -> (&'static str, &'static str) {
 
 fn thread_options(config: &AppConfig) -> Value {
     let (sandbox, approval) = permissions(config);
+    let servers: serde_json::Map<String, Value> = config
+        .mcp_servers
+        .iter()
+        .map(|(name, server)| {
+            let transport = if crate::mcp::is_http_transport(server) {
+                json!({"url":server.url, "http_headers":server.headers})
+            } else {
+                json!({"command":server.command, "args":server.args, "env":server.env})
+            };
+            (name.clone(), transport)
+        })
+        .collect();
     let mut options = json!({
         "cwd":config.default_work_dir,"sandbox":sandbox,"approvalPolicy":approval,
         "developerInstructions":config.system_prompt,
-        "config":{"mcp_servers":config.mcp_servers,"web_search":if config.tools_enabled.iter().any(|tool| tool == "web_search") { "live" } else { "disabled" }},
+        "config":{"mcp_servers":servers,"web_search":if config.tools_enabled.iter().any(|tool| tool == "web_search") { "live" } else { "disabled" }},
     });
     if !config.codex_model.trim().is_empty() {
         options["model"] = json!(config.codex_model.trim());
@@ -280,6 +292,7 @@ pub async fn run(
                 &retrieval_query,
                 &mut prompt,
                 &mut config,
+                false,
             ),
             &mut controls,
         )
@@ -705,6 +718,29 @@ mod tests {
     use tokio::io::{
         AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf,
     };
+
+    #[test]
+    fn codex_uses_only_fields_for_the_selected_mcp_transport() {
+        let mut config = AppConfig::default();
+        let http = json!({"transport":"sse", "command":"unused", "url":"https://example.test/mcp", "headers":{"X-Team":"fixture"}});
+        let local =
+            json!({"command":"example", "args":["one"], "env":{"EXAMPLE":"value"}, "url":"unused"});
+        config
+            .mcp_servers
+            .insert("remote".into(), serde_json::from_value(http).unwrap());
+        config
+            .mcp_servers
+            .insert("local".into(), serde_json::from_value(local).unwrap());
+        let options = thread_options(&config);
+        assert_eq!(
+            options["config"]["mcp_servers"]["remote"],
+            json!({"url":"https://example.test/mcp","http_headers":{"X-Team":"fixture"}})
+        );
+        assert_eq!(
+            options["config"]["mcp_servers"]["local"],
+            json!({"command":"example","args":["one"],"env":{"EXAMPLE":"value"}})
+        );
+    }
 
     struct Fixture {
         request_id: String,

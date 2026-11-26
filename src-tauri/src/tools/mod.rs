@@ -278,21 +278,23 @@ pub async fn execute_tool_with_control(
         "read_background_output" => {
             let process_id = args["process_id"].as_str().unwrap_or("");
             let tail_lines = args["tail_lines"].as_u64().unwrap_or(100) as usize;
-            match background::read_background_output(process_id, tail_lines).await {
+            match background::read_background_output(work_dir, process_id, tail_lines).await {
                 Ok(out) => serde_json::to_string_pretty(&out).unwrap_or_default(),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "stop_background_process" => {
             let process_id = args["process_id"].as_str().unwrap_or("");
-            match background::stop_background_process(process_id).await {
+            match background::stop_background_process(work_dir, process_id).await {
                 Ok(msg) => msg,
                 Err(e) => format!("Error: {}", e),
             }
         }
         "list_background_processes" => {
-            let list = background::list_background_processes_internal().await;
-            serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".to_string())
+            match background::list_background_processes_internal(work_dir).await {
+                Ok(list) => serde_json::to_string_pretty(&list).unwrap_or_default(),
+                Err(e) => format!("Error: {e}"),
+            }
         }
         "save_memory" => {
             let category = args["category"].as_str().unwrap_or("project");
@@ -689,6 +691,20 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(err.contains("exceeds file length"));
+
+        std::fs::write(&file, format!("short\r\n{}\r\nlast", "文".repeat(90_000))).unwrap();
+        let middle =
+            run_read_file_with_options("sample.txt", dir.to_str().unwrap(), Some(2), None, true)
+                .await
+                .unwrap();
+        assert!(middle.starts_with("[Lines 2-2 of 3]\n2: 文"));
+        assert!(middle.contains("[line truncated]"));
+        assert!(middle.contains("start_line=3"));
+        let last =
+            run_read_file_with_options("sample.txt", dir.to_str().unwrap(), Some(3), None, true)
+                .await
+                .unwrap();
+        assert_eq!(last, "[Lines 3-3 of 3]\n3: last");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

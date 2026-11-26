@@ -630,18 +630,29 @@ export function useAgentRequest({
   };
 
   const handleSteeringMessage = async () => {
-    const message = prompt.trim();
+    const draft = prompt.trim();
+    const textAttachments = attachments.filter(item => item.type === "text" && item.data.trim());
+    const message = buildPromptWithAttachments(draft, textAttachments);
     const sessionId = runtime.activeRequestSessionId;
     const requestId = runtime.activeRequestId;
-    if (!message || !isStreaming || sessionId !== currentSessionId || !requestId || currentMode !== "code") return;
+    if (isAttachmentLoading || !message || !isStreaming || sessionId !== currentSessionId || !requestId || currentMode !== "code") return;
     try {
       await invoke("push_steering_message", { requestId, message });
       setSessions(prev => prev.map(s => s.id === sessionId ? {
         ...s,
-        messages: [...s.messages, { id: newMessageId(), role: "user" as const, content: `[Steering] ${message}`, timestamp: Date.now() }],
+        messages: [...s.messages, {
+          id: newMessageId(), role: "user" as const, content: `[Steering] ${draft}`.trimEnd(), timestamp: Date.now(),
+          attachments: textAttachments.length ? textAttachments : undefined,
+        }],
         updatedAt: Date.now(),
       } : s));
-      setPrompt("");
+      if (textAttachments.length) {
+        setAttachmentsBySession(previous => ({
+          ...previous,
+          [sessionId]: (previous[sessionId] || []).filter(item => !textAttachments.includes(item)),
+        }));
+      }
+      setPrompt(previous => previous === prompt ? "" : previous);
       addLog(t("ui.steering-message-sent", lang), "info", false, sessionId);
     } catch (e) {
       addLog(`Steering error: ${e}`, "error", true, sessionId);

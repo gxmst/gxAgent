@@ -246,6 +246,7 @@ function App() {
     isAttachmentLoading,
     hasAttachmentLoading,
     reportAttachmentFit,
+    attachMention,
     addFilesAsAttachments,
     pickAndParseAttachments,
   } = useAttachments({ sessionStorageReady, lang });
@@ -748,6 +749,7 @@ function App() {
               isAttachmentLoading={isAttachmentLoading}
               attachments={attachments}
               setAttachments={setAttachments}
+              attachMention={attachMention}
               prompt={prompt}
               setPrompt={setPrompt}
               chatTextareaRef={chatTextareaRef}

@@ -430,6 +430,7 @@ async function registerToolListeners(unlisteners: (() => void)[]) {
     const sessionId = agentEventSessionId(event.payload);
     const requestId = payloadRequestId(event.payload) || runtime.activeRequestId;
     store().setPendingApprovalsBySession((previous) => ({ ...previous, [sessionId]: event.payload }));
+    if (event.payload.source === "hooks") return;
     const pendingActions: ToolAction[] = event.payload.tool_calls.map((tc) => ({
       id: tc.id,
       name: tc.name,

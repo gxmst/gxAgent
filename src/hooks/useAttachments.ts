@@ -107,6 +107,26 @@ export function useAttachments({
     }
   };
 
+  const attachMention = async (load: () => Promise<Attachment | null>): Promise<boolean> => {
+    const target = currentSessionId;
+    if (!sessionStorageReady || attachmentLoadingBySession[target]) return false;
+    setAttachmentLoadingBySession(prev => ({ ...prev, [target]: true }));
+    try {
+      const item = await load();
+      if (!item) return false;
+      const fitted = fitAttachmentBudget(attachmentsBySession[target] || [], [item]);
+      reportAttachmentFit(fitted, target);
+      if (!fitted.accepted.length) return false;
+      setAttachments(prev => [...prev, ...fitted.accepted]);
+      return true;
+    } catch (error) {
+      addLog(`${t("ui.failed-to-attach-file", lang)}: ${error}`, "error", true, target);
+      return false;
+    } finally {
+      setAttachmentLoadingBySession(prev => ({ ...prev, [target]: false }));
+    }
+  };
+
   const addFilesAsAttachments = async (files: File[], targetSessionId = currentSessionId) => {
     if (!sessionStorageReady || files.length === 0 || attachmentLoadingBySession[targetSessionId]) return;
     setAttachmentLoadingBySession((previous) => ({ ...previous, [targetSessionId]: true }));
@@ -224,6 +244,7 @@ export function useAttachments({
     isAttachmentLoading,
     hasAttachmentLoading,
     reportAttachmentFit,
+    attachMention,
     addFilesAsAttachments,
     pickAndParseAttachments,
   };

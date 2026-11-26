@@ -4,12 +4,13 @@ use crate::{app_paths, mcp, storage, workspace};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 
 pub(super) fn effective_work_dir(explicit: Option<String>) -> Result<String, String> {
     let selected = match explicit.filter(|value| !value.trim().is_empty()) {
         Some(path) => path,
-        None => load_config()?.default_work_dir,
+        None => read_local_config(&config_path()?)?.0.default_work_dir,
     };
     Ok(workspace::ensure_workspace_dir(&selected, false)?
         .to_string_lossy()
@@ -81,20 +82,39 @@ fn normalize_context_budget(value: u32, migration_version: u32) -> u32 {
 
 /// Load config from local file, returns default if not found (decrypts API keys)
 #[tauri::command]
-pub fn load_config() -> Result<AppConfig, String> {
-    let config_path = app_paths::config_dir()
-        .ok_or("Config directory is unavailable")?
-        .join("config.json");
+pub fn load_config(app: AppHandle) -> Result<AppConfig, String> {
+    let (config, missing_headers) = read_local_config(&config_path()?)?;
+    if missing_headers {
+        let _ = app.emit("config-import-rekey", "Some MCP headers could not be decrypted on this device. Re-enter their values in MCP settings.");
+    }
+    Ok(config)
+}
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredConfig {
+    #[serde(default)]
+    mcp_headers_encrypted: bool,
+    #[serde(flatten)]
+    config: AppConfig,
+}
+
+fn config_path() -> Result<PathBuf, String> {
+    Ok(app_paths::config_dir()
+        .ok_or("Config directory is unavailable")?
+        .join("config.json"))
+}
+
+fn read_local_config(config_path: &Path) -> Result<(AppConfig, bool), String> {
     if !config_path.exists() {
         let config = AppConfig::default();
         workspace::ensure_workspace_dir(&config.default_work_dir, true)?;
-        persist_config(&config)?;
-        return Ok(config);
+        persist_config_to(&config, config_path)?;
+        return Ok((config, false));
     }
 
     let json = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-    let mut config: AppConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let stored: StoredConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let mut config = stored.config;
     config.role_prompt = None;
 
     // One-time migration: seed built-in tools added in this release so existing
@@ -193,11 +213,14 @@ pub fn load_config() -> Result<AppConfig, String> {
     for profile in config.profiles.values_mut() {
         needs_rekey = decrypt_key_for_load(&mut profile.api_key) || needs_rekey;
     }
+    let (legacy_headers, missing_headers) =
+        decode_mcp_headers(&mut config, stored.mcp_headers_encrypted);
+    config_changed |= legacy_headers;
     config_changed = repair_config_workspace(&mut config)? || config_changed;
-    if needs_rekey || config_changed {
-        persist_config(&config)?;
+    if (needs_rekey || config_changed) && !missing_headers {
+        persist_config_to(&config, config_path)?;
     }
-    Ok(config)
+    Ok((config, missing_headers))
 }
 
 /// Add trusted patterns to the config and persist
@@ -295,19 +318,15 @@ pub fn clear_active_profile(current_config: AppConfig) -> Result<AppConfig, Stri
 }
 
 fn persist_config(config: &AppConfig) -> Result<(), String> {
+    persist_config_to(config, &config_path()?)
+}
+
+fn persist_config_to(config: &AppConfig, path: &Path) -> Result<(), String> {
     workspace::ensure_workspace_dir(&config.default_work_dir, true)?;
     let mut encrypted_config = config.clone();
     encrypted_config.role_prompt = None;
-    encrypted_config.api_key = encrypt(&encrypted_config.api_key);
-    encrypted_config.search_api_key = encrypt(&encrypted_config.search_api_key);
-    for profile in encrypted_config.profiles.values_mut() {
-        profile.api_key = encrypt(&profile.api_key);
-    }
-    let config_dir = app_paths::config_dir().ok_or("Config directory is unavailable")?;
-    fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    let config_path = config_dir.join("config.json");
-    let json = serde_json::to_string_pretty(&encrypted_config).map_err(|e| e.to_string())?;
-    storage::atomic_write(&config_path, json.as_bytes())
+    let json = serialize_config(encrypted_config)?;
+    storage::atomic_write(path, json.as_bytes())
 }
 
 /// Save or update an MCP server configuration
@@ -389,23 +408,62 @@ pub async fn test_mcp_server(
     .await
 }
 
-fn encrypt_if_plaintext(key: &mut String) {
-    if !key.is_empty() && !key.starts_with("enc:") {
-        *key = encrypt(key);
+fn serialize_config(mut config: AppConfig) -> Result<String, String> {
+    config.api_key = encrypt(&config.api_key);
+    config.search_api_key = encrypt(&config.search_api_key);
+    for profile in config.profiles.values_mut() {
+        profile.api_key = encrypt(&profile.api_key);
     }
+    encrypt_mcp_headers(&mut config);
+    serde_json::to_string_pretty(&StoredConfig {
+        mcp_headers_encrypted: true,
+        config,
+    })
+    .map_err(|e| e.to_string())
+}
+
+// Custom HTTP header names can carry credentials too.
+fn encrypt_mcp_headers(config: &mut AppConfig) {
+    for value in config
+        .mcp_servers
+        .values_mut()
+        .flat_map(|s| s.headers.values_mut())
+    {
+        if !value.is_empty() {
+            *value = crate::crypto::encrypt_value(value);
+        }
+    }
+}
+
+/// Returns (requires rewriting a legacy plaintext file, requires re-entering a credential).
+fn decode_mcp_headers(config: &mut AppConfig, encrypted: bool) -> (bool, bool) {
+    let mut rewrite = false;
+    let mut rekey = false;
+    for value in config
+        .mcp_servers
+        .values_mut()
+        .flat_map(|s| s.headers.values_mut())
+    {
+        if encrypted && value.starts_with("enc:v3:") {
+            let decoded = decrypt(value);
+            if decoded == *value {
+                value.clear();
+                rewrite = true;
+                rekey = true;
+            } else {
+                *value = decoded;
+            }
+        } else if !value.is_empty() {
+            rewrite = true;
+        }
+    }
+    (rewrite, rekey)
 }
 
 /// Export configuration to a JSON string (re-encrypts API keys for safe export)
 #[tauri::command]
 pub fn export_config(config: AppConfig) -> Result<String, String> {
-    let mut export = config;
-    // Re-encrypt API keys so they aren't exported as plaintext
-    encrypt_if_plaintext(&mut export.api_key);
-    encrypt_if_plaintext(&mut export.search_api_key);
-    for profile in export.profiles.values_mut() {
-        encrypt_if_plaintext(&mut profile.api_key);
-    }
-    serde_json::to_string_pretty(&export).map_err(|e| e.to_string())
+    serialize_config(config)
 }
 
 /// Import configuration from a JSON string
@@ -446,7 +504,8 @@ pub fn import_config(app: AppHandle, json: String) -> Result<AppConfig, String> 
             export_data
         };
 
-    let mut config: AppConfig = serde_json::from_value(config_value).map_err(|e| e.to_string())?;
+    let stored: StoredConfig = serde_json::from_value(config_value).map_err(|e| e.to_string())?;
+    let mut config = stored.config;
     config.role_prompt = None;
     let mut needs_rekey = false;
     let (decrypted, rekey) = try_decrypt_key(&config.api_key);
@@ -461,12 +520,14 @@ pub fn import_config(app: AppHandle, json: String) -> Result<AppConfig, String> 
         profile.api_key = decrypted;
         needs_rekey = needs_rekey || rekey;
     }
+    let (_, header_rekey) = decode_mcp_headers(&mut config, stored.mcp_headers_encrypted);
+    needs_rekey |= header_rekey;
     repair_config_workspace(&mut config)?;
     persist_config(&config)?;
     if needs_rekey {
         let _ = app.emit(
             "config-import-rekey",
-            "Detected encrypted keys from another device. Please re-enter your API keys.",
+            "Some credentials could not be decrypted on this device. Re-enter affected API keys and MCP headers in settings.",
         );
     }
     Ok(config)
@@ -496,6 +557,59 @@ pub fn clear_all_sessions() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_headers_migrate_and_round_trip_through_the_export_format() {
+        let mut config = AppConfig::default();
+        let server: config::McpServerConfig = serde_json::from_value(serde_json::json!({
+            "url":"https://example.test", "transport":"http",
+            "headers":{"X-Custom":"enc:v3:literal-header-value", "Accept":"application/json", "X-Empty":""}
+        })).unwrap();
+        config.mcp_servers.insert("example".into(), server.clone());
+        assert_eq!(decode_mcp_headers(&mut config, false), (true, false));
+        let encoded = export_config(config).unwrap();
+        assert!(!encoded.contains("literal-header-value"));
+        let mut stored: StoredConfig = serde_json::from_str(&encoded).unwrap();
+        assert!(stored.mcp_headers_encrypted);
+        assert!(stored.config.mcp_servers["example"].headers["X-Custom"].starts_with("enc:v3:"));
+        assert_eq!(decode_mcp_headers(&mut stored.config, true), (false, false));
+        assert_eq!(stored.config.mcp_servers["example"], server);
+        stored
+            .config
+            .mcp_servers
+            .get_mut("example")
+            .unwrap()
+            .headers = HashMap::from([("X-Custom".into(), "enc:v3:invalid".into())]);
+        assert_eq!(decode_mcp_headers(&mut stored.config, true), (true, true));
+        assert!(stored.config.mcp_servers["example"].headers["X-Custom"].is_empty());
+    }
+
+    #[test]
+    fn opening_an_old_config_migrates_headers_on_disk_only_once() {
+        let dir = std::env::temp_dir().join(format!("gx-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut config = AppConfig {
+            default_work_dir: dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let server = serde_json::from_value(serde_json::json!({
+            "transport":"http", "url":"https://example.test/mcp", "headers":{"Authorization":"Bearer fixture-key"}
+        })).unwrap();
+        config.mcp_servers.insert("docs".into(), server);
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let (first, missing) = read_local_config(&path).unwrap();
+        assert!(!missing);
+        assert_eq!(first.mcp_servers, config.mcp_servers);
+        let encrypted = std::fs::read_to_string(&path).unwrap();
+        assert!(encrypted.contains("enc:v3:"));
+        assert!(!encrypted.contains("fixture-key"));
+        let (second, missing) = read_local_config(&path).unwrap();
+        assert!(!missing);
+        assert_eq!(second.mcp_servers, config.mcp_servers);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), encrypted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn context_budget_migration_preserves_legacy_and_clamps_bounds() {

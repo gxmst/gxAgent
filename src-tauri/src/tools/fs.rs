@@ -47,6 +47,37 @@ fn check_blocked_path(resolved: &str) -> Result<(), String> {
 const MAX_LINE_SLICE_LINES: usize = 1000;
 const MAX_LINE_SLICE_BYTES: usize = 200 * 1024;
 
+// Consume the whole logical line while retaining only the requested prefix.
+async fn read_line_prefix(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    prefix: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<Option<bool>> {
+    use tokio::io::AsyncBufReadExt;
+    prefix.clear();
+    let mut length = 0usize;
+    loop {
+        let bytes = reader.fill_buf().await?;
+        if bytes.is_empty() {
+            return Ok((length > 0).then_some(length > limit));
+        }
+        let newline = bytes.iter().position(|&b| b == b'\n');
+        let count = newline.unwrap_or(bytes.len());
+        length = length.saturating_add(count);
+        // Keep one extra byte to distinguish an exact-limit CRLF line.
+        let retain = count.min((limit + 1).saturating_sub(prefix.len()));
+        prefix.extend_from_slice(&bytes[..retain]);
+        reader.consume(count + usize::from(newline.is_some()));
+        if newline.is_some() {
+            if length == prefix.len() && prefix.last() == Some(&b'\r') {
+                prefix.pop();
+                length -= 1;
+            }
+            return Ok(Some(length > limit));
+        }
+    }
+}
+
 pub(super) async fn run_read_file_with_options(
     path: &str,
     work_dir: &str,
@@ -61,41 +92,60 @@ pub(super) async fn run_read_file_with_options(
         .map_err(|e| format!("Cannot access file: {}", e))?;
 
     if start_line.is_some() || end_line.is_some() || line_numbers {
-        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::io::BufReader;
         let start = start_line.unwrap_or(1).max(1);
         let requested_end = end_line.unwrap_or(usize::MAX).max(start);
         let file = tokio::fs::File::open(&full_path)
             .await
             .map_err(|e| format!("Failed to open file: {}", e))?;
-        let mut reader = BufReader::new(file).lines();
+        let mut reader = BufReader::new(file);
+        let mut prefix = Vec::new();
         let mut collected = Vec::new();
         let mut total_lines = 0usize;
         let mut total_bytes = 0usize;
         let mut actual_end = 0usize;
         let mut capped = false;
 
-        while let Some(line) = reader
-            .next_line()
-            .await
-            .map_err(|e| format!("Failed to read file: {}", e))?
-        {
-            total_lines += 1;
-            if total_lines < start || total_lines > requested_end || capped {
+        loop {
+            let number = total_lines + 1;
+            let wanted = (start..=requested_end).contains(&number) && !capped;
+            let remaining = MAX_LINE_SLICE_BYTES.saturating_sub(total_bytes);
+            let limit = if wanted { remaining } else { 0 };
+            let Some(truncated) = read_line_prefix(&mut reader, &mut prefix, limit)
+                .await
+                .map_err(|e| format!("Failed to read file: {e}"))?
+            else {
+                break;
+            };
+            total_lines = number;
+            if !wanted {
                 continue;
             }
             if collected.len() >= MAX_LINE_SLICE_LINES
-                || total_bytes.saturating_add(line.len()) > MAX_LINE_SLICE_BYTES
+                || (!collected.is_empty() && (truncated || remaining == 0))
             {
                 capped = true;
                 continue;
             }
-            total_bytes += line.len() + 1;
-            actual_end = total_lines;
-            if line_numbers {
-                collected.push(format!("{}: {}", total_lines, line));
+            prefix.truncate(limit);
+            let line = match std::str::from_utf8(&prefix) {
+                Ok(text) => text,
+                Err(e) if truncated && e.error_len().is_none() => {
+                    std::str::from_utf8(&prefix[..e.valid_up_to()]).unwrap()
+                }
+                Err(e) => return Err(format!("Failed to read UTF-8 file: {e}")),
+            };
+            let mut display = if line_numbers {
+                format!("{number}: {line}")
             } else {
-                collected.push(line);
+                line.to_owned()
+            };
+            if truncated {
+                display.push_str(" [line truncated]");
             }
+            total_bytes += prefix.len() + 1;
+            actual_end = number;
+            collected.push(display);
         }
 
         if total_lines == 0 {

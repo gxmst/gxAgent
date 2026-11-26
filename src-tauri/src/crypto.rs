@@ -254,6 +254,10 @@ pub fn encrypt(plaintext: &str) -> String {
         return plaintext.to_string();
     }
 
+    encrypt_value(plaintext)
+}
+
+pub(crate) fn encrypt_value(plaintext: &str) -> String {
     let key = derive_key_v3();
     let cipher = Aes256Gcm::new_from_slice(&key).expect("valid key length");
 

@@ -1211,6 +1211,9 @@ pub async fn remove_git_worktree(
     let root = repository_root(&selected).await?;
     let raw = git_output_raw(&root, &["worktree", "list", "--porcelain"]).await?;
     let target_norm = normalize_comparable_path(&worktree_path);
+    if target_norm == normalize_comparable_path(&root.to_string_lossy()) {
+        return Err("Cannot remove the current worktree".into());
+    }
     let matched = parse_worktree_porcelain(&raw)
         .into_iter()
         .find(|w| !w.is_main && normalize_comparable_path(&w.path) == target_norm)
@@ -1555,6 +1558,18 @@ mod tests {
         assert!(!created.is_main);
         assert!(Path::new(&created.path).join("README.md").is_file());
 
+        let subdir = Path::new(&created.path).join("nested");
+        std::fs::create_dir(&subdir).unwrap();
+        assert!(remove_git_worktree(
+            Some(subdir.to_string_lossy().into_owned()),
+            None,
+            created.path.clone(),
+            Some(true)
+        )
+        .await
+        .unwrap_err()
+        .contains("current"));
+        assert!(Path::new(&created.path).is_dir());
         let listed = list_git_worktrees(Some(dir.to_string_lossy().into_owned()), None)
             .await
             .unwrap();

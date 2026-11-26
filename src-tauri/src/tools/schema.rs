@@ -236,7 +236,7 @@ pub fn get_all_tool_definitions() -> Vec<Value> {
                                     "id": { "type": "string", "description": "Optional short identifier (auto-generated if omitted)." },
                                     "header": { "type": "string", "description": "Optional short category/header label." },
                                     "question": { "type": "string", "description": "The clear question for the user to answer." },
-                                    "is_secret": { "type": "boolean", "description": "Mask input when collecting tokens or secrets." },
+                                    "is_secret": { "type": "boolean", "description": "For credentials, direct the user to the appropriate secure settings and request only a configured/skipped status. Never ask for the secret itself." },
                                     "options": {
                                         "type": "array",
                                         "description": "Optional suggested answer choices.",

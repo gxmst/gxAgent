@@ -71,7 +71,33 @@ async fn git_checkpoint(window: &Window, request_id: &str, work_dir: &str) {
     }
 }
 
+pub(super) async fn confirm_project_hooks(
+    window: &Window,
+    request_id: &str,
+    cancel_rx: &watch::Receiver<bool>,
+    details: String,
+) -> Result<bool, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let rx = register_approval_wait(&id).await;
+    let approval = json!({
+        "source": "hooks",
+        "requestId": request_id,
+        "request_id": id,
+        "tool_calls": [{"id": id, "name": "project_hooks", "arguments": details, "approval_level": "needs_confirmation"}]
+    });
+    if let Err(error) = window.emit("agent-tool-approval-request", approval) {
+        cancel_registered_approval(&id).await;
+        return Err(error.to_string());
+    }
+    let decision = wait_for_registered_approval(&id, rx, cancel_rx).await;
+    cancel_approval_request(window, request_id, &id).await;
+    Ok(decision?
+        .iter()
+        .any(|(call, approved)| call == &id && *approved))
+}
+
 pub(super) struct ToolExecContext<'a> {
+    pub hooks: &'a crate::hooks::HooksConfig,
     pub window: &'a Window,
     pub request_id: &'a str,
     pub config: &'a AppConfig,
@@ -302,16 +328,19 @@ async fn execute_parallel_read_with_steering(
 
 /// Apply the same request-scoped steering interrupt to the multi-turn read-only subagent.
 async fn run_spawn_agent_with_steering(
-    window: &Window,
-    request_id: &str,
+    ctx: &ToolExecContext<'_>,
     args_str: &str,
-    config: &AppConfig,
-    cancel_rx: &watch::Receiver<bool>,
-    steering_rx: &watch::Receiver<bool>,
 ) -> Result<String, String> {
-    let (stop_rx, reason_rx, watcher) = spawn_steering_watcher(cancel_rx, steering_rx);
-    let output =
-        super::subagent::run_spawn_agent(window, request_id, args_str, config, &stop_rx).await;
+    let (stop_rx, reason_rx, watcher) = spawn_steering_watcher(ctx.cancel_rx, ctx.steering_rx);
+    let output = super::subagent::run_spawn_agent(
+        ctx.window,
+        ctx.request_id,
+        args_str,
+        ctx.config,
+        ctx.hooks,
+        &stop_rx,
+    )
+    .await;
     resolve_steering_output(output, reason_rx, watcher).await
 }
 
@@ -330,6 +359,7 @@ async fn run_ask_user_question_with_steering(
         .ok_or_else(|| "ask_user_question requires a non-empty questions array.".to_string())?;
 
     let mut normalized_questions = Vec::new();
+    let mut question_types = HashMap::new();
     for (idx, item) in raw_questions.iter().take(4).enumerate() {
         let prompt = item["question"].as_str().unwrap_or("").trim();
         if prompt.is_empty() {
@@ -348,6 +378,9 @@ async fn run_ask_user_question_with_steering(
             .unwrap_or(&id)
             .to_string();
         let is_secret = item["is_secret"].as_bool().unwrap_or(false);
+        if question_types.insert(id.clone(), is_secret).is_some() || id == "__interrupted" {
+            return Err("Question identifiers must be unique and cannot be reserved.".into());
+        }
         let options = item["options"].as_array().map(|opts| {
             opts.iter()
                 .filter_map(|opt| {
@@ -405,14 +438,36 @@ async fn run_ask_user_question_with_steering(
         Ok(map) if map.contains_key("__interrupted") => {
             Ok(AGENT_STEERING_INTERRUPTED_OUTPUT.to_string())
         }
-        Ok(answers) => {
-            Ok(serde_json::to_string_pretty(&json!({ "answers": answers })).unwrap_or_default())
-        }
+        Ok(answers) => Ok(public_question_result(&question_types, answers)),
         Err(error) => {
             cancel_registered_question(&interaction_id).await;
             Err(error)
         }
     }
+}
+
+fn public_question_result(
+    questions: &HashMap<String, bool>,
+    mut answers: HashMap<String, Vec<String>>,
+) -> String {
+    answers.retain(|id, _| questions.contains_key(id));
+    for (id, secret) in questions {
+        if *secret {
+            let configured = answers
+                .get(id)
+                .is_some_and(|values| values.as_slice() == ["configured"]);
+            answers.insert(
+                id.clone(),
+                vec![if configured {
+                    "Configured separately"
+                } else {
+                    "Skipped"
+                }
+                .to_owned()],
+            );
+        }
+    }
+    json!({ "answers": answers }).to_string()
 }
 
 fn run_read_skill(config: &AppConfig, args_str: &str) -> String {
@@ -430,29 +485,16 @@ async fn run_sequential_tool(
     tc: &AccumulatedToolCall,
     mcp_manager: &mut McpManager,
 ) -> Result<String, String> {
-    if let crate::hooks::PreHookDecision::Block(reason) = crate::hooks::run_pre_tool_hooks(
-        ctx.window,
-        ctx.request_id,
-        &ctx.config.default_work_dir,
-        &tc.name,
-        &tc.arguments,
-    )
-    .await
+    if let crate::hooks::PreHookDecision::Block(reason) = ctx
+        .hooks
+        .run_pre_tool_hooks(ctx.window, ctx.request_id, &tc.name, &tc.arguments)
+        .await
     {
         return Ok(format!("Error: {}", reason));
     }
 
     let mut result = if tc.name == "spawn_agent" {
-        match run_spawn_agent_with_steering(
-            ctx.window,
-            ctx.request_id,
-            &tc.arguments,
-            ctx.config,
-            ctx.cancel_rx,
-            ctx.steering_rx,
-        )
-        .await
-        {
+        match run_spawn_agent_with_steering(ctx, &tc.arguments).await {
             Ok(output) => Ok(output),
             Err(error) if is_agent_cancelled_error(&error) => Err(error),
             Err(error) => Ok(format!("Error: {}", error)),
@@ -479,15 +521,10 @@ async fn run_sequential_tool(
 
     if let Ok(ref mut output) = result {
         if output != AGENT_STEERING_INTERRUPTED_OUTPUT {
-            if let Some(note) = crate::hooks::run_post_tool_hooks(
-                ctx.window,
-                ctx.request_id,
-                &ctx.config.default_work_dir,
-                &tc.name,
-                &tc.arguments,
-                output,
-            )
-            .await
+            if let Some(note) = ctx
+                .hooks
+                .run_post_tool_hooks(ctx.window, ctx.request_id, &tc.name, &tc.arguments, output)
+                .await
             {
                 output.push('\n');
                 output.push_str(&note);
@@ -763,10 +800,7 @@ pub(super) async fn process_tool_calls(
     let mut steering_interrupted = *steering_rx.borrow();
 
     if !parallel_reads.is_empty() && !steering_interrupted {
-        let has_hooks = crate::hooks::load_project_hooks(&config.default_work_dir)
-            .ok()
-            .flatten()
-            .is_some();
+        let has_hooks = !ctx.hooks.pre_tool_use.is_empty() || !ctx.hooks.post_tool_use.is_empty();
         let mut allowed_reads = Vec::new();
         for tc in &parallel_reads {
             emit_request_event(
@@ -781,14 +815,9 @@ pub(super) async fn process_tool_calls(
                 }),
             );
             if has_hooks {
-                if let crate::hooks::PreHookDecision::Block(reason) =
-                    crate::hooks::run_pre_tool_hooks(
-                        window,
-                        request_id,
-                        &config.default_work_dir,
-                        &tc.name,
-                        &tc.arguments,
-                    )
+                if let crate::hooks::PreHookDecision::Block(reason) = ctx
+                    .hooks
+                    .run_pre_tool_hooks(window, request_id, &tc.name, &tc.arguments)
                     .await
                 {
                     let err_output = format!("Error: {}", reason);
@@ -843,15 +872,10 @@ pub(super) async fn process_tool_calls(
                 }
             };
             if has_hooks && output != AGENT_STEERING_INTERRUPTED_OUTPUT {
-                if let Some(note) = crate::hooks::run_post_tool_hooks(
-                    window,
-                    request_id,
-                    &config.default_work_dir,
-                    &tc.name,
-                    &tc.arguments,
-                    &output,
-                )
-                .await
+                if let Some(note) = ctx
+                    .hooks
+                    .run_post_tool_hooks(window, request_id, &tc.name, &tc.arguments, &output)
+                    .await
                 {
                     output.push('\n');
                     output.push_str(&note);
@@ -1164,6 +1188,19 @@ mod execution_tests {
                 .unwrap()
                 .is_object());
         }
+    }
+
+    #[test]
+    fn secret_question_values_never_enter_tool_results() {
+        let kinds = HashMap::from([("token".into(), true), ("name".into(), false)]);
+        let answers = HashMap::from([
+            ("token".into(), vec!["private-value".into()]),
+            ("extra".into(), vec!["private-value".into()]),
+            ("name".into(), vec!["public answer".into()]),
+        ]);
+        let output = public_question_result(&kinds, answers);
+        assert!(!output.contains("private-value"));
+        assert!(output.contains("public answer"));
     }
 
     #[test]

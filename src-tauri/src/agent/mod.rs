@@ -72,6 +72,10 @@ pub async fn start_agent_loop(
     let cancel_rx = register_cancellation(&request_id).await;
     let steering_rx = register_steering_interrupt(&request_id).await;
 
+    let can_read_skill = config.tools_enabled.iter().any(|name| name == "read_skill")
+        && (session_mode != "chat"
+            || (!provider::Wire::from_config(&config).is_ollama()
+                && prompts::configured_max_agent_loops(&config) > 1));
     let result = async {
         await_with_cancel(
             &cancel_rx,
@@ -81,6 +85,7 @@ pub async fn start_agent_loop(
                 &retrieval_query,
                 &mut user_prompt,
                 &mut config,
+                can_read_skill,
             ),
         )
         .await??;
@@ -193,6 +198,11 @@ async fn start_agent_loop_inner(
     steering_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     ensure_not_cancelled(&cancel_rx)?;
+    let hooks =
+        crate::hooks::HooksConfig::for_run(&config.default_work_dir, config.plan_mode, |details| {
+            execution::confirm_project_hooks(&window, &request_id, &cancel_rx, details)
+        })
+        .await?;
     let mut system_prompt = config.system_prompt.clone();
     let outbound_user_prompt =
         prepend_active_role_prompt(&user_prompt, config.role_prompt.as_deref());
@@ -373,7 +383,7 @@ async fn start_agent_loop_inner(
 
             if accumulated.is_empty() {
                 mcp_manager.shutdown().await;
-                crate::hooks::run_stop_hooks(&window, &request_id, &config.default_work_dir).await;
+                hooks.run_stop_hooks(&window, &request_id).await;
                 emit_agent_complete(&window, &request_id, "success");
                 return Ok(());
             }
@@ -383,6 +393,7 @@ async fn start_agent_loop_inner(
             messages.push(assistant_message_with_tool_calls(&content, &accumulated));
 
             let exec_ctx = ToolExecContext {
+                hooks: &hooks,
                 window: &window,
                 request_id: &request_id,
                 config: &config,
@@ -468,7 +479,7 @@ async fn start_agent_loop_inner(
         // No tool calls - conversation complete
         if !has_tool_calls {
             mcp_manager.shutdown().await;
-            crate::hooks::run_stop_hooks(&window, &request_id, &config.default_work_dir).await;
+            hooks.run_stop_hooks(&window, &request_id).await;
             emit_agent_complete(&window, &request_id, "success");
             return Ok(());
         }
@@ -476,7 +487,7 @@ async fn start_agent_loop_inner(
         normalize_tool_calls(&mut accumulated_tool_calls);
         if accumulated_tool_calls.is_empty() {
             mcp_manager.shutdown().await;
-            crate::hooks::run_stop_hooks(&window, &request_id, &config.default_work_dir).await;
+            hooks.run_stop_hooks(&window, &request_id).await;
             emit_agent_complete(&window, &request_id, "success");
             return Ok(());
         }
@@ -489,6 +500,7 @@ async fn start_agent_loop_inner(
 
         // Process tool calls with approval
         let exec_ctx = ToolExecContext {
+            hooks: &hooks,
             window: &window,
             request_id: &request_id,
             config: &config,
@@ -509,7 +521,7 @@ async fn start_agent_loop_inner(
     }
 
     mcp_manager.shutdown().await;
-    crate::hooks::run_stop_hooks(&window, &request_id, &config.default_work_dir).await;
+    hooks.run_stop_hooks(&window, &request_id).await;
     let budget_message = format!(
         "\n\nAgent loop limit reached ({}). I paused here to avoid runaway tool use. Send a follow-up to continue, or increase the limit in settings.",
         max_loops

@@ -79,33 +79,34 @@ pub(super) fn is_safe_url(url: &str) -> bool {
         return false;
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        match ip {
-            IpAddr::V4(ip) => {
-                if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
-                {
-                    return false;
-                }
+    host.parse::<IpAddr>().map(is_public_ip).unwrap_or(true)
+}
+
+pub(super) fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            !(a == 0
+                || a >= 224
+                || v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_documentation()
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 192 && ((b == 0 && c == 0) || (b == 88 && c == 99))))
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(v4.into());
             }
-            IpAddr::V6(ip) => {
-                if ip.is_loopback()
-                    || ip.is_unspecified()
-                    || ip.is_unique_local()
-                    || ip.is_unicast_link_local()
-                    || ip.to_ipv4_mapped().is_some_and(|mapped| {
-                        mapped.is_private()
-                            || mapped.is_loopback()
-                            || mapped.is_link_local()
-                            || mapped.is_unspecified()
-                    })
-                {
-                    return false;
-                }
-            }
+            let [first, second, ..] = v6.segments();
+            (0x2000..0x4000).contains(&first)
+                && !(first == 0x2001 && (second < 0x200 || second == 0xdb8))
+                && first != 0x2002
+                && !(first == 0x3fff && second < 0x1000)
         }
     }
-
-    true
 }
 
 async fn run_tavily_search(query: &str, api_key: &str) -> Result<String, String> {
